@@ -1,0 +1,210 @@
+// Package storetest provides a conformance suite for [objectstore.Store]
+// implementations.
+//
+// The ledger's correctness rests on details that are easy to get subtly wrong
+// in a backend: that Create refuses an existing key instead of overwriting it,
+// that Swap compares versions, and that deleting an absent key is not an error.
+// Every backend runs the same suite so those guarantees are uniform rather than
+// per-backend folklore.
+package storetest
+
+import (
+	"context"
+	"testing"
+
+	"github.com/okdaichi/qumo-ledger/objectstore"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// NewStore returns a fresh, empty store for one test.
+type NewStore func(t *testing.T) objectstore.Store
+
+// Run executes the conformance suite against a backend.
+func Run(t *testing.T, newStore NewStore) {
+	t.Helper()
+
+	t.Run("Get_Missing", func(t *testing.T) {
+		store := newStore(t)
+
+		_, _, err := store.Get(t.Context(), "absent")
+
+		assert.ErrorIs(t, err, objectstore.ErrNotExist)
+	})
+
+	t.Run("Create_ThenGet", func(t *testing.T) {
+		store := newStore(t)
+		payload := []byte("frames")
+
+		version, err := store.Create(t.Context(), "live/cam1/groups/e000001-g00000001", payload)
+		require.NoError(t, err)
+
+		data, got, err := store.Get(t.Context(), "live/cam1/groups/e000001-g00000001")
+		require.NoError(t, err)
+		assert.Equal(t, payload, data)
+		assert.Equal(t, version, got, "Get must report the version Create returned")
+	})
+
+	t.Run("Create_Empty", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Create(t.Context(), "empty", nil)
+		require.NoError(t, err)
+
+		data, _, err := store.Get(t.Context(), "empty")
+		require.NoError(t, err)
+		assert.Empty(t, data)
+	})
+
+	// This is what fences a superseded writer and what refuses a duplicate
+	// append. A backend that overwrites here corrupts tracks silently.
+	t.Run("Create_Existing", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Create(t.Context(), "key", []byte("first"))
+		require.NoError(t, err)
+
+		_, err = store.Create(t.Context(), "key", []byte("second"))
+		assert.ErrorIs(t, err, objectstore.ErrExist)
+
+		data, _, err := store.Get(t.Context(), "key")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("first"), data, "a refused create must leave the original untouched")
+	})
+
+	t.Run("Swap_MatchingVersion", func(t *testing.T) {
+		store := newStore(t)
+
+		version, err := store.Create(t.Context(), "head", []byte("v1"))
+		require.NoError(t, err)
+
+		next, err := store.Swap(t.Context(), "head", []byte("v2"), version)
+		require.NoError(t, err)
+		assert.NotEqual(t, version, next, "a swap must produce a new version")
+
+		data, _, err := store.Get(t.Context(), "head")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("v2"), data)
+	})
+
+	t.Run("Swap_StaleVersion", func(t *testing.T) {
+		store := newStore(t)
+
+		stale, err := store.Create(t.Context(), "head", []byte("v1"))
+		require.NoError(t, err)
+
+		_, err = store.Swap(t.Context(), "head", []byte("v2"), stale)
+		require.NoError(t, err)
+
+		_, err = store.Swap(t.Context(), "head", []byte("v3"), stale)
+		assert.ErrorIs(t, err, objectstore.ErrVersionMismatch)
+
+		data, _, err := store.Get(t.Context(), "head")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("v2"), data, "a rejected swap must not modify the object")
+	})
+
+	t.Run("Swap_AbsentWithNoVersion", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Swap(t.Context(), "head", []byte("v1"), objectstore.NoVersion)
+		require.NoError(t, err, "NoVersion means create-if-absent, which is how head is first published")
+
+		data, _, err := store.Get(t.Context(), "head")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("v1"), data)
+	})
+
+	t.Run("Swap_AbsentWithVersion", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Swap(t.Context(), "head", []byte("v1"), objectstore.Version("bogus"))
+
+		assert.ErrorIs(t, err, objectstore.ErrNotExist)
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Create(t.Context(), "key", []byte("data"))
+		require.NoError(t, err)
+
+		require.NoError(t, store.Delete(t.Context(), "key"))
+
+		_, _, err = store.Get(t.Context(), "key")
+		assert.ErrorIs(t, err, objectstore.ErrNotExist)
+	})
+
+	// Garbage collection retries freely, so deleting twice must be safe.
+	t.Run("Delete_Absent", func(t *testing.T) {
+		store := newStore(t)
+
+		assert.NoError(t, store.Delete(t.Context(), "never-existed"))
+	})
+
+	t.Run("Create_AfterDelete", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Create(t.Context(), "key", []byte("first"))
+		require.NoError(t, err)
+		require.NoError(t, store.Delete(t.Context(), "key"))
+
+		_, err = store.Create(t.Context(), "key", []byte("second"))
+		assert.NoError(t, err, "a deleted key is free again")
+	})
+
+	t.Run("Get_ReturnsIndependentCopy", func(t *testing.T) {
+		store := newStore(t)
+
+		_, err := store.Create(t.Context(), "key", []byte("original"))
+		require.NoError(t, err)
+
+		data, _, err := store.Get(t.Context(), "key")
+		require.NoError(t, err)
+		data[0] = 'X'
+
+		again, _, err := store.Get(t.Context(), "key")
+		require.NoError(t, err)
+		assert.Equal(t, []byte("original"), again, "a caller mutating its copy must not corrupt the store")
+	})
+
+	t.Run("Keys_ByPrefix", func(t *testing.T) {
+		store := newStore(t)
+
+		lister, ok := store.(objectstore.Lister)
+		if !ok {
+			t.Skip("backend does not implement objectstore.Lister")
+		}
+
+		for _, key := range []string{
+			"live/cam1/groups/a",
+			"live/cam1/groups/b",
+			"live/cam1/root.manifest",
+			"live/cam2/groups/a",
+		} {
+			_, err := store.Create(t.Context(), key, []byte("x"))
+			require.NoError(t, err)
+		}
+
+		var found []string
+		for key, err := range lister.Keys(t.Context(), "live/cam1/groups/") {
+			require.NoError(t, err)
+			found = append(found, key)
+		}
+
+		assert.ElementsMatch(t, []string{"live/cam1/groups/a", "live/cam1/groups/b"}, found)
+	})
+
+	t.Run("ContextCancelled", func(t *testing.T) {
+		store := newStore(t)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, _, err := store.Get(ctx, "key")
+		assert.Error(t, err)
+
+		_, err = store.Create(ctx, "key", []byte("x"))
+		assert.Error(t, err)
+	})
+}

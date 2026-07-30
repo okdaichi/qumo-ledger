@@ -1,0 +1,5 @@
+module github.com/okdaichi/qumo-ledger/magefiles
+
+go 1.26.1
+
+require github.com/magefile/mage v1.15.0
