@@ -285,7 +285,14 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 		}
 	}
 
-	w.publishHeadLocked(ctx, meta.GroupRef)
+	if err := w.publishHeadLocked(ctx, meta.GroupRef); err != nil {
+		// not actionable: head is a discovery cache. A reader that finds it
+		// stale probes forward and catches up, and one that finds it missing
+		// starts from the root. Failing an append that is already durably
+		// committed would be the worse outcome, so this is reported for
+		// operators and otherwise dropped.
+		w.logger.Debug("ledger: could not publish head", "track", w.track, "error", err)
+	}
 
 	if w.openBytes >= w.sealThreshold {
 		if err := w.sealLocked(ctx); err != nil {
@@ -343,7 +350,7 @@ func (w *Writer) sealLocked(ctx context.Context) error {
 
 	firstDelta, lastDelta := w.root.OpenFrom, w.nextDelta-1
 	if err := w.updateRootLocked(ctx, func(root *RootManifest) {
-		root.Sealed = append(root.Sealed, sealed.Summarize(key))
+		root.Sealed = append(root.Sealed, sealed.summarize(key))
 		root.OpenFrom = lastDelta + 1
 	}); err != nil {
 		return fmt.Errorf("ledger: publish sealed manifest %d: %w", seq, err)
@@ -387,12 +394,14 @@ func (w *Writer) updateRootLocked(ctx context.Context, mutate func(*RootManifest
 
 // publishHeadLocked advances the head pointer.
 //
-// Failures are logged and swallowed. head is a discovery cache: a reader that
-// finds it stale probes forward and catches up, and a reader that finds it
-// missing starts from the root. Nothing about correctness depends on it, so
-// failing an append that is already durably committed would be the worse
-// outcome.
-func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) {
+// head is a discovery cache: a reader that finds it stale probes forward and
+// catches up, and a reader that finds it missing starts from the root. Nothing
+// about correctness depends on it.
+//
+// It returns any error rather than handling it, leaving the decision to the
+// caller — which lets the swallow be explicit and keeps the failure visible to
+// tests.
+func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) error {
 	head := Head{
 		Version:   ManifestVersion,
 		Delta:     w.nextDelta - 1,
@@ -402,8 +411,7 @@ func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) {
 
 	data, err := encodeManifest(head)
 	if err != nil {
-		w.logger.Debug("ledger: could not encode head", "track", w.track, "error", err)
-		return
+		return err
 	}
 
 	version, err := w.store.Swap(ctx, HeadKey(w.track), data, w.headVersion)
@@ -417,9 +425,10 @@ func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) {
 		}
 	}
 	if err != nil {
-		w.logger.Debug("ledger: could not publish head", "track", w.track, "error", err)
-		return
+		return fmt.Errorf("ledger: publish head of %s: %w", w.track, err)
 	}
 
 	w.headVersion = version
+
+	return nil
 }

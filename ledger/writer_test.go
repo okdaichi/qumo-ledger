@@ -289,11 +289,13 @@ func TestOpenWriter_StaleHead(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	// Rewind head to point at the very first delta.
 	stale, err := encodeManifest(Head{Version: ManifestVersion, Delta: 0})
 	require.NoError(t, err)
-	_, _, err = store.Get(t.Context(), HeadKey(testTrack))
+
+	_, currentVersion, err := store.Get(t.Context(), HeadKey(testTrack))
 	require.NoError(t, err)
-	_, currentVersion, _ := store.Get(t.Context(), HeadKey(testTrack))
+
 	_, err = store.Swap(t.Context(), HeadKey(testTrack), stale, currentVersion)
 	require.NoError(t, err)
 
@@ -325,6 +327,25 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	assert.NoError(t, err)
 	_, _, err = store.Get(t.Context(), meta.Object)
 	assert.NoError(t, err)
+}
+
+// publishHeadLocked surfaces its error rather than handling it, which is what
+// makes the swallow in AppendGroup an explicit decision instead of a hidden one.
+// Called directly here without the lock, which is safe in a single-goroutine
+// test.
+func TestWriter_publishHeadLocked(t *testing.T) {
+	headFailure := errors.New("head unavailable")
+	store := &FakeStore{SwapErr: map[string]error{HeadKey(testTrack): headFailure}}
+
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	require.NoError(t, err)
+
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
+	require.NoError(t, err)
+
+	err = w.publishHeadLocked(t.Context(), GroupRef{Epoch: 1, Sequence: 0})
+
+	assert.ErrorIs(t, err, headFailure)
 }
 
 // The payload is written before the manifest, so a crash in between leaves an

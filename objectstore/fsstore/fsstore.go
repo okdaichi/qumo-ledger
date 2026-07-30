@@ -254,6 +254,7 @@ func (s *Store) resolve(key string) (string, error) {
 // identical without a sidecar file or extended attributes.
 func version(data []byte) objectstore.Version {
 	h := fnv.New64a()
+	// not actionable: hash.Hash.Write is documented never to return an error.
 	_, _ = h.Write(data)
 
 	return objectstore.Version(strconv.FormatUint(h.Sum64(), 16))

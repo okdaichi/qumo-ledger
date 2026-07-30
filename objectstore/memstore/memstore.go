@@ -115,6 +115,10 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // ordering, since real backends do not guarantee it.
 func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		// Snapshot the key set under a deliberately short critical section
+		// rather than deferring the unlock: yield runs caller code, which may
+		// call back into the store, and holding the lock across it would
+		// deadlock on the first write.
 		s.mu.RLock()
 		keys := slices.Sorted(maps.Keys(s.objects))
 		s.mu.RUnlock()

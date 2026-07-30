@@ -151,9 +151,12 @@ type Head struct {
 	UpdatedAt int64 `json:"updatedAt"`
 }
 
-// Summarize reduces a sealed manifest to the reference stored in the root.
+// summarize reduces a sealed manifest to the reference stored in the root.
 // It returns the zero value when the manifest has no groups.
-func (m SealedManifest) Summarize(key string) SealedRef {
+//
+// Only the writer folds sealed manifests, so this stays unexported; readers
+// consume the resulting [SealedRef] values from [RootManifest.Sealed].
+func (m SealedManifest) summarize(key string) SealedRef {
 	ref := SealedRef{
 		Key:        key,
 		FirstDelta: m.FirstDelta,

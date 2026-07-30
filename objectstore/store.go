@@ -80,5 +80,6 @@ type Lister interface {
 // authorization service can hand clients a URL and step out of the data path,
 // preserving the object-store-only read invariant for private deployments.
 type Presigner interface {
+	// Presign returns a URL that grants read access to key for ttl.
 	Presign(ctx context.Context, key string, ttl time.Duration) (string, error)
 }

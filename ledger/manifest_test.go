@@ -45,7 +45,7 @@ func TestGroupKey(t *testing.T) {
 	)
 }
 
-func TestSealedManifest_Summarize(t *testing.T) {
+func TestSealedManifest_summarize(t *testing.T) {
 	manifest := SealedManifest{
 		FirstDelta: 4,
 		LastDelta:  6,
@@ -56,7 +56,7 @@ func TestSealedManifest_Summarize(t *testing.T) {
 		},
 	}
 
-	ref := manifest.Summarize("sealed-000001.manifest")
+	ref := manifest.summarize("sealed-000001.manifest")
 
 	assert.Equal(t, "sealed-000001.manifest", ref.Key)
 	assert.Equal(t, uint64(4), ref.FirstDelta)
@@ -73,7 +73,7 @@ func TestSealedManifest_Summarize(t *testing.T) {
 // Commit order is not time order: a producer may backfill, and an epoch change
 // resets media time outright. The summary must widen to cover every group or a
 // range search will step over data that is really there.
-func TestSealedManifest_Summarize_OutOfOrderGroups(t *testing.T) {
+func TestSealedManifest_summarize_OutOfOrderGroups(t *testing.T) {
 	manifest := SealedManifest{
 		Groups: []GroupMeta{
 			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 500, T1: 600, W0: 5000, W1: 6000},
@@ -82,7 +82,7 @@ func TestSealedManifest_Summarize_OutOfOrderGroups(t *testing.T) {
 		},
 	}
 
-	ref := manifest.Summarize("k")
+	ref := manifest.summarize("k")
 
 	assert.Equal(t, int64(100), ref.T0, "the summary must reach the earliest group, not the first one committed")
 	assert.Equal(t, int64(1000), ref.T1)
@@ -90,8 +90,8 @@ func TestSealedManifest_Summarize_OutOfOrderGroups(t *testing.T) {
 	assert.Equal(t, int64(10000), ref.W1)
 }
 
-func TestSealedManifest_Summarize_Empty(t *testing.T) {
-	ref := SealedManifest{FirstDelta: 1, LastDelta: 1}.Summarize("k")
+func TestSealedManifest_summarize_Empty(t *testing.T) {
+	ref := SealedManifest{FirstDelta: 1, LastDelta: 1}.summarize("k")
 
 	assert.Equal(t, "k", ref.Key)
 	assert.Equal(t, 0, ref.Groups)
