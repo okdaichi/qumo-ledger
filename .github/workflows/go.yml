@@ -1,0 +1,120 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Go
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    # Only run the full suite for PRs that touch Go code so we don't pay
+    # for race/windows jobs on docs-only changes.
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "magefiles/**"
+      - ".github/workflows/go.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Test with coverage
+        # Scope to library packages (ledger + objectstore) so cross-package
+        # execution is attributed. cmd/ and internal/version are excluded —
+        # they aren't unit-tested, so including them reads as uncovered and
+        # noises up codecov/patch without flagging real gaps.
+        run: go test -coverprofile=coverage.out -covermode=atomic -coverpkg=./ledger/...,./objectstore/... ./ledger/... ./objectstore/...
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          flags: go
+          name: go-coverage
+          fail_ci_if_error: false
+          verbose: true
+
+  # Race detection requires CGO + a C compiler (gcc). The ubuntu runner has
+  # gcc; local dev machines without gcc cannot run -race. We isolate it in
+  # its own job so the rest of CI is unaffected by CGO_ENABLED.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Test with -race
+        env:
+          # -race needs CGO and a C compiler; ubuntu-latest ships gcc.
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 -timeout=10m ./...
+
+  # fsstore maps object keys onto filesystem paths, and rename semantics, path
+  # separators, and O_EXCL behaviour genuinely differ on Windows. The storage
+  # layer is the whole product here, so it is verified on both platforms.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Test
+        run: go test -count=1 ./...
+
+  # The repo carries two modules: the library at the root and magefiles, which
+  # is separate precisely so build tooling never becomes a library dependency.
+  # Both are verified, and go.mod is checked for drift.
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Verify gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal ./ledger ./objectstore)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify magefiles module builds
+        run: go vet -tags mage ./...
+        working-directory: magefiles
