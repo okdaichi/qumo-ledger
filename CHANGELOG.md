@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] - unreleased
+
 First release: an object-store-native store for temporal data — video, audio,
 logs, sensor readings — where the manifest is the source of truth and the
 payload is immutable objects. It takes the append-only ordered log from Kafka
