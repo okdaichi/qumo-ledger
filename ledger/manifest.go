@@ -15,8 +15,12 @@ const ManifestVersion = 1
 // worth more during development than the bytes a binary encoding would save.
 // The Version field is what allows that decision to be revisited.
 
-// Object key layout. These functions are the single place the layout is
+// Object key layout. The functions below are the single place the layout is
 // defined; nothing else in the package builds a key by hand.
+//
+// They are unexported: a Go consumer reaches a track through [OpenReader], and
+// tooling written against the raw store works from the layout documented in
+// docs/ARCHITECTURE.md rather than from this package.
 const (
 	rootObject   = "root.manifest"
 	headObject   = "delta/head"
@@ -25,36 +29,35 @@ const (
 	groupPrefix  = "groups/"
 )
 
-// RootKey returns the key of a track's root manifest.
-func RootKey(track TrackPath) string {
+// rootKey returns the key of a track's root manifest.
+func rootKey(track TrackPath) string {
 	return string(track) + "/" + rootObject
 }
 
-// HeadKey returns the key of a track's head pointer — the only mutable object
+// headKey returns the key of a track's head pointer — the only mutable object
 // the ledger writes.
-func HeadKey(track TrackPath) string {
+func headKey(track TrackPath) string {
 	return string(track) + "/" + headObject
 }
 
-// DeltaKey returns the key of the nth delta manifest in the open region.
+// deltaKey returns the key of the nth delta manifest in the open region.
 // Delta numbering is assigned by the ledger and is contiguous, which is what
 // lets a reader probe forward without listing.
-func DeltaKey(track TrackPath, n uint64) string {
+func deltaKey(track TrackPath, n uint64) string {
 	return fmt.Sprintf("%s/%s%08d.manifest", track, openPrefix, n)
 }
 
-// SealedKey returns the key of the nth sealed manifest.
-func SealedKey(track TrackPath, n uint64) string {
+// sealedKey returns the key of the nth sealed manifest.
+func sealedKey(track TrackPath, n uint64) string {
 	return fmt.Sprintf("%s/%s%06d.manifest", track, sealedPrefix, n)
 }
 
-// GroupKey returns the storage key of a group's payload.
+// groupKey returns the storage key of a group's payload.
 //
-// Readers should take the key from [GroupMeta.Object] rather than calling this,
-// because producer sequences are gappy and a derived key may name an object
-// that was never written. It is exported for writers and for tooling that
-// needs to reason about layout.
-func GroupKey(track TrackPath, ref GroupRef) string {
+// Only the writer calls this. Readers take the key from [GroupMeta.Object]
+// instead, because producer sequences are gappy and a derived key may name an
+// object that was never written.
+func groupKey(track TrackPath, ref GroupRef) string {
 	return string(track) + "/" + groupPrefix + ref.String()
 }
 

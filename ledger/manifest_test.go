@@ -8,11 +8,11 @@ import (
 )
 
 func TestRootKey(t *testing.T) {
-	assert.Equal(t, "live/cam1/video/root.manifest", RootKey("live/cam1/video"))
+	assert.Equal(t, "live/cam1/video/root.manifest", rootKey("live/cam1/video"))
 }
 
 func TestHeadKey(t *testing.T) {
-	assert.Equal(t, "live/cam1/video/delta/head", HeadKey("live/cam1/video"))
+	assert.Equal(t, "live/cam1/video/delta/head", headKey("live/cam1/video"))
 }
 
 func TestDeltaKey(t *testing.T) {
@@ -29,19 +29,19 @@ func TestDeltaKey(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, DeltaKey("live/cam1/video", tt.n))
+			assert.Equal(t, tt.expected, deltaKey("live/cam1/video", tt.n))
 		})
 	}
 }
 
 func TestSealedKey(t *testing.T) {
-	assert.Equal(t, "live/cam1/video/delta/sealed-000001.manifest", SealedKey("live/cam1/video", 1))
+	assert.Equal(t, "live/cam1/video/delta/sealed-000001.manifest", sealedKey("live/cam1/video", 1))
 }
 
 func TestGroupKey(t *testing.T) {
 	assert.Equal(t,
 		"live/cam1/video/groups/e000001-g00000042",
-		GroupKey("live/cam1/video", GroupRef{Epoch: 1, Sequence: 42}),
+		groupKey("live/cam1/video", GroupRef{Epoch: 1, Sequence: 42}),
 	)
 }
 

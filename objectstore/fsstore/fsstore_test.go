@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
 	"github.com/okdaichi/qumo-ledger/objectstore/fsstore"
 	"github.com/okdaichi/qumo-ledger/objectstore/storetest"
 	"github.com/stretchr/testify/assert"
@@ -13,7 +12,16 @@ import (
 )
 
 func TestStore_Conformance(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) objectstore.Store {
+	storetest.Run(t, func(t *testing.T) *fsstore.Store {
+		store, err := fsstore.New(t.TempDir())
+		require.NoError(t, err)
+
+		return store
+	})
+}
+
+func TestStore_ListerConformance(t *testing.T) {
+	storetest.RunLister(t, func(t *testing.T) *fsstore.Store {
 		store, err := fsstore.New(t.TempDir())
 		require.NoError(t, err)
 

@@ -12,7 +12,10 @@ import (
 
 const testTrack TrackPath = "live/cam1/video"
 
-func testConfig() TrackConfig {
+// testConfig is a video track at the usual 90 kHz timescale.
+func testConfig(tb testing.TB) TrackConfig {
+	tb.Helper()
+
 	return TrackConfig{
 		Timescale:  90000,
 		TimeSource: TimeSourceFrame,
@@ -45,7 +48,7 @@ func newTestWriter(tb testing.TB, opts ...WriterOption) (*Writer, *memstore.Stor
 	tb.Helper()
 
 	store := memstore.New()
-	w, err := CreateTrack(tb.Context(), store, testTrack, testConfig(), opts...)
+	w, err := CreateTrack(tb.Context(), store, testTrack, testConfig(tb), opts...)
 	require.NoError(tb, err)
 
 	return w, store
@@ -54,7 +57,7 @@ func newTestWriter(tb testing.TB, opts ...WriterOption) (*Writer, *memstore.Stor
 func TestCreateTrack(t *testing.T) {
 	store := memstore.New()
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	root := w.Root()
@@ -66,17 +69,17 @@ func TestCreateTrack(t *testing.T) {
 	assert.Equal(t, uint64(0), root.OpenFrom)
 	assert.Empty(t, root.Sealed)
 
-	_, _, err = store.Get(t.Context(), RootKey(testTrack))
+	_, _, err = store.Get(t.Context(), rootKey(testTrack))
 	assert.NoError(t, err)
 }
 
 func TestCreateTrack_AlreadyExists(t *testing.T) {
 	store := memstore.New()
 
-	_, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	_, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	require.NoError(t, err)
 
-	_, err = CreateTrack(t.Context(), store, testTrack, testConfig())
+	_, err = CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	assert.ErrorIs(t, err, ErrTrackExists)
 }
 
@@ -86,7 +89,7 @@ func TestCreateTrack_InvalidInput(t *testing.T) {
 		config  TrackConfig
 		wantErr error
 	}{
-		"bad path":   {track: "/live/cam1", config: testConfig(), wantErr: ErrInvalidTrackPath},
+		"bad path":   {track: "/live/cam1", config: testConfig(t), wantErr: ErrInvalidTrackPath},
 		"bad config": {track: testTrack, config: TrackConfig{}, wantErr: ErrInvalidGroup},
 	}
 
@@ -105,14 +108,14 @@ func TestWriter_AppendGroup(t *testing.T) {
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), payload)
 	require.NoError(t, err)
 
-	assert.Equal(t, GroupKey(testTrack, GroupRef{Epoch: 1, Sequence: 0}), meta.Object)
+	assert.Equal(t, groupKey(testTrack, GroupRef{Epoch: 1, Sequence: 0}), meta.Object)
 	assert.Equal(t, int64(len(payload)), meta.Size)
 
 	stored, _, err := store.Get(t.Context(), meta.Object)
 	require.NoError(t, err)
 	assert.Equal(t, payload, stored)
 
-	data, _, err := store.Get(t.Context(), DeltaKey(testTrack, 0))
+	data, _, err := store.Get(t.Context(), deltaKey(testTrack, 0))
 	require.NoError(t, err)
 
 	delta, err := decodeManifest(data, func(d DeltaManifest) int { return d.Version })
@@ -216,7 +219,7 @@ func TestWriter_Seal(t *testing.T) {
 
 	// The deltas the sealed manifest replaced are redundant and reclaimed.
 	for n := range uint64(3) {
-		_, _, err := store.Get(t.Context(), DeltaKey(testTrack, n))
+		_, _, err := store.Get(t.Context(), deltaKey(testTrack, n))
 		assert.ErrorIs(t, err, objectstore.ErrNotExist, "delta %d should have been reclaimed", n)
 	}
 }
@@ -258,7 +261,7 @@ func TestOpenWriter(t *testing.T) {
 	_, err = reopened.AppendGroup(t.Context(), testGroup(t, 2), []byte("payload"))
 	require.NoError(t, err)
 
-	_, _, err = store.Get(t.Context(), DeltaKey(testTrack, 2))
+	_, _, err = store.Get(t.Context(), deltaKey(testTrack, 2))
 	assert.NoError(t, err, "the reopened writer must continue the delta sequence, not restart it")
 }
 
@@ -271,7 +274,7 @@ func TestOpenWriter_WithoutHead(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, store.Delete(t.Context(), HeadKey(testTrack)))
+	require.NoError(t, store.Delete(t.Context(), headKey(testTrack)))
 
 	reopened, err := OpenWriter(t.Context(), store, testTrack)
 	require.NoError(t, err)
@@ -293,10 +296,10 @@ func TestOpenWriter_StaleHead(t *testing.T) {
 	stale, err := encodeManifest(Head{Version: ManifestVersion, Delta: 0})
 	require.NoError(t, err)
 
-	_, currentVersion, err := store.Get(t.Context(), HeadKey(testTrack))
+	_, currentVersion, err := store.Get(t.Context(), headKey(testTrack))
 	require.NoError(t, err)
 
-	_, err = store.Swap(t.Context(), HeadKey(testTrack), stale, currentVersion)
+	_, err = store.Swap(t.Context(), headKey(testTrack), stale, currentVersion)
 	require.NoError(t, err)
 
 	reopened, err := OpenWriter(t.Context(), store, testTrack)
@@ -315,15 +318,15 @@ func TestOpenWriter_TrackNotFound(t *testing.T) {
 // group committed and the call successful.
 func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	store := &FakeStore{SwapErr: map[string]error{HeadKey(testTrack): headFailure}}
+	store := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err, "head is a discovery cache; failing to publish it must not fail a durable commit")
 
-	_, _, err = store.Get(t.Context(), DeltaKey(testTrack, 0))
+	_, _, err = store.Get(t.Context(), deltaKey(testTrack, 0))
 	assert.NoError(t, err)
 	_, _, err = store.Get(t.Context(), meta.Object)
 	assert.NoError(t, err)
@@ -335,9 +338,9 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 // test.
 func TestWriter_publishHeadLocked(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	store := &FakeStore{SwapErr: map[string]error{HeadKey(testTrack): headFailure}}
+	store := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -354,14 +357,14 @@ func TestWriter_publishHeadLocked(t *testing.T) {
 func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
 	store := &FakeStore{}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig())
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
 	payloadIndex := indexOf(store.Creates, meta.Object)
-	deltaIndex := indexOf(store.Creates, DeltaKey(testTrack, 0))
+	deltaIndex := indexOf(store.Creates, deltaKey(testTrack, 0))
 
 	require.NotEqual(t, -1, payloadIndex)
 	require.NotEqual(t, -1, deltaIndex)

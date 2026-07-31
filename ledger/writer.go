@@ -116,7 +116,7 @@ func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, 
 		return nil, err
 	}
 
-	version, err := store.Create(ctx, RootKey(track), data)
+	version, err := store.Create(ctx, rootKey(track), data)
 	if err != nil {
 		if errors.Is(err, objectstore.ErrExist) {
 			return nil, fmt.Errorf("%w: %s", ErrTrackExists, track)
@@ -161,7 +161,7 @@ func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, o
 
 	// Replay the open region so the seal threshold and group rows are accurate.
 	for n := root.OpenFrom; ; n++ {
-		data, _, err := store.Get(ctx, DeltaKey(track, n))
+		data, _, err := store.Get(ctx, deltaKey(track, n))
 		if errors.Is(err, objectstore.ErrNotExist) {
 			if n < from {
 				// A gap below the head pointer means deltas were lost, which
@@ -243,7 +243,7 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 		meta.W0, meta.W1 = now, now
 	}
 
-	meta.Object = GroupKey(w.track, meta.GroupRef)
+	meta.Object = groupKey(w.track, meta.GroupRef)
 	meta.Size = int64(len(payload))
 
 	if _, err := w.store.Create(ctx, meta.Object, payload); err != nil {
@@ -266,7 +266,7 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	}
 
 	// This create is the commit point.
-	if _, err := w.store.Create(ctx, DeltaKey(w.track, w.nextDelta), data); err != nil {
+	if _, err := w.store.Create(ctx, deltaKey(w.track, w.nextDelta), data); err != nil {
 		if errors.Is(err, objectstore.ErrExist) {
 			// Another writer claimed this delta number. Immutability turned a
 			// silent split-brain into a clean failure.
@@ -327,7 +327,7 @@ func (w *Writer) sealLocked(ctx context.Context) error {
 	}
 
 	seq := uint64(len(w.root.Sealed)) + 1
-	key := SealedKey(w.track, seq)
+	key := sealedKey(w.track, seq)
 
 	sealed := SealedManifest{
 		Version:    ManifestVersion,
@@ -362,7 +362,7 @@ func (w *Writer) sealLocked(ctx context.Context) error {
 	// Reclaiming the superseded deltas is best-effort: they are now redundant
 	// rather than harmful, and a failure here must not fail the seal.
 	for n := firstDelta; n <= lastDelta; n++ {
-		if err := w.store.Delete(ctx, DeltaKey(w.track, n)); err != nil {
+		if err := w.store.Delete(ctx, deltaKey(w.track, n)); err != nil {
 			w.logger.Debug("ledger: could not reclaim sealed delta",
 				"track", w.track, "delta", n, "error", err)
 		}
@@ -382,7 +382,7 @@ func (w *Writer) updateRootLocked(ctx context.Context, mutate func(*RootManifest
 		return err
 	}
 
-	version, err := w.store.Swap(ctx, RootKey(w.track), data, w.rootVersion)
+	version, err := w.store.Swap(ctx, rootKey(w.track), data, w.rootVersion)
 	if err != nil {
 		return fmt.Errorf("ledger: update root of %s: %w", w.track, err)
 	}
@@ -414,14 +414,14 @@ func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) error {
 		return err
 	}
 
-	version, err := w.store.Swap(ctx, HeadKey(w.track), data, w.headVersion)
+	version, err := w.store.Swap(ctx, headKey(w.track), data, w.headVersion)
 	if errors.Is(err, objectstore.ErrVersionMismatch) || errors.Is(err, objectstore.ErrNotExist) {
 		// Someone else wrote head, or it vanished. Re-read and try once more;
 		// beyond that, let the next append carry it forward.
 		if _, current, getErr := fetchHead(ctx, w.store, w.track); getErr == nil {
-			version, err = w.store.Swap(ctx, HeadKey(w.track), data, current)
+			version, err = w.store.Swap(ctx, headKey(w.track), data, current)
 		} else if errors.Is(getErr, objectstore.ErrNotExist) {
-			version, err = w.store.Swap(ctx, HeadKey(w.track), data, objectstore.NoVersion)
+			version, err = w.store.Swap(ctx, headKey(w.track), data, objectstore.NoVersion)
 		}
 	}
 	if err != nil {

@@ -6,6 +6,10 @@
 // that Swap compares versions, and that deleting an absent key is not an error.
 // Every backend runs the same suite so those guarantees are uniform rather than
 // per-backend folklore.
+//
+// [Run] is generic over the backend's concrete type rather than taking a boxed
+// [objectstore.Store], so each backend instantiates its own copy of the suite
+// and the assertions run against the concrete implementation.
 package storetest
 
 import (
@@ -17,11 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// NewStore returns a fresh, empty store for one test.
-type NewStore func(t *testing.T) objectstore.Store
-
-// Run executes the conformance suite against a backend.
-func Run(t *testing.T, newStore NewStore) {
+// Run executes the conformance suite against a backend. newStore must return a
+// fresh, empty store for each call.
+func Run[T objectstore.Store](t *testing.T, newStore func(t *testing.T) T) {
 	t.Helper()
 
 	t.Run("Get_Missing", func(t *testing.T) {
@@ -168,13 +170,34 @@ func Run(t *testing.T, newStore NewStore) {
 		assert.Equal(t, []byte("original"), again, "a caller mutating its copy must not corrupt the store")
 	})
 
-	t.Run("Keys_ByPrefix", func(t *testing.T) {
+	t.Run("ContextCancelled", func(t *testing.T) {
 		store := newStore(t)
 
-		lister, ok := store.(objectstore.Lister)
-		if !ok {
-			t.Skip("backend does not implement objectstore.Lister")
-		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, _, err := store.Get(ctx, "key")
+		assert.Error(t, err)
+
+		_, err = store.Create(ctx, "key", []byte("x"))
+		assert.Error(t, err)
+	})
+}
+
+// ListerStore is the constraint for backends that also enumerate keys. Listing
+// is optional because the read path never lists — only garbage collection does.
+type ListerStore interface {
+	objectstore.Store
+	objectstore.Lister
+}
+
+// RunLister executes the enumeration conformance suite. Backends that implement
+// [objectstore.Lister] call it alongside [Run]; the rest simply do not.
+func RunLister[T ListerStore](t *testing.T, newStore func(t *testing.T) T) {
+	t.Helper()
+
+	t.Run("Keys_ByPrefix", func(t *testing.T) {
+		store := newStore(t)
 
 		for _, key := range []string{
 			"live/cam1/groups/a",
@@ -187,7 +210,7 @@ func Run(t *testing.T, newStore NewStore) {
 		}
 
 		var found []string
-		for key, err := range lister.Keys(t.Context(), "live/cam1/groups/") {
+		for key, err := range store.Keys(t.Context(), "live/cam1/groups/") {
 			require.NoError(t, err)
 			found = append(found, key)
 		}
@@ -195,16 +218,18 @@ func Run(t *testing.T, newStore NewStore) {
 		assert.ElementsMatch(t, []string{"live/cam1/groups/a", "live/cam1/groups/b"}, found)
 	})
 
-	t.Run("ContextCancelled", func(t *testing.T) {
+	t.Run("Keys_NoMatches", func(t *testing.T) {
 		store := newStore(t)
 
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
+		_, err := store.Create(t.Context(), "live/cam1/root.manifest", []byte("x"))
+		require.NoError(t, err)
 
-		_, _, err := store.Get(ctx, "key")
-		assert.Error(t, err)
+		var found []string
+		for key, err := range store.Keys(t.Context(), "no/such/prefix/") {
+			require.NoError(t, err)
+			found = append(found, key)
+		}
 
-		_, err = store.Create(ctx, "key", []byte("x"))
-		assert.Error(t, err)
+		assert.Empty(t, found)
 	})
 }

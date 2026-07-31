@@ -90,7 +90,7 @@ func (r *Reader) Head(ctx context.Context) (Head, error) {
 // exist yet. Absence is the normal signal that a reader has caught up with the
 // writer, not a failure.
 func (r *Reader) Delta(ctx context.Context, n uint64) (DeltaManifest, error) {
-	data, _, err := r.store.Get(ctx, DeltaKey(r.track, n))
+	data, _, err := r.store.Get(ctx, deltaKey(r.track, n))
 	if err != nil {
 		if errors.Is(err, objectstore.ErrNotExist) {
 			return DeltaManifest{}, fmt.Errorf("%w: %s delta %d", ErrNotCommitted, r.track, n)
@@ -271,7 +271,7 @@ func (r *Reader) seek(ctx context.Context, covers func(SealedRef) bool, matches 
 }
 
 func fetchRoot(ctx context.Context, store objectstore.Store, track TrackPath) (RootManifest, objectstore.Version, error) {
-	data, version, err := store.Get(ctx, RootKey(track))
+	data, version, err := store.Get(ctx, rootKey(track))
 	if err != nil {
 		if errors.Is(err, objectstore.ErrNotExist) {
 			return RootManifest{}, objectstore.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
@@ -288,7 +288,7 @@ func fetchRoot(ctx context.Context, store objectstore.Store, track TrackPath) (R
 }
 
 func fetchHead(ctx context.Context, store objectstore.Store, track TrackPath) (Head, objectstore.Version, error) {
-	data, version, err := store.Get(ctx, HeadKey(track))
+	data, version, err := store.Get(ctx, headKey(track))
 	if err != nil {
 		return Head{}, objectstore.NoVersion, err
 	}
