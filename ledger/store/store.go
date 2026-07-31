@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"iter"
-	"time"
 )
 
 // Sentinel errors returned by every backend. Callers match with errors.Is, so
@@ -22,9 +21,6 @@ var (
 	// ErrVersionMismatch reports that Swap found a version other than the one
 	// the caller expected, meaning someone else wrote first.
 	ErrVersionMismatch = errors.New("store: version mismatch")
-
-	// ErrUnsupported reports that a backend cannot perform the operation.
-	ErrUnsupported = errors.New("store: operation not supported")
 )
 
 // Version identifies one revision of an object, mapping onto an S3 ETag, a GCS
@@ -57,8 +53,9 @@ type Store interface {
 	// expect, returning ErrVersionMismatch otherwise. Pass NoVersion to
 	// require that the object be absent.
 	//
-	// Only the head pointer needs this. Backends that cannot implement
-	// compare-and-swap may return ErrUnsupported and remain usable for reads.
+	// Only the head pointer needs this. Every store the ledger targets can
+	// provide it — S3 conditional writes, GCS generation preconditions, Azure
+	// ETags, a local rename — so it is required rather than optional.
 	Swap(ctx context.Context, key string, data []byte, expect Version) (Version, error)
 
 	// Delete removes the object under key. Deleting an absent key is not an
@@ -72,14 +69,4 @@ type Lister interface {
 	// Keys iterates every key under prefix in unspecified order. Iteration
 	// stops at the first error yielded.
 	Keys(ctx context.Context, prefix string) iter.Seq2[string, error]
-}
-
-// Presigner mints a time-limited URL granting direct read access to an object.
-//
-// The ledger itself never calls this. It is here so that an external
-// authorization service can hand clients a URL and step out of the data path,
-// preserving the object-store-only read invariant for private deployments.
-type Presigner interface {
-	// Presign returns a URL that grants read access to key for ttl.
-	Presign(ctx context.Context, key string, ttl time.Duration) (string, error)
 }

@@ -196,7 +196,9 @@ running anywhere. The format is the product.
 **Consequence for authorization.** It is deliberately not the ledger's job. An
 external service authorizes access and mints scoped credentials or signed URLs;
 clients keep reading objects directly, and the core never sees a principal.
-`store.Presigner` exists so that service can delegate rather than proxy.
+That service holds a backend of its own, so it declares whatever presigning
+interface it needs where it consumes one — this package does not guess the shape
+in advance.
 
 **Consequence for notification.** Object stores do not push, so following a
 track means polling — probe forward by deterministic key. A deployment wanting
@@ -230,5 +232,5 @@ Named so they are choices rather than oversights.
 | **Frame index footers** | Sealed-only writes make a per-group frame index *possible*, unlike live systems. Skipped so payloads stay byte-identical to the MoQT group stream, which keeps egress a zero-transform read. |
 | **HLS / DASH / MSF renderers** | The manifest carries what they need — `epoch` maps to `EXT-X-DISCONTINUITY`, the wallclock index to `EXT-X-PROGRAM-DATE-TIME`. |
 | **MoQT adapter** | Belongs in a `moqtstore` package; the only place that parses frames. |
-| **S3 backend** | The interface is deliberately shaped around what S3 offers: conditional create, conditional overwrite, presigning. |
+| **S3 backend** | The interface is deliberately shaped around what S3 offers: conditional create and conditional overwrite. |
 | **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. `ManifestVersion` is what lets this be revisited. |

@@ -121,7 +121,7 @@ reader would.
 | | |
 |---|---|
 | `ledger` | The core. Depends on no transport and no cloud SDK. |
-| `ledger/store` | The storage contract: conditional create, compare-and-swap, optional listing and presigning. A leaf, so a backend never imports the ledger. |
+| `ledger/store` | The storage contract: conditional create, compare-and-swap, optional listing. A leaf, so a backend never imports the ledger. |
 | `ledger/store/memstore` | In-memory backend; also the reference implementation. |
 | `ledger/store/fsstore` | Local filesystem backend. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |

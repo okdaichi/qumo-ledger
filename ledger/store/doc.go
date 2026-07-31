@@ -18,8 +18,7 @@
 // spells it O_EXCL. All three are reliable.
 //
 // Exactly one object per track is mutable: the head pointer. It is the only
-// reason [Store.Swap] exists. Backends that cannot implement compare-and-swap
-// can still be used for reading.
+// reason [Store.Swap] exists.
 //
 // # Deliberately optional
 //
@@ -30,8 +29,11 @@
 // weakest consistency guarantees of any operation in the API. Only garbage
 // collection needs enumeration, so it lives on the optional [Lister].
 //
-// [Presigner] is likewise optional. Authorization is not the ledger's job: an
-// external service is expected to mint scoped credentials or signed URLs so
-// that clients keep reading objects directly. Backends that can presign let
-// that service delegate instead of proxying bytes.
+// # Not here
+//
+// Authorization is not the ledger's job. An external service is expected to
+// mint scoped credentials or signed URLs so that clients keep reading objects
+// directly, and that service holds a backend of its own — so it declares
+// whatever presigning interface it needs at the point it consumes one, rather
+// than this package guessing the shape in advance.
 package store
