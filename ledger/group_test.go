@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -93,6 +94,18 @@ func TestGroupMeta_wallclockEnd(t *testing.T) {
 			timescale: 0,
 			ok:        false,
 		},
+		// A coarse timescale reaches the int64 nanosecond ceiling with a
+		// duration that is otherwise unremarkable.
+		"conversion overflows": {
+			group:     GroupMeta{W0: 1, Duration: math.MaxInt64 / 2},
+			timescale: 1,
+			ok:        false,
+		},
+		"sum overflows the anchor": {
+			group:     GroupMeta{W0: math.MaxInt64 - 1, Duration: 90000},
+			timescale: 90000,
+			ok:        false,
+		},
 	}
 
 	for name, tt := range tests {
@@ -133,6 +146,12 @@ func TestGroupMeta_validate(t *testing.T) {
 		},
 		"negative wallclock": {
 			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, W0: -1},
+			wantErr: true,
+		},
+		// A wrapped media end reads as before its own start, which would let
+		// the ordering check wave through everything after it.
+		"media range overflows": {
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: math.MaxInt64 - 1, Duration: 2},
 			wantErr: true,
 		},
 		"negative size": {

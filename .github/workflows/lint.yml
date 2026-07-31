@@ -12,7 +12,10 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  build:
+  # Named `lint`, not `build`: go.yml already reports a check called `build`,
+  # and two workflows sharing one check context makes a required-status rule
+  # ambiguous about which of them it is waiting on.
+  lint:
     runs-on: ubuntu-latest
     permissions:
       checks: write

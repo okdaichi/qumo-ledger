@@ -31,6 +31,12 @@ var (
 	// version of this package.
 	ErrUnsupportedVersion = errors.New("ledger: unsupported manifest version")
 
+	// ErrManifestMismatch reports a manifest whose contents disagree with the
+	// key it was fetched from — a different track, or a delta range other than
+	// the one its reference claims. Manifests are self-describing precisely so
+	// that a misfiled or swapped object is caught rather than trusted.
+	ErrManifestMismatch = errors.New("ledger: manifest does not match its key")
+
 	// ErrNoGroupFound reports that a seek found no group at or before the
 	// requested instant, or that the instant falls past the end of the last
 	// group whose duration is known.

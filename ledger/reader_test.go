@@ -208,6 +208,61 @@ func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
 	assert.Equal(t, 1, fetched, "a seek must fetch only the sealed run that can hold its answer")
 }
 
+// Manifests name their own track and range, so an object that does not match
+// the key it was fetched from must be refused rather than trusted.
+func TestReader_Sealed_RejectsMismatchedManifest(t *testing.T) {
+	tests := map[string]func(*SealedManifest){
+		"wrong track": func(m *SealedManifest) { m.Track = "live/cam2/video" },
+		"wrong range": func(m *SealedManifest) { m.LastDelta += 7 },
+	}
+
+	for name, corrupt := range tests {
+		// Each case corrupts the stored manifest, so each needs its own store.
+		t.Run(name, func(t *testing.T) {
+			w, store := newTestWriter(t)
+			for sequence := range uint64(2) {
+				_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+				require.NoError(t, err)
+			}
+			require.NoError(t, w.Seal(t.Context()))
+
+			r, err := OpenReader(t.Context(), store, testTrack)
+			require.NoError(t, err)
+			ref := r.Root().Sealed[0]
+
+			sealed, err := r.Sealed(t.Context(), ref)
+			require.NoError(t, err)
+			corrupt(&sealed)
+
+			data, err := encodeManifest(sealed)
+			require.NoError(t, err)
+			require.NoError(t, store.Delete(t.Context(), ref.Key))
+			_, err = store.Create(t.Context(), ref.Key, data)
+			require.NoError(t, err)
+
+			_, err = r.Sealed(t.Context(), ref)
+			assert.ErrorIs(t, err, ErrManifestMismatch)
+		})
+	}
+}
+
+func TestOpenReader_RejectsManifestForAnotherTrack(t *testing.T) {
+	store := memstore.New()
+
+	_, err := CreateTrack(t.Context(), store, "live/cam1/video", testConfig(t))
+	require.NoError(t, err)
+
+	// Copy cam1's root manifest under cam2's key, as a misfiled object would be.
+	data, _, err := store.Get(t.Context(), rootKey("live/cam1/video"))
+	require.NoError(t, err)
+	_, err = store.Create(t.Context(), rootKey("live/cam2/video"), data)
+	require.NoError(t, err)
+
+	_, err = OpenReader(t.Context(), store, "live/cam2/video")
+
+	assert.ErrorIs(t, err, ErrManifestMismatch)
+}
+
 func TestReader_SeekMedia(t *testing.T) {
 	store, _ := newPopulatedTrack(t, 5, 3)
 

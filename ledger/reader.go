@@ -108,7 +108,23 @@ func (r *Reader) Sealed(ctx context.Context, ref SealedRef) (SealedManifest, err
 		return SealedManifest{}, fmt.Errorf("ledger: read sealed manifest %q: %w", ref.Key, err)
 	}
 
-	return decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	if err != nil {
+		return SealedManifest{}, err
+	}
+
+	// The manifest names its own track and range, so disagreement with the
+	// reference means the object is not the one the root meant to point at.
+	switch {
+	case sealed.Track != r.track:
+		return SealedManifest{}, fmt.Errorf("%w: %q holds track %s, expected %s",
+			ErrManifestMismatch, ref.Key, sealed.Track, r.track)
+	case sealed.FirstDelta != ref.FirstDelta || sealed.LastDelta != ref.LastDelta:
+		return SealedManifest{}, fmt.Errorf("%w: %q covers deltas %d-%d, expected %d-%d",
+			ErrManifestMismatch, ref.Key, sealed.FirstDelta, sealed.LastDelta, ref.FirstDelta, ref.LastDelta)
+	}
+
+	return sealed, nil
 }
 
 // ReadGroup fetches a group's payload.
@@ -328,6 +344,10 @@ func fetchRoot(ctx context.Context, store objectstore.Store, track TrackPath) (R
 	root, err := decodeManifest(data, func(m RootManifest) int { return m.Version })
 	if err != nil {
 		return RootManifest{}, objectstore.NoVersion, err
+	}
+	if root.Track != track {
+		return RootManifest{}, objectstore.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
+			ErrManifestMismatch, rootKey(track), root.Track, track)
 	}
 
 	return root, version, nil

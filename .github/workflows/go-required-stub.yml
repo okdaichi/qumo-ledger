@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.filter.outputs.go }}
+      lint: ${{ steps.filter.outputs.lint }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,13 +38,25 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # Same set as go.yml's `paths`: **.go, go.mod, go.sum, magefiles/**,
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+
+          # go.yml's `paths`: **.go, go.mod, go.sum, magefiles/**,
           # .github/workflows/go.yml.
-          if git diff --name-only "$BASE" "$HEAD" \
+          if printf '%s\n' "$changed" \
             | grep -qE '\.go$|^go\.(mod|sum)$|^magefiles/|^\.github/workflows/go\.yml$'; then
             echo "go=true" >> "$GITHUB_OUTPUT"
           else
             echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # lint.yml's `paths` differ — no magefiles, plus the linter config —
+          # so the two are filtered separately. A PR touching only
+          # .github/.golangci.yml runs the real lint job but not go.yml.
+          if printf '%s\n' "$changed" \
+            | grep -qE '\.go$|^go\.(mod|sum)$|^\.github/\.golangci\.yml$|^\.github/workflows/lint\.yml$'; then
+            echo "lint=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lint=false" >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -73,3 +86,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "No Go files changed in this PR — 'tidy' is not required here."
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'lint' is not required here."

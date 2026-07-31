@@ -106,9 +106,12 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
+      # Checks the whole repository rather than a hardcoded package list, so a
+      # new top-level package cannot quietly escape the check. gofmt ignores
+      # module boundaries, so magefiles is covered too.
       - name: Verify gofmt
         run: |
-          unformatted="$(gofmt -l ./cmd ./internal ./ledger ./objectstore)"
+          unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt needed on:"
             echo "$unformatted"

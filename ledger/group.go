@@ -1,6 +1,9 @@
 package ledger
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // GroupRef identifies a group within a track.
 //
@@ -104,21 +107,54 @@ func (m GroupMeta) HasWallclock() bool { return m.W0 != 0 }
 
 // MediaEnd returns the group's end in media time. When the duration is unknown
 // it equals T0, so check [GroupMeta.HasDuration] before treating it as an end.
+//
+// A group whose range would overflow an int64 is refused at append, so this
+// cannot wrap for anything the ledger stored.
 func (m GroupMeta) MediaEnd() int64 { return m.T0 + m.Duration }
 
 // wallclockEnd returns the group's end in Unix nanoseconds for a track of the
-// given timescale, reporting false when either anchor or extent is missing.
+// given timescale, reporting false when an anchor or extent is missing, or when
+// the result would not fit in an int64.
 func (m GroupMeta) wallclockEnd(timescale uint32) (int64, bool) {
-	if !m.HasWallclock() || !m.HasDuration() || timescale == 0 {
+	if !m.HasWallclock() || !m.HasDuration() {
 		return 0, false
 	}
 
-	return m.W0 + mediaToNanos(m.Duration, timescale), true
+	nanos, ok := mediaToNanos(m.Duration, timescale)
+	if !ok || m.W0 > math.MaxInt64-nanos {
+		return 0, false
+	}
+
+	return m.W0 + nanos, true
 }
 
-// mediaToNanos converts a media-time extent into nanoseconds.
-func mediaToNanos(units int64, timescale uint32) int64 {
-	return units * int64(nanosPerSecond) / int64(timescale)
+// mediaToNanos converts a media-time extent into nanoseconds, reporting false
+// when the conversion would overflow.
+//
+// The obvious units*1e9/timescale wraps sooner than it looks: a track with
+// Timescale 1 needs only about 9.2e9 units, which is well inside the range of a
+// long recording. Dividing first keeps the remainder term bounded — a remainder
+// is always below the timescale, so at most ~4.3e18 for a uint32, comfortably
+// inside an int64 — and leaves only the whole-seconds term to range-check.
+func mediaToNanos(units int64, timescale uint32) (int64, bool) {
+	if timescale == 0 || units < 0 {
+		return 0, false
+	}
+
+	scale := int64(timescale)
+	seconds, remainder := units/scale, units%scale
+
+	if seconds > math.MaxInt64/nanosPerSecond {
+		return 0, false
+	}
+	whole := seconds * nanosPerSecond
+
+	fraction := remainder * nanosPerSecond / scale
+	if whole > math.MaxInt64-fraction {
+		return 0, false
+	}
+
+	return whole + fraction, true
 }
 
 const nanosPerSecond = 1_000_000_000
@@ -133,6 +169,11 @@ func (m GroupMeta) validate() error {
 		return fmt.Errorf("%w: negative wallclock %d", ErrInvalidGroup, m.W0)
 	case m.Size < 0:
 		return fmt.Errorf("%w: negative size %d", ErrInvalidGroup, m.Size)
+	// MediaEnd is exported and cannot report failure, so a range that would
+	// wrap is refused here instead. A wrapped end reads as *before* its own
+	// start, which would let the ordering check pass anything after it.
+	case m.Duration > 0 && m.T0 > math.MaxInt64-m.Duration:
+		return fmt.Errorf("%w: media range from %d for %d units overflows", ErrInvalidGroup, m.T0, m.Duration)
 	}
 
 	return nil
