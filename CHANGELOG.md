@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **docs:** `docs/ARCHITECTURE.md` recording the design decisions and their rationale.
 - **CI:** Go build/coverage, race, Windows, and tidy/gofmt/magefiles jobs; golangci-lint via reviewdog; release-on-tag; CHANGELOG enforcement; Dependabot for both modules and for Actions.
 
+### Fixed
+
+- **ledger:** A sealed manifest's key now names the delta range it covers (`sealed-<first>-<last>.manifest`) rather than its position. A seal whose root update failed left the manifest object behind; retrying after more groups had arrived recomputed a wider manifest but reused the same positional key, so `Create` returned `ErrExist`, the retry was silently discarded, and the root was then published with a summary describing groups the stored object did not hold — after which the superseding deltas were reclaimed, making those groups unreachable. Naming the range makes `ErrExist` mean exactly "this identical seal already landed".
+- **fsstore:** Reject keys that are not local to the root. `resolve` previously rejected `../` but treated a backslash as an ordinary character, so `..\outside` escaped the root on Windows — reachable from `GroupMeta.Object`, which is manifest data rather than caller-authored input. Keys are now checked with `filepath.IsLocal`, which also rejects Windows reserved device names such as `NUL` (where `Get` had reported a phantom empty object), and backslashes and non-canonical keys are refused on every platform so one key names exactly one object.
+- **ledger:** A seek now walks newest-first and fetches at most one sealed manifest, instead of one per sealed run for the length of the recording. Walking backwards also resolves what an epoch reset makes ambiguous: when a media timestamp exists in several epochs, the most recent wins.
+
 ### Notes
 
 - Deferred deliberately, with rationale in `docs/ARCHITECTURE.md`: garbage collection, retention, the MoQT adapter, HLS/DASH renderers, and an S3 backend.

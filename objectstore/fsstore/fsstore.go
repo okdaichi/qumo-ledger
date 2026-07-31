@@ -232,21 +232,41 @@ func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error
 }
 
 // resolve maps an object key onto a filesystem path, rejecting anything that
-// would escape the root.
+// would escape the root or name two objects with one key.
+//
+// Keys are not all self-authored: a reader takes a group's key from
+// GroupMeta.Object, which is manifest data, so resolve is a trust boundary
+// rather than a formatting helper.
 func (s *Store) resolve(key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidKey)
 	}
-	if path.IsAbs(key) || strings.HasPrefix(key, "/") {
-		return "", fmt.Errorf("%w: %q is absolute", ErrInvalidKey, key)
+
+	// Backslashes are rejected on every platform, not just Windows. A key is
+	// slash-separated by definition, so a backslash would otherwise be an
+	// ordinary character on Linux and a separator on Windows — the same key
+	// naming different objects depending on the host.
+	if strings.ContainsRune(key, '\\') {
+		return "", fmt.Errorf("%w: %q contains a backslash", ErrInvalidKey, key)
 	}
 
-	clean := path.Clean(key)
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("%w: %q escapes the root", ErrInvalidKey, key)
+	// Keys must be canonical. Without this, "a/./b" and "a/b" resolve to one
+	// file, so a Create under the second would report ErrExist for an object
+	// the caller never wrote — and immutability depends on one key naming
+	// exactly one object.
+	if path.Clean(key) != key {
+		return "", fmt.Errorf("%w: %q is not clean", ErrInvalidKey, key)
 	}
 
-	return filepath.Join(s.root, filepath.FromSlash(clean)), nil
+	// IsLocal rejects absolute paths and parent traversal, and on Windows also
+	// rejects reserved device names such as NUL and COM1 — which are otherwise
+	// legal-looking relative keys that open a device instead of a file.
+	local := filepath.FromSlash(key)
+	if !filepath.IsLocal(local) {
+		return "", fmt.Errorf("%w: %q is not local to the root", ErrInvalidKey, key)
+	}
+
+	return filepath.Join(s.root, local), nil
 }
 
 // version derives an object version from its content. A real backend would

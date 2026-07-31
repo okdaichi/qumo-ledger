@@ -385,15 +385,16 @@ func (w *Writer) seal(ctx context.Context) error {
 		return nil
 	}
 
+	firstDelta, lastDelta := w.root.OpenFrom, w.nextDelta-1
 	seq := uint64(len(w.root.Sealed)) + 1
-	key := sealedKey(w.track, seq)
+	key := sealedKey(w.track, firstDelta, lastDelta)
 
 	sealed := SealedManifest{
 		Version:    ManifestVersion,
 		Track:      w.track,
 		Seq:        seq,
-		FirstDelta: w.root.OpenFrom,
-		LastDelta:  w.nextDelta - 1,
+		FirstDelta: firstDelta,
+		LastDelta:  lastDelta,
 		Groups:     append([]GroupMeta(nil), w.openGroups...),
 		SealedAt:   w.now().UnixNano(),
 	}
@@ -403,16 +404,19 @@ func (w *Writer) seal(ctx context.Context) error {
 		return err
 	}
 
+	// ErrExist is safe to ignore only because the key names the delta range:
+	// an object already under this key covers exactly these deltas, so it holds
+	// the same groups. A retry after a wider range has accumulated writes a
+	// different key and leaves the earlier object unreferenced for collection.
 	if _, err := w.store.Create(ctx, key, data); err != nil && !errors.Is(err, objectstore.ErrExist) {
-		return fmt.Errorf("ledger: write sealed manifest %d: %w", seq, err)
+		return fmt.Errorf("ledger: write sealed manifest %d-%d: %w", firstDelta, lastDelta, err)
 	}
 
-	firstDelta, lastDelta := w.root.OpenFrom, w.nextDelta-1
 	if err := w.updateRoot(ctx, func(root *RootManifest) {
 		root.Sealed = append(root.Sealed, sealed.summarize(key))
 		root.OpenFrom = lastDelta + 1
 	}); err != nil {
-		return fmt.Errorf("ledger: publish sealed manifest %d: %w", seq, err)
+		return fmt.Errorf("ledger: publish sealed manifest %d-%d: %w", firstDelta, lastDelta, err)
 	}
 
 	w.openGroups = w.openGroups[:0]

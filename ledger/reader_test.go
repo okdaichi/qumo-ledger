@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -170,6 +171,41 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 	group, err := r.SeekWallclock(t.Context(), wallclockBase+500_000_000)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), group.Sequence)
+}
+
+// Seeking into the distant past must cost one sealed fetch, not one per sealed
+// run — otherwise a seek gets steadily more expensive for the whole life of a
+// recording, which is exactly what the summaries in the root exist to prevent.
+func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
+	store := &FakeStore{}
+
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	require.NoError(t, err)
+
+	// Six sealed runs of one group each, plus a group left in the open region.
+	for sequence := range uint64(6) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+		require.NoError(t, err)
+		require.NoError(t, w.Seal(t.Context()))
+	}
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 6), []byte("payload"))
+	require.NoError(t, err)
+
+	r, err := OpenReader(t.Context(), store, testTrack)
+	require.NoError(t, err)
+	require.Len(t, r.Root().Sealed, 6)
+
+	store.Gets = nil
+
+	// Target the very first group, the worst case for a newest-first walk.
+	group, err := r.SeekMedia(t.Context(), 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), group.Sequence)
+
+	fetched := store.GetCount(func(key string) bool {
+		return strings.Contains(key, "/delta/sealed-")
+	})
+	assert.Equal(t, 1, fetched, "a seek must fetch only the sealed run that can hold its answer")
 }
 
 func TestReader_SeekMedia(t *testing.T) {

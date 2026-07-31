@@ -34,8 +34,18 @@ func TestDeltaKey(t *testing.T) {
 	}
 }
 
+// The key names the delta range so that a seal retried after more groups have
+// arrived cannot collide with the earlier, smaller manifest.
 func TestSealedKey(t *testing.T) {
-	assert.Equal(t, "live/cam1/video/delta/sealed-000001.manifest", sealedKey("live/cam1/video", 1))
+	assert.Equal(t,
+		"live/cam1/video/delta/sealed-00000000-00000002.manifest",
+		sealedKey("live/cam1/video", 0, 2),
+	)
+	assert.NotEqual(t,
+		sealedKey("live/cam1/video", 0, 2),
+		sealedKey("live/cam1/video", 0, 3),
+		"a wider range must not reuse the key of a narrower one",
+	)
 }
 
 func TestGroupKey(t *testing.T) {

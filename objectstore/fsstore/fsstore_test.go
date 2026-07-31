@@ -40,10 +40,12 @@ func TestNew_CreatesRoot(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
-// Keys arrive from manifests and, in a multi-tenant deployment, potentially
-// from a request. None of them may reach outside the root.
+// A reader takes a group's key from GroupMeta.Object, which is manifest data,
+// so a malformed key must be refused rather than resolved.
 func TestStore_RejectsEscapingKeys(t *testing.T) {
-	store, err := fsstore.New(t.TempDir())
+	base := t.TempDir()
+	root := filepath.Join(base, "store")
+	store, err := fsstore.New(root)
 	require.NoError(t, err)
 
 	tests := map[string]string{
@@ -52,6 +54,15 @@ func TestStore_RejectsEscapingKeys(t *testing.T) {
 		"parent":          "../outside",
 		"nested parent":   "../../outside",
 		"trailing parent": "live/../../outside",
+		// A backslash is an ordinary character to path.Clean but a separator
+		// to filepath.Join on Windows, so this escapes the root there.
+		"backslash parent": `..\outside`,
+		"backslash nested": `live\..\..\outside`,
+		// Non-canonical keys would alias one object under two names, which
+		// breaks the immutability that conditional create depends on.
+		"dot segment":    "live/./cam1",
+		"double slash":   "live//cam1",
+		"trailing slash": "live/cam1/",
 	}
 
 	for name, key := range tests {
@@ -60,6 +71,32 @@ func TestStore_RejectsEscapingKeys(t *testing.T) {
 			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
 
 			_, err = store.Create(t.Context(), key, []byte("x"))
+			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+		})
+	}
+
+	entries, err := os.ReadDir(base)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "nothing may be written outside the root")
+	assert.Equal(t, "store", entries[0].Name())
+}
+
+// Windows reserved device names look like ordinary relative keys but open a
+// device, so Get would report a phantom empty object.
+func TestStore_RejectsReservedDeviceNames(t *testing.T) {
+	store, err := fsstore.New(t.TempDir())
+	require.NoError(t, err)
+
+	if filepath.IsLocal("NUL") {
+		t.Skip("reserved device names only apply on Windows")
+	}
+
+	for _, key := range []string{"NUL", "COM1", "live/cam1/CON"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := store.Create(t.Context(), key, []byte("x"))
+			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+
+			_, _, err = store.Get(t.Context(), key)
 			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
 		})
 	}

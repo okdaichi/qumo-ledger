@@ -19,16 +19,35 @@ type FakeStore struct {
 	// use when nil.
 	Inner objectstore.Store
 
-	// CreateErr, SwapErr and GetErr fail the matching operation for a key.
+	// CreateErr, SwapErr and GetErr fail the matching operation for a key,
+	// every time it is called.
 	CreateErr map[string]error
 	SwapErr   map[string]error
 	GetErr    map[string]error
 
-	// Creates, Swaps and Deletes record the keys each operation was called
-	// with, in call order.
+	// SwapErrOnce fails the first Swap of a key and is then consumed, which is
+	// how a transient failure followed by a retry is modelled.
+	SwapErrOnce map[string]error
+
+	// Gets, Creates, Swaps and Deletes record the keys each operation was
+	// called with, in call order. Gets is what makes read amplification
+	// observable — how many objects a seek actually fetches.
+	Gets    []string
 	Creates []string
 	Swaps   []string
 	Deletes []string
+}
+
+// GetCount reports how many recorded reads satisfy match.
+func (s *FakeStore) GetCount(match func(key string) bool) int {
+	var n int
+	for _, key := range s.Gets {
+		if match(key) {
+			n++
+		}
+	}
+
+	return n
 }
 
 var _ objectstore.Store = (*FakeStore)(nil)
@@ -42,6 +61,7 @@ func (s *FakeStore) inner() objectstore.Store {
 }
 
 func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, objectstore.Version, error) {
+	s.Gets = append(s.Gets, key)
 	if err := s.GetErr[key]; err != nil {
 		return nil, objectstore.NoVersion, err
 	}
@@ -61,6 +81,10 @@ func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (object
 func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect objectstore.Version) (objectstore.Version, error) {
 	s.Swaps = append(s.Swaps, key)
 	if err := s.SwapErr[key]; err != nil {
+		return objectstore.NoVersion, err
+	}
+	if err := s.SwapErrOnce[key]; err != nil {
+		delete(s.SwapErrOnce, key)
 		return objectstore.NoVersion, err
 	}
 

@@ -333,6 +333,53 @@ func TestWriter_Seal(t *testing.T) {
 	}
 }
 
+// A seal whose root update fails leaves the sealed object written. Retrying it
+// after more groups have arrived must not reuse that object's key: the retry
+// covers a wider delta range, and a positional key would make Create return
+// ErrExist, publish a root summary describing groups the object does not hold,
+// and then reclaim the deltas that were their only other copy.
+func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
+	store := &FakeStore{
+		SwapErrOnce: map[string]error{rootKey(testTrack): errors.New("transient failure")},
+	}
+
+	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	require.NoError(t, err)
+
+	for sequence := range uint64(3) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+		require.NoError(t, err)
+	}
+
+	require.Error(t, w.Seal(t.Context()), "the first seal fails its root update")
+
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 3), []byte("payload"))
+	require.NoError(t, err)
+	require.NoError(t, w.Seal(t.Context()))
+
+	root := w.Root()
+	require.Len(t, root.Sealed, 1)
+
+	data, _, err := store.Get(t.Context(), root.Sealed[0].Key)
+	require.NoError(t, err)
+	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	require.NoError(t, err)
+
+	assert.Equal(t, root.Sealed[0].Groups, len(sealed.Groups),
+		"the root summary must match the sealed manifest it points at")
+
+	r, err := OpenReader(t.Context(), store, testTrack)
+	require.NoError(t, err)
+
+	var seen []uint64
+	for group, err := range r.Groups(t.Context()) {
+		require.NoError(t, err)
+		seen = append(seen, group.Sequence)
+	}
+
+	assert.Equal(t, []uint64{0, 1, 2, 3}, seen, "no committed group may become unreachable")
+}
+
 func TestWriter_Seal_Empty(t *testing.T) {
 	w, _ := newTestWriter(t)
 

@@ -47,9 +47,18 @@ func deltaKey(track TrackPath, n uint64) string {
 	return fmt.Sprintf("%s/%s%08d.manifest", track, openPrefix, n)
 }
 
-// sealedKey returns the key of the nth sealed manifest.
-func sealedKey(track TrackPath, n uint64) string {
-	return fmt.Sprintf("%s/%s%06d.manifest", track, sealedPrefix, n)
+// sealedKey returns the key of the sealed manifest covering deltas first
+// through last.
+//
+// The key names the range rather than a position deliberately. A seal whose
+// root update fails leaves the manifest object behind; retrying it after more
+// groups have arrived produces a *different* range, and so a different key. If
+// the key were positional the retry would collide with the earlier object,
+// ErrExist would be indistinguishable from success, and the root would end up
+// pointing at a manifest missing the groups added since. Naming the range makes
+// ErrExist mean exactly "this identical seal already landed".
+func sealedKey(track TrackPath, first, last uint64) string {
+	return fmt.Sprintf("%s/%s%08d-%08d.manifest", track, sealedPrefix, first, last)
 }
 
 // groupKey returns the storage key of a group's payload.
@@ -77,9 +86,9 @@ type RootManifest struct {
 	Epoch uint64 `json:"epoch"`
 
 	// Sealed lists the immutable manifests covering the track's history, in
-	// order. Each entry carries enough summary for a reader to skip it without
-	// fetching it, which is what keeps a time seek from degrading into a scan
-	// of the whole history.
+	// commit order. Each entry summarizes its run, so a seek walking backwards
+	// can identify the one run that may hold its answer and fetch only that —
+	// rather than one request per run for the length of the recording.
 	Sealed []SealedRef `json:"sealed"`
 
 	// OpenFrom is the first delta number in the open region, that is, the

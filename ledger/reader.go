@@ -239,8 +239,16 @@ func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupMeta, err
 // what keeps seeking correct when a producer supplies no duration. Duration is
 // consulted only at the end, to reject a target that falls past a known end.
 //
-// start prunes sealed runs whose whole range begins after the target. Those
-// summaries live in the root, so pruning costs no fetch.
+// The search runs newest-first. The open region is examined before the sealed
+// history because it holds the newest data, and the sealed runs are then walked
+// in reverse until one begins at or before the target — so a seek fetches at
+// most one sealed manifest rather than one per run, however long the track has
+// been recording. Walking backwards also settles what an epoch reset makes
+// ambiguous: when the same media timestamp exists in several epochs, the most
+// recent one wins.
+//
+// The open region is bounded by the seal threshold, so scanning it is bounded
+// too.
 func (r *Reader) seek(
 	ctx context.Context,
 	target int64,
@@ -265,20 +273,6 @@ func (r *Reader) seek(
 		}
 	)
 
-	for _, ref := range root.Sealed {
-		if at, ok := start(ref); ok && at > target {
-			continue
-		}
-
-		sealed, err := r.Sealed(ctx, ref)
-		if err != nil {
-			return GroupMeta{}, err
-		}
-		for _, group := range sealed.Groups {
-			consider(group)
-		}
-	}
-
 	for n := root.OpenFrom; ; n++ {
 		delta, err := r.Delta(ctx, n)
 		if errors.Is(err, ErrNotCommitted) {
@@ -288,6 +282,26 @@ func (r *Reader) seek(
 			return GroupMeta{}, err
 		}
 		for _, group := range delta.Groups {
+			consider(group)
+		}
+	}
+
+	for i := len(root.Sealed) - 1; !found && i >= 0; i-- {
+		ref := root.Sealed[i]
+
+		// A run beginning after the target cannot hold a match. Its summary is
+		// already in the root, so skipping costs no fetch. A run carrying no
+		// wallclock at all reports no start, and is searched rather than
+		// assumed empty.
+		if at, ok := start(ref); ok && at > target {
+			continue
+		}
+
+		sealed, err := r.Sealed(ctx, ref)
+		if err != nil {
+			return GroupMeta{}, err
+		}
+		for _, group := range sealed.Groups {
 			consider(group)
 		}
 	}
