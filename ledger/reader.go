@@ -262,27 +262,28 @@ func (r *Reader) Follow(ctx context.Context, from Cursor, interval time.Duration
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		// skip applies only to the delta the cursor points into; every later
-		// delta is consumed whole.
-		delta, skip := from.delta, from.index
+		at := position{delta: from.delta, index: from.index}
+		// misses counts consecutive empty polls, so the root is re-read when a
+		// follower first stalls and only occasionally after that.
+		misses := 0
 
 		for {
-			manifest, err := r.delta(ctx, delta)
+			manifest, err := r.delta(ctx, at.delta)
 			switch {
 			case err == nil:
 				for i, group := range manifest.Groups {
-					if i < skip {
+					if i < at.index {
 						continue
 					}
 					update := Update{
 						GroupMeta: group,
-						Cursor:    Cursor{delta: delta, index: i + 1},
+						Cursor:    Cursor{delta: at.delta, index: i + 1},
 					}
 					if !yield(update, nil) {
 						return
 					}
 				}
-				delta, skip = delta+1, 0
+				at, misses = position{delta: at.delta + 1}, 0
 				// Do not wait before trying the next one: a backlog should
 				// drain at full speed, and only a genuine miss should poll.
 				continue
@@ -291,19 +292,20 @@ func (r *Reader) Follow(ctx context.Context, from Cursor, interval time.Duration
 				// A missing delta means one of two very different things: it
 				// has not been committed yet, or it was sealed and reclaimed
 				// while this follower was away. Waiting is right for the first
-				// and hangs forever on the second, so refresh and tell them
-				// apart before deciding.
-				caught, err := r.catchUpSealed(ctx, &delta, &skip, yield)
+				// and hangs forever on the second.
+				next, outcome, err := r.resume(ctx, at, misses, yield)
 				if err != nil {
 					yield(Update{}, err)
 					return
 				}
-				if caught == caughtUpStopped {
+				switch outcome {
+				case resumeStopped:
 					return
-				}
-				if caught == caughtUpAdvanced {
+				case resumeAdvanced:
+					at, misses = next, 0
 					continue
 				}
+				misses++
 
 			default:
 				yield(Update{}, err)
@@ -319,21 +321,37 @@ func (r *Reader) Follow(ctx context.Context, from Cursor, interval time.Duration
 	}
 }
 
-// catchUpOutcome says what catchUpSealed did about a delta it could not read.
-type catchUpOutcome int
+// rootRecheckEvery is how many consecutive empty polls pass between re-reads of
+// the root manifest while a follower is stalled.
+//
+// A stalled follower needs the root only to notice a seal that happened since
+// it last read one, and a seal cannot happen before the delta it is waiting for
+// is even committed. Re-reading on every tick therefore doubles the request
+// count of an idle follower to learn nothing.
+const rootRecheckEvery = 8
+
+// position is where a follower has reached: a delta, and how many of that
+// delta's groups it has already consumed.
+type position struct {
+	delta uint64
+	index int
+}
+
+// resumeOutcome says what resume decided about a delta it could not read.
+type resumeOutcome int
 
 const (
-	// caughtUpWaiting means the delta is genuinely not committed yet, so the
+	// resumeWaiting means the delta is genuinely not committed yet, so the
 	// follower should poll.
-	caughtUpWaiting catchUpOutcome = iota
-	// caughtUpAdvanced means the delta had been sealed away; its groups were
+	resumeWaiting resumeOutcome = iota
+	// resumeAdvanced means the delta had been sealed away; its groups were
 	// served from the sealed run and the position moved past it.
-	caughtUpAdvanced
-	// caughtUpStopped means the consumer broke out of the loop.
-	caughtUpStopped
+	resumeAdvanced
+	// resumeStopped means the consumer broke out of the loop.
+	resumeStopped
 )
 
-// catchUpSealed handles a delta that is absent because sealing reclaimed it.
+// resume reports where a follower should continue when a delta is absent.
 //
 // Sealing deletes the deltas it folds up, so a cursor taken before a seal names
 // an object that no longer exists — and a follower resuming from a persisted
@@ -341,50 +359,55 @@ const (
 // moved, so they are served from the sealed run instead and the position jumps
 // past it.
 //
-// The cursor handed out during this replay points after the whole run rather
-// than after each group: a sealed manifest does not record which delta each of
-// its groups came from. A consumer that stops mid-run and resumes will see the
-// run again, which is within the at-least-once contract Follow already carries.
-func (r *Reader) catchUpSealed(
+// The cached root usually settles this without a request: OpenReader read it,
+// so a delta below OpenFrom is known sealed. Only a seal that happened since
+// needs a re-read, which is why that is rationed by rootRecheckEvery rather
+// than done on every tick.
+//
+// The cursor handed out during a replay points after the whole run rather than
+// after each group: a sealed manifest does not record which delta each of its
+// groups came from. A consumer that stops mid-run and resumes will see the run
+// again, which is within the at-least-once contract Follow already carries.
+func (r *Reader) resume(
 	ctx context.Context,
-	delta *uint64,
-	skip *int,
+	at position,
+	misses int,
 	yield func(Update, error) bool,
-) (catchUpOutcome, error) {
-	if err := r.Refresh(ctx); err != nil {
-		return caughtUpWaiting, err
-	}
-
+) (position, resumeOutcome, error) {
 	root := r.Root()
-	if *delta >= root.OpenFrom {
-		// Still in the open region, so it really has not been committed yet.
-		return caughtUpWaiting, nil
+
+	if at.delta >= root.OpenFrom && (misses == 0 || misses%rootRecheckEvery == 0) {
+		if err := r.Refresh(ctx); err != nil {
+			return at, resumeWaiting, err
+		}
+		root = r.Root()
 	}
 
-	ref, ok := sealedCovering(root, *delta)
+	if at.delta >= root.OpenFrom {
+		// Still in the open region, so it really has not been committed yet.
+		return at, resumeWaiting, nil
+	}
+
+	ref, ok := sealedCovering(root, at.delta)
 	if !ok {
 		// Below the open region but in no sealed run — nothing can serve it,
 		// so resume at the first delta that still exists.
-		*delta, *skip = root.OpenFrom, 0
-
-		return caughtUpAdvanced, nil
+		return position{delta: root.OpenFrom}, resumeAdvanced, nil
 	}
 
 	sealed, err := r.sealed(ctx, ref)
 	if err != nil {
-		return caughtUpWaiting, err
+		return at, resumeWaiting, err
 	}
 
-	resume := Cursor{delta: ref.LastDelta + 1}
+	cursor := Cursor{delta: ref.LastDelta + 1}
 	for _, group := range sealed.Groups {
-		if !yield(Update{GroupMeta: group, Cursor: resume}, nil) {
-			return caughtUpStopped, nil
+		if !yield(Update{GroupMeta: group, Cursor: cursor}, nil) {
+			return at, resumeStopped, nil
 		}
 	}
 
-	*delta, *skip = ref.LastDelta+1, 0
-
-	return caughtUpAdvanced, nil
+	return position{delta: ref.LastDelta + 1}, resumeAdvanced, nil
 }
 
 // sealedCovering returns the sealed run holding a delta number, if any.

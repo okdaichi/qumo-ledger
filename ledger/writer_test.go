@@ -519,8 +519,9 @@ func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	payloadIndex := indexOf(objects.Creates, meta.Object)
-	deltaIndex := indexOf(objects.Creates, deltaKey(testTrack, 0))
+	_, creates, _, _ := objects.Calls()
+	payloadIndex := indexOf(creates, meta.Object)
+	deltaIndex := indexOf(creates, deltaKey(testTrack, 0))
 
 	require.NotEqual(t, -1, payloadIndex)
 	require.NotEqual(t, -1, deltaIndex)

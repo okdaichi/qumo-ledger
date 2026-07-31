@@ -94,7 +94,7 @@ func TestReader_ReadGroup(t *testing.T) {
 	assert.Equal(t, payload, got)
 }
 
-func TestReader_Delta_NotCommitted(t *testing.T) {
+func TestReader_delta_NotCommitted(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 1, 1)
 
 	r, err := OpenReader(t.Context(), objects, testTrack)
@@ -197,7 +197,7 @@ func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, r.Root().Sealed, 6)
 
-	objects.Gets = nil
+	objects.ResetCalls()
 
 	// Target the very first group, the worst case for a newest-first walk.
 	group, err := r.SeekMedia(t.Context(), 1)
@@ -345,7 +345,7 @@ func TestReader_RangeMedia_SkipsIrrelevantSealedManifests(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, r.Root().Sealed, 6)
 
-	objects.Gets = nil
+	objects.ResetCalls()
 
 	// A window covering only group 1.
 	got := collect(t, r.RangeMedia(t.Context(), ticksPerGroup, 2*ticksPerGroup))
@@ -359,7 +359,7 @@ func TestReader_RangeMedia_SkipsIrrelevantSealedManifests(t *testing.T) {
 
 // Manifests name their own track and range, so an object that does not match
 // the key it was fetched from must be refused rather than trusted.
-func TestReader_Sealed_RejectsMismatchedManifest(t *testing.T) {
+func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 	tests := map[string]func(*SealedManifest){
 		"wrong track": func(m *SealedManifest) { m.Track = "live/cam2/video" },
 		"wrong range": func(m *SealedManifest) { m.LastDelta += 7 },
@@ -593,6 +593,55 @@ func TestReader_Tip_EmptyTrack(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, Cursor{}, tip, "with nothing committed the start of the track is already the tip")
+}
+
+// A follower parked at the tip should cost one request per poll. Re-reading the
+// root every tick doubles the request rate of every idle follower to learn
+// nothing: a seal cannot happen before the delta being waited on is committed.
+func TestReader_Follow_IdlePollCost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		objects := &FakeStore{}
+
+		w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
+		require.NoError(t, err)
+		_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
+		require.NoError(t, err)
+
+		r, err := OpenReader(t.Context(), objects, testTrack)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for _, err := range r.Follow(ctx, Cursor{}, 100*time.Millisecond) {
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		// Let the follower drain the one group and settle into polling.
+		synctest.Wait()
+		objects.ResetCalls()
+
+		// Ten idle poll intervals.
+		time.Sleep(1050 * time.Millisecond)
+		synctest.Wait()
+
+		probes := objects.GetCount(func(key string) bool { return strings.Contains(key, "/delta/open/") })
+		roots := objects.GetCount(func(key string) bool { return strings.HasSuffix(key, "/root.manifest") })
+
+		assert.Equal(t, 10, probes, "one probe per poll")
+		assert.LessOrEqual(t, roots, 3,
+			"the root is re-read only when the follower first stalls and periodically after")
+
+		cancel()
+		synctest.Wait()
+		<-drained
+	})
 }
 
 // Following past the tip must block rather than spin or error, and must stop
