@@ -111,19 +111,19 @@ func TestReader_SeekWallclock(t *testing.T) {
 	require.NoError(t, r.Refresh(t.Context()))
 
 	tests := map[string]struct {
-		instant  int64
+		offset   int64 // nanoseconds after the first group's anchor
 		expected uint64
 	}{
-		"first group, in sealed history":      {instant: 500_000_000, expected: 0},
-		"boundary belongs to the later group": {instant: 2_000_000_000, expected: 1},
-		"last sealed group":                   {instant: 5_000_000_000, expected: 2},
-		"open region":                         {instant: 7_000_000_000, expected: 3},
-		"final group":                         {instant: 9_500_000_000, expected: 4},
+		"first group, in sealed history":      {offset: 500_000_000, expected: 0},
+		"boundary belongs to the later group": {offset: 2_000_000_000, expected: 1},
+		"last sealed group":                   {offset: 5_000_000_000, expected: 2},
+		"open region":                         {offset: 7_000_000_000, expected: 3},
+		"final group":                         {offset: 9_500_000_000, expected: 4},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			group, err := r.SeekWallclock(t.Context(), tt.instant)
+			group, err := r.SeekWallclock(t.Context(), wallclockBase+tt.offset)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, group.Sequence)
 		})
@@ -135,9 +135,41 @@ func TestReader_SeekWallclock_OutOfRange(t *testing.T) {
 
 	r, err := OpenReader(t.Context(), store, testTrack)
 	require.NoError(t, err)
+	require.NoError(t, r.Refresh(t.Context()))
 
-	_, err = r.SeekWallclock(t.Context(), 999_000_000_000)
-	assert.Error(t, err)
+	tests := map[string]int64{
+		"before the first anchor":   wallclockBase - 1,
+		"past the last group's end": wallclockBase + 999*nanosPerGroup,
+	}
+
+	for name, instant := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := r.SeekWallclock(t.Context(), instant)
+			assert.ErrorIs(t, err, ErrNoGroupFound)
+		})
+	}
+}
+
+// Wallclock is optional. A group without an anchor cannot be correlated, so a
+// wallclock seek must skip it rather than treating it as the Unix epoch.
+func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
+	w, store := newTestWriter(t)
+
+	anchored := testGroup(t, 0)
+	_, err := w.AppendGroup(t.Context(), anchored, []byte("payload"))
+	require.NoError(t, err)
+
+	unanchored := testGroup(t, 1)
+	unanchored.W0 = 0
+	_, err = w.AppendGroup(t.Context(), unanchored, []byte("payload"))
+	require.NoError(t, err)
+
+	r, err := OpenReader(t.Context(), store, testTrack)
+	require.NoError(t, err)
+
+	group, err := r.SeekWallclock(t.Context(), wallclockBase+500_000_000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), group.Sequence)
 }
 
 func TestReader_SeekMedia(t *testing.T) {

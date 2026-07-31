@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/okdaichi/qumo-ledger/objectstore"
 	"github.com/okdaichi/qumo-ledger/objectstore/memstore"
@@ -24,21 +25,29 @@ func testConfig(tb testing.TB) TrackConfig {
 	}
 }
 
-// testGroup builds a group two seconds long at the 90 kHz video timescale,
-// with a wallclock range derived from the same position so both timelines
-// stay consistent across a test.
+const (
+	ticksPerGroup = 180000        // two seconds at the 90 kHz video timescale
+	nanosPerGroup = 2_000_000_000 // the same two seconds in wallclock
+
+	// wallclockBase offsets the wallclock anchors away from zero, which means
+	// "no anchor" and would otherwise make group 0 untestable.
+	wallclockBase = 1_700_000_000_000_000_000
+)
+
+// testGroup builds a two-second group whose media and wallclock anchors
+// advance together, so both timelines stay consistent across a test.
+//
+// The wallclock anchor is offset from a fixed base because zero means "no
+// anchor", which would make group 0 untestable for correlation.
 func testGroup(tb testing.TB, sequence uint64) GroupMeta {
 	tb.Helper()
 
-	const ticksPerGroup = 180000 // two seconds at 90 kHz
-	const nanosPerGroup = 2_000_000_000
-
 	return GroupMeta{
-		GroupRef: GroupRef{Epoch: 1, Sequence: sequence},
-		T0:       int64(sequence) * ticksPerGroup,
-		T1:       int64(sequence+1) * ticksPerGroup,
-		W0:       int64(sequence) * nanosPerGroup,
-		W1:       int64(sequence+1) * nanosPerGroup,
+		GroupRef:    GroupRef{Epoch: 1, Sequence: sequence},
+		T0:          int64(sequence) * ticksPerGroup,
+		Duration:    ticksPerGroup,
+		W0:          wallclockBase + int64(sequence)*nanosPerGroup,
+		ObjectCount: 60,
 	}
 }
 
@@ -191,6 +200,106 @@ func TestWriter_AppendGroup_EpochSeparatesProducerLifetimes(t *testing.T) {
 	assert.Equal(t, uint64(2), w.Root().Epoch, "the root advances to the epoch being written")
 }
 
+// Storing an extent rather than an endpoint is only worth it if a contradiction
+// is caught: groups are serial within an epoch, so one may not start before its
+// predecessor ended.
+func TestWriter_AppendGroup_RejectsOverlap(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
+	require.NoError(t, err)
+
+	overlapping := testGroup(t, 1)
+	overlapping.T0 = ticksPerGroup - 1 // one tick before group 0 ends
+
+	_, err = w.AppendGroup(t.Context(), overlapping, []byte("payload"))
+
+	assert.ErrorIs(t, err, ErrGroupOutOfOrder)
+}
+
+// A gap is legal — groups get dropped — so only an overlap is a contradiction.
+func TestWriter_AppendGroup_AllowsGapAfterPredecessor(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
+	require.NoError(t, err)
+
+	later := testGroup(t, 5)
+	later.T0 = 10 * ticksPerGroup
+
+	_, err = w.AppendGroup(t.Context(), later, []byte("payload"))
+
+	assert.NoError(t, err)
+}
+
+func TestWriter_AppendGroup_RejectsRewoundEpoch(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	advanced := testGroup(t, 0)
+	advanced.Epoch = 3
+	_, err := w.AppendGroup(t.Context(), advanced, []byte("payload"))
+	require.NoError(t, err)
+
+	stale := testGroup(t, 1)
+	stale.Epoch = 2
+
+	_, err = w.AppendGroup(t.Context(), stale, []byte("payload"))
+
+	assert.ErrorIs(t, err, ErrGroupOutOfOrder)
+}
+
+// An epoch restarts the timeline, so the ordering check must not carry across
+// one — group 0 of a new epoch legitimately precedes the old epoch's last.
+func TestWriter_AppendGroup_OrderingResetsWithEpoch(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 9), []byte("payload"))
+	require.NoError(t, err)
+
+	restarted := testGroup(t, 0)
+	restarted.Epoch = 2
+	restarted.T0 = 0
+
+	_, err = w.AppendGroup(t.Context(), restarted, []byte("payload"))
+
+	assert.NoError(t, err)
+}
+
+// A track declaring frame-derived timestamps must keep an absent anchor absent
+// rather than having one invented for it.
+func TestWriter_AppendGroup_LeavesWallclockUnsetForFrameTracks(t *testing.T) {
+	w, _ := newTestWriter(t)
+
+	group := testGroup(t, 0)
+	group.W0 = 0
+
+	meta, err := w.AppendGroup(t.Context(), group, []byte("payload"))
+	require.NoError(t, err)
+
+	assert.False(t, meta.HasWallclock())
+}
+
+// A track declaring ledger-clock timestamps gets one stamped.
+func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
+	store := memstore.New()
+	stamped := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+
+	config := testConfig(t)
+	config.TimeSource = TimeSourceIngest
+
+	w, err := CreateTrack(t.Context(), store, testTrack, config,
+		WithClock(func() time.Time { return stamped }))
+	require.NoError(t, err)
+
+	group := testGroup(t, 0)
+	group.W0 = 0
+
+	meta, err := w.AppendGroup(t.Context(), group, []byte("payload"))
+	require.NoError(t, err)
+
+	assert.Equal(t, stamped.UnixNano(), meta.W0)
+}
+
 func TestWriter_Seal(t *testing.T) {
 	w, store := newTestWriter(t)
 
@@ -332,11 +441,11 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// publishHeadLocked surfaces its error rather than handling it, which is what
+// publishHead surfaces its error rather than handling it, which is what
 // makes the swallow in AppendGroup an explicit decision instead of a hidden one.
 // Called directly here without the lock, which is safe in a single-goroutine
 // test.
-func TestWriter_publishHeadLocked(t *testing.T) {
+func TestWriter_publishHead(t *testing.T) {
 	headFailure := errors.New("head unavailable")
 	store := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
@@ -346,7 +455,7 @@ func TestWriter_publishHeadLocked(t *testing.T) {
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	err = w.publishHeadLocked(t.Context(), GroupRef{Epoch: 1, Sequence: 0})
+	err = w.publishHead(t.Context(), GroupRef{Epoch: 1, Sequence: 0})
 
 	assert.ErrorIs(t, err, headFailure)
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -103,16 +104,27 @@ func inspect(ctx context.Context, args []string) error {
 
 	fmt.Println()
 	out := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(out, "GROUP\tMEDIA\tWALLCLOCK\tSIZE")
+	fmt.Fprintln(out, "GROUP\tMEDIA\tWALLCLOCK\tOBJECTS\tSIZE")
 
 	for group, err := range reader.Groups(ctx) {
 		if err != nil {
 			out.Flush()
 			return err
 		}
-		fmt.Fprintf(out, "%s\t%d..%d\t%s\t%d\n",
-			group.GroupRef, group.T0, group.T1,
-			time.Unix(0, group.W0).UTC().Format(time.RFC3339Nano), group.Size)
+
+		media := strconv.FormatInt(group.T0, 10)
+		if group.HasDuration() {
+			media += ".." + strconv.FormatInt(group.MediaEnd(), 10)
+		}
+
+		// Both anchors are optional, so say so rather than printing the epoch.
+		wallclock := "-"
+		if group.HasWallclock() {
+			wallclock = time.Unix(0, group.W0).UTC().Format(time.RFC3339Nano)
+		}
+
+		fmt.Fprintf(out, "%s\t%s\t%s\t%d\t%d\n",
+			group.GroupRef, media, wallclock, group.ObjectCount, group.Size)
 	}
 
 	return out.Flush()
@@ -141,8 +153,8 @@ func follow(ctx context.Context, args []string) error {
 			return err
 		}
 		for _, group := range delta.Groups {
-			fmt.Printf("delta %d  group %s  media %d..%d  %d bytes\n",
-				delta.Seq, group.GroupRef, group.T0, group.T1, group.Size)
+			fmt.Printf("delta %d  group %s  media %d+%d  %d objects  %d bytes\n",
+				delta.Seq, group.GroupRef, group.T0, group.Duration, group.ObjectCount, group.Size)
 		}
 	}
 

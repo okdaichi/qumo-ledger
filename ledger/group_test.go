@@ -46,39 +46,64 @@ func TestGroupRef_Before(t *testing.T) {
 	}
 }
 
-func TestGroupMeta_Contains(t *testing.T) {
-	group := GroupMeta{T0: 1000, T1: 2000}
+func TestGroupMeta_MediaEnd(t *testing.T) {
+	assert.Equal(t, int64(1500), GroupMeta{T0: 500, Duration: 1000}.MediaEnd())
+	assert.Equal(t, int64(500), GroupMeta{T0: 500}.MediaEnd(),
+		"with no duration the end collapses onto the anchor")
+}
 
+// Duration and W0 are optional, so every consumer needs a way to tell "absent"
+// from a real value before using one.
+func TestGroupMeta_HasDuration(t *testing.T) {
+	assert.True(t, GroupMeta{Duration: 1}.HasDuration())
+	assert.False(t, GroupMeta{}.HasDuration(), "zero means the producer did not supply an extent")
+}
+
+func TestGroupMeta_HasWallclock(t *testing.T) {
+	assert.True(t, GroupMeta{W0: 1}.HasWallclock())
+	assert.False(t, GroupMeta{}.HasWallclock(), "zero means no anchor, not the Unix epoch")
+}
+
+func TestGroupMeta_wallclockEnd(t *testing.T) {
 	tests := map[string]struct {
-		mediaTime int64
-		expected  bool
+		group     GroupMeta
+		timescale uint32
+		expected  int64
+		ok        bool
 	}{
-		"before":             {mediaTime: 999, expected: false},
-		"at the lower bound": {mediaTime: 1000, expected: true},
-		"inside":             {mediaTime: 1500, expected: true},
-		"at the upper bound": {mediaTime: 2000, expected: false},
-		"after":              {mediaTime: 2001, expected: false},
-		"negative":           {mediaTime: -1, expected: false},
+		"anchor and extent present": {
+			// Two seconds at 90 kHz is 180000 units.
+			group:     GroupMeta{W0: 1_000_000_000, Duration: 180000},
+			timescale: 90000,
+			expected:  3_000_000_000,
+			ok:        true,
+		},
+		"no wallclock anchor": {
+			group:     GroupMeta{Duration: 180000},
+			timescale: 90000,
+			ok:        false,
+		},
+		"no duration": {
+			group:     GroupMeta{W0: 1_000_000_000},
+			timescale: 90000,
+			ok:        false,
+		},
+		"no timescale": {
+			group:     GroupMeta{W0: 1_000_000_000, Duration: 180000},
+			timescale: 0,
+			ok:        false,
+		},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, group.Contains(tt.mediaTime))
+			got, ok := tt.group.wallclockEnd(tt.timescale)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.expected, got)
+			}
 		})
 	}
-}
-
-func TestGroupMeta_ContainsWallclock(t *testing.T) {
-	group := GroupMeta{W0: 1_000_000, W1: 3_000_000}
-
-	assert.False(t, group.ContainsWallclock(999_999))
-	assert.True(t, group.ContainsWallclock(1_000_000), "the range is half-open, so the lower bound is included")
-	assert.False(t, group.ContainsWallclock(3_000_000), "the range is half-open, so the upper bound is excluded")
-}
-
-func TestGroupMeta_Duration(t *testing.T) {
-	assert.Equal(t, int64(1000), GroupMeta{T0: 500, T1: 1500}.Duration())
-	assert.Equal(t, int64(0), GroupMeta{T0: 500, T1: 500}.Duration())
 }
 
 func TestGroupMeta_validate(t *testing.T) {
@@ -87,27 +112,27 @@ func TestGroupMeta_validate(t *testing.T) {
 		wantErr bool
 	}{
 		"well formed": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 0, T1: 100, W0: 1, W1: 2},
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 0, Duration: 100, W0: 1},
 			wantErr: false,
 		},
-		"zero-length group is legal": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, T1: 100},
+		"duration and wallclock are both optional": {
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100},
 			wantErr: false,
 		},
 		"sequence zero is legal because producers may start there": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 0}, T0: 0, T1: 1},
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 0}, T0: 0, Duration: 1},
 			wantErr: false,
 		},
 		"epoch zero is reserved": {
 			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 0, Sequence: 1}},
 			wantErr: true,
 		},
-		"inverted media range": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, T1: 0},
+		"negative duration": {
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, Duration: -1},
 			wantErr: true,
 		},
-		"inverted wallclock range": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, W0: 100, W1: 0},
+		"negative wallclock": {
+			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, W0: -1},
 			wantErr: true,
 		},
 		"negative size": {

@@ -28,15 +28,19 @@ func Example() {
 	}
 
 	// Two-second groups, starting at a fixed instant so the example is
-	// reproducible. A real producer would take these from the frames.
+	// reproducible. A real producer would derive these from the frames.
+	//
+	// Only T0 is required. Duration and W0 are optional — a producer that
+	// cannot supply them still gets a replayable track, it just gives up
+	// duration-aware views and cross-track correlation respectively.
 	start := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	for sequence := range uint64(3) {
 		meta := ledger.GroupMeta{
-			GroupRef: ledger.GroupRef{Epoch: 1, Sequence: sequence},
-			T0:       int64(sequence) * 180000,
-			T1:       int64(sequence+1) * 180000,
-			W0:       start.Add(time.Duration(sequence) * 2 * time.Second).UnixNano(),
-			W1:       start.Add(time.Duration(sequence+1) * 2 * time.Second).UnixNano(),
+			GroupRef:    ledger.GroupRef{Epoch: 1, Sequence: sequence},
+			T0:          int64(sequence) * 180000,
+			Duration:    180000, // two seconds at 90 kHz
+			W0:          start.Add(time.Duration(sequence) * 2 * time.Second).UnixNano(),
+			ObjectCount: 60,
 		}
 
 		if _, err := writer.AppendGroup(ctx, meta, []byte("...frames...")); err != nil {
@@ -55,7 +59,7 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("group %s covers media %d..%d\n", group.GroupRef, group.T0, group.T1)
+	fmt.Printf("group %s covers media %d..%d\n", group.GroupRef, group.T0, group.MediaEnd())
 
 	// Output:
 	// group e000001-g00000002 covers media 360000..540000

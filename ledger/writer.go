@@ -53,6 +53,12 @@ type Writer struct {
 	// openBytes tracks the encoded size of the open region against the seal
 	// threshold.
 	openBytes int64
+
+	// last is the most recently committed group, kept so the next append can
+	// be checked against it. hasLast distinguishes "no group yet" from a
+	// zero-valued group.
+	last    GroupMeta
+	hasLast bool
 }
 
 // WriterOption configures a Writer.
@@ -183,6 +189,18 @@ func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, o
 
 		w.openGroups = append(w.openGroups, delta.Groups...)
 		w.openBytes += int64(len(data))
+		if n := len(delta.Groups); n > 0 {
+			w.last, w.hasLast = delta.Groups[n-1], true
+		}
+	}
+
+	// A writer reopened after a seal has no open groups to recover the last
+	// committed one from, so fall back to the newest sealed run's summary.
+	// Only the epoch and end matter for ordering the next append.
+	if !w.hasLast && len(root.Sealed) > 0 {
+		newest := root.Sealed[len(root.Sealed)-1]
+		w.last = GroupMeta{GroupRef: newest.Last, T0: newest.T1}
+		w.hasLast = true
 	}
 
 	return w, nil
@@ -238,9 +256,22 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if meta.W0 == 0 && meta.W1 == 0 {
-		now := w.now().UnixNano()
-		meta.W0, meta.W1 = now, now
+	// A track that declares its timestamps come from the ledger's own clock is
+	// stamped here. One that declares them frame-derived is left alone, so an
+	// absent anchor stays absent rather than being invented.
+	if meta.W0 == 0 && w.root.TimeSource == TimeSourceIngest {
+		meta.W0 = w.now().UnixNano()
+	}
+
+	// Re-appending the group just committed is a duplicate rather than a
+	// timeline contradiction, and saying so is more useful than the ordering
+	// error the check below would produce. It also saves a doomed round trip.
+	if w.hasLast && meta.GroupRef == w.last.GroupRef {
+		return GroupMeta{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
+	}
+
+	if err := w.checkOrder(meta); err != nil {
+		return GroupMeta{}, err
 	}
 
 	meta.Object = groupKey(w.track, meta.GroupRef)
@@ -278,14 +309,15 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	w.nextDelta++
 	w.openGroups = append(w.openGroups, meta)
 	w.openBytes += int64(len(data))
+	w.last, w.hasLast = meta, true
 
 	if meta.Epoch > w.root.Epoch {
-		if err := w.updateRootLocked(ctx, func(root *RootManifest) { root.Epoch = meta.Epoch }); err != nil {
+		if err := w.updateRoot(ctx, func(root *RootManifest) { root.Epoch = meta.Epoch }); err != nil {
 			return meta, err
 		}
 	}
 
-	if err := w.publishHeadLocked(ctx, meta.GroupRef); err != nil {
+	if err := w.publishHead(ctx, meta.GroupRef); err != nil {
 		// not actionable: head is a discovery cache. A reader that finds it
 		// stale probes forward and catches up, and one that finds it missing
 		// starts from the root. Failing an append that is already durably
@@ -295,7 +327,7 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	}
 
 	if w.openBytes >= w.sealThreshold {
-		if err := w.sealLocked(ctx); err != nil {
+		if err := w.seal(ctx); err != nil {
 			// The group is committed and durable; only the rotation failed.
 			// Report it so the caller can retry, but do not imply data loss.
 			return meta, fmt.Errorf("ledger: group committed but seal failed: %w", err)
@@ -305,23 +337,50 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	return meta, nil
 }
 
+// checkOrder rejects a group that would contradict the one before it.
+// Requires w.mu.
+//
+// Groups are serial within an epoch: each starts at or after the previous one
+// ended. Enforcing that here is the point of storing an extent rather than an
+// endpoint — a contradiction becomes a failed append instead of a seek that
+// quietly returns the wrong group months later.
+//
+// A new epoch restarts the timeline, so no ordering is implied across one.
+func (w *Writer) checkOrder(meta GroupMeta) error {
+	if meta.Epoch < w.root.Epoch {
+		return fmt.Errorf("%w: group %s is in epoch %d, behind the track's epoch %d",
+			ErrGroupOutOfOrder, meta.GroupRef, meta.Epoch, w.root.Epoch)
+	}
+	if !w.hasLast || w.last.Epoch != meta.Epoch {
+		return nil
+	}
+
+	if end := w.last.MediaEnd(); meta.T0 < end {
+		return fmt.Errorf("%w: group %s starts at %d, before group %s ends at %d",
+			ErrGroupOutOfOrder, meta.GroupRef, meta.T0, w.last.GroupRef, end)
+	}
+
+	return nil
+}
+
 // Seal rotates the open region into a sealed manifest immediately, rather than
 // waiting for the size threshold. Sealing an empty open region does nothing.
 func (w *Writer) Seal(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.sealLocked(ctx)
+	return w.seal(ctx)
 }
 
-// sealLocked folds the open deltas into one immutable sealed manifest, points
+// seal folds the open deltas into one immutable sealed manifest, points
 // the root at it, and reclaims the deltas it replaced.
 //
 // The order matters. The sealed manifest is written first, then the root is
 // swapped to reference it, and only then are the open deltas deleted. A crash
 // at any point leaves the track readable: an unreferenced sealed manifest is
 // ignored, and deltas that outlive their seal are simply redundant.
-func (w *Writer) sealLocked(ctx context.Context) error {
+// Requires w.mu.
+func (w *Writer) seal(ctx context.Context) error {
 	if len(w.openGroups) == 0 {
 		return nil
 	}
@@ -349,7 +408,7 @@ func (w *Writer) sealLocked(ctx context.Context) error {
 	}
 
 	firstDelta, lastDelta := w.root.OpenFrom, w.nextDelta-1
-	if err := w.updateRootLocked(ctx, func(root *RootManifest) {
+	if err := w.updateRoot(ctx, func(root *RootManifest) {
 		root.Sealed = append(root.Sealed, sealed.summarize(key))
 		root.OpenFrom = lastDelta + 1
 	}); err != nil {
@@ -371,8 +430,9 @@ func (w *Writer) sealLocked(ctx context.Context) error {
 	return nil
 }
 
-// updateRootLocked applies mutate to the root manifest and swaps it in.
-func (w *Writer) updateRootLocked(ctx context.Context, mutate func(*RootManifest)) error {
+// updateRoot applies mutate to the root manifest and swaps it in.
+// Requires w.mu.
+func (w *Writer) updateRoot(ctx context.Context, mutate func(*RootManifest)) error {
 	next := w.root
 	next.Sealed = append([]SealedRef(nil), w.root.Sealed...)
 	mutate(&next)
@@ -392,7 +452,7 @@ func (w *Writer) updateRootLocked(ctx context.Context, mutate func(*RootManifest
 	return nil
 }
 
-// publishHeadLocked advances the head pointer.
+// publishHead advances the head pointer. Requires w.mu.
 //
 // head is a discovery cache: a reader that finds it stale probes forward and
 // catches up, and a reader that finds it missing starts from the root. Nothing
@@ -401,7 +461,7 @@ func (w *Writer) updateRootLocked(ctx context.Context, mutate func(*RootManifest
 // It returns any error rather than handling it, leaving the decision to the
 // caller — which lets the swallow be explicit and keeps the failure visible to
 // tests.
-func (w *Writer) publishHeadLocked(ctx context.Context, latest GroupRef) error {
+func (w *Writer) publishHead(ctx context.Context, latest GroupRef) error {
 	head := Head{
 		Version:   ManifestVersion,
 		Delta:     w.nextDelta - 1,

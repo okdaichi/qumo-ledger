@@ -137,30 +137,56 @@ that is the whole point: a relay serving the same track live uses those numbers,
 and a client can only align live playback against replay if both agree on what
 group 42 is. Renumbering would break decision 2's contract with clients.
 
-## 9. Two independent time indexes per group
+## 9. A group is anchored on two timelines, not described as an interval
 
-Media time `[T0, T1)` in the track's timescale, **and** wallclock `[W0, W1)` in
-Unix nanoseconds.
+Groups are serial within an epoch — the start of one is the end of the last — so
+a group carries **anchors** rather than a closed range:
 
-**Why neither alone is enough.** Media time is exact, arrives with the data, and
-is immune to clock skew — but it is relative to one track's origin and cannot be
-compared across publishers. Wallclock is absolute and comparable across every
-track and source type, which is what makes *"show me the video and the sensor
-readings at 14:32"* answerable at all — but it depends on a clock and drifts.
+| field | required | purpose |
+|---|---|---|
+| `T0` | yes | media-time anchor; orders the group and resolves media seeks |
+| `Duration` | no | media extent; becomes `EXTINF` and DASH `@d` |
+| `W0` | no | wallclock anchor; the cross-track correlation key |
 
-Storing both costs about sixteen bytes per group row.
+**Why two clocks.** Media time is exact, arrives with the data, and is immune to
+clock skew — but it is relative to one track's origin and cannot be compared
+across publishers. Wallclock is absolute and comparable across every track and
+source type, which is what makes *"show me the video and the sensor readings at
+14:32"* answerable at all — but it depends on a clock and drifts. `W0` is
+optional because not every producer has a clock worth trusting; a group without
+one still replays within its own track, it just cannot be correlated.
+
+**Why `Duration` is stored rather than derived.** Deriving it from the next
+group's `T0` fails in the two places that matter. Across a **dropped group** it
+would silently span the gap, so a player waits on media that was never stored.
+And the **newest group has no successor**, so a live HLS playlist could not carry
+its newest segment until the following one landed — a full group of added
+latency, against the requirement that new groups become visible quickly. The only
+other source is the payload, which would force a manifest-only renderer to fetch
+objects.
+
+**There is no stored end for either timeline.** Seeks resolve to *the last group
+anchored at or before the target*, which is what a player wants anyway — land on
+or before, then decode forward — and which keeps working when a producer supplies
+no duration. `Duration` is consulted only to reject a target past a known end.
+
+**Why contradictions are rejected at append.** Values that can disagree with each
+other are the real cost of redundancy. Since groups are serial, `AppendGroup`
+refuses a group starting before its predecessor ended, or carrying an epoch
+behind the track's. Gaps stay legal — they are real data.
 
 **Note on provenance.** moq-lite draft-05 added a `Timestamp Delta` to `FRAME`,
 zigzag-encoded in the track's negotiated `Timescale`, with the first frame of a
 group delta-encoded from zero — so a group's `T0` is readable from the first
-varint of its first frame, and `T1` accumulates for free while writing. Earlier
-drafts carry no timestamps at all, so those producers get ingest-clock values
-instead. `TimeSource` records which, because a reader needs to know how much to
-trust them.
+varint of its first frame, and `Duration` accumulates for free while writing.
+Earlier drafts carry no timestamps at all, so those tracks declare
+`TimeSource: ingest` and the ledger stamps `W0` from its own clock.
 
-Per-frame timestamps stay inside the payload. Indexing them in the manifest
-would multiply metadata by the frame rate — a hundredfold for 100 Hz sensor
-data — and can exceed the payload it describes.
+Per-frame timestamps stay inside the payload. Indexing them in the manifest would
+multiply metadata by the frame rate — a hundredfold for 100 Hz sensor data — and
+can exceed the payload it describes. `ObjectCount` is carried instead, so a
+reader can confirm it consumed a whole group and range-check an object index
+without fetching.
 
 ## 10. Reads require object-store access and nothing else
 

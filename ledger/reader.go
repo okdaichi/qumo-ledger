@@ -205,39 +205,68 @@ func (r *Reader) Follow(ctx context.Context, from uint64, interval time.Duration
 	}
 }
 
-// SeekWallclock returns the group covering a Unix-nanosecond instant.
+// SeekWallclock returns the group anchored at or before a Unix-nanosecond
+// instant, skipping groups that carry no wallclock anchor.
 //
 // Wallclock is the cross-track key: seeking two tracks to the same instant is
 // what makes correlated replay — video alongside the sensor readings recorded
-// with it — possible at all. For frame-accurate seeking inside a single track,
-// use [Reader.SeekMedia].
+// with it — possible at all. For seeking within one track, use
+// [Reader.SeekMedia], which is exact and immune to clock skew.
 func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupMeta, error) {
-	return r.seek(ctx, func(ref SealedRef) bool {
-		return ref.Covers(unixNano)
-	}, func(group GroupMeta) bool {
-		return group.ContainsWallclock(unixNano)
-	})
+	timescale := r.Root().Timescale
+
+	return r.seek(ctx, unixNano,
+		func(g GroupMeta) (int64, bool) { return g.W0, g.HasWallclock() },
+		func(g GroupMeta) (int64, bool) { return g.wallclockEnd(timescale) },
+		func(ref SealedRef) (int64, bool) { return ref.W0, ref.W0 != 0 },
+	)
 }
 
-// SeekMedia returns the group covering a media timestamp, in the track's
-// timescale units. Media time is exact and skew-free but relative to this
-// track's origin, so it cannot be compared across producers.
+// SeekMedia returns the group anchored at or before a media timestamp, in the
+// track's timescale units.
 func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupMeta, error) {
-	return r.seek(ctx, func(ref SealedRef) bool {
-		return mediaTime >= ref.T0 && mediaTime < ref.T1
-	}, func(group GroupMeta) bool {
-		return group.Contains(mediaTime)
-	})
+	return r.seek(ctx, mediaTime,
+		func(g GroupMeta) (int64, bool) { return g.T0, true },
+		func(g GroupMeta) (int64, bool) { return g.MediaEnd(), g.HasDuration() },
+		func(ref SealedRef) (int64, bool) { return ref.T0, true },
+	)
 }
 
-// seek scans sealed manifests whose summary may cover the target before
-// falling back to the open region. The summaries are what keep this from
-// degrading into a scan of the entire history.
-func (r *Reader) seek(ctx context.Context, covers func(SealedRef) bool, matches func(GroupMeta) bool) (GroupMeta, error) {
+// seek returns the last group anchored at or before target.
+//
+// It resolves against anchors rather than testing containment, which is both
+// what a player wants — land on or before the target and decode forward — and
+// what keeps seeking correct when a producer supplies no duration. Duration is
+// consulted only at the end, to reject a target that falls past a known end.
+//
+// start prunes sealed runs whose whole range begins after the target. Those
+// summaries live in the root, so pruning costs no fetch.
+func (r *Reader) seek(
+	ctx context.Context,
+	target int64,
+	anchor func(GroupMeta) (int64, bool),
+	end func(GroupMeta) (int64, bool),
+	start func(SealedRef) (int64, bool),
+) (GroupMeta, error) {
 	root := r.Root()
 
+	var (
+		best     GroupMeta
+		bestAt   int64
+		found    bool
+		consider = func(group GroupMeta) {
+			at, ok := anchor(group)
+			if !ok || at > target {
+				return
+			}
+			if !found || at >= bestAt {
+				best, bestAt, found = group, at, true
+			}
+		}
+	)
+
 	for _, ref := range root.Sealed {
-		if !covers(ref) {
+		if at, ok := start(ref); ok && at > target {
 			continue
 		}
 
@@ -246,9 +275,7 @@ func (r *Reader) seek(ctx context.Context, covers func(SealedRef) bool, matches 
 			return GroupMeta{}, err
 		}
 		for _, group := range sealed.Groups {
-			if matches(group) {
-				return group, nil
-			}
+			consider(group)
 		}
 	}
 
@@ -261,13 +288,18 @@ func (r *Reader) seek(ctx context.Context, covers func(SealedRef) bool, matches 
 			return GroupMeta{}, err
 		}
 		for _, group := range delta.Groups {
-			if matches(group) {
-				return group, nil
-			}
+			consider(group)
 		}
 	}
 
-	return GroupMeta{}, fmt.Errorf("ledger: no group covers the requested instant in %s", r.track)
+	if !found {
+		return GroupMeta{}, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrNoGroupFound, r.track, target)
+	}
+	if at, ok := end(best); ok && target >= at {
+		return GroupMeta{}, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrNoGroupFound, target, best.GroupRef, r.track)
+	}
+
+	return best, nil
 }
 
 func fetchRoot(ctx context.Context, store objectstore.Store, track TrackPath) (RootManifest, objectstore.Version, error) {

@@ -62,13 +62,26 @@
 //
 // # Time
 //
-// Each Group carries two independent time ranges, because neither alone is
-// sufficient. Media time ([GroupMeta.T0], [GroupMeta.T1]) is exact, arrives
-// with the data, and is immune to clock skew, but is relative to one track's
-// origin and cannot be compared across publishers. Wallclock ([GroupMeta.W0],
-// [GroupMeta.W1]) is absolute and comparable across every track and source
-// type, which is what makes "show me the video and the sensor readings at
-// 14:32" answerable at all, but it depends on a clock and drifts.
+// A Group is anchored on two timelines rather than described as a closed
+// interval, because groups are serial within an epoch: the start of one is the
+// end of the last.
+//
+// [GroupMeta.T0] is the media-time anchor and is always present. It is exact,
+// arrives with the data, and is immune to clock skew, but is relative to one
+// track's origin and cannot be compared across publishers. [GroupMeta.W0] is
+// the wallclock anchor, absolute and comparable across every track and source
+// type — what makes "show me the video and the sensor readings at 14:32"
+// answerable at all — but it depends on a clock and drifts.
+//
+// W0 is optional, since not every producer has a clock worth trusting, and a
+// Group without one still replays within its own track.
+//
+// [GroupMeta.Duration] is also optional, and is stored rather than derived from
+// the next Group's anchor. That derivation fails in the two places that matter:
+// across a dropped Group it would silently span the gap, and the newest Group
+// has no successor, so a live HLS playlist could not include its newest segment
+// until the following one landed. Derived views consume it directly — it is
+// EXTINF in HLS and @d in a DASH SegmentTimeline.
 //
 // This package does not compute media time. Extracting it means parsing a
 // transport's wire format, and the core deliberately depends on no transport.

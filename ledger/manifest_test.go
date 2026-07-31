@@ -50,9 +50,9 @@ func TestSealedManifest_summarize(t *testing.T) {
 		FirstDelta: 4,
 		LastDelta:  6,
 		Groups: []GroupMeta{
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 100, T1: 200, W0: 1000, W1: 2000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 200, T1: 300, W0: 2000, W1: 3000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 300, T1: 400, W0: 3000, W1: 4000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 100, Duration: 100, W0: 1000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 200, Duration: 100, W0: 2000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 300, Duration: 100, W0: 3000},
 		},
 	}
 
@@ -67,18 +67,47 @@ func TestSealedManifest_summarize(t *testing.T) {
 	assert.Equal(t, int64(100), ref.T0)
 	assert.Equal(t, int64(400), ref.T1)
 	assert.Equal(t, int64(1000), ref.W0)
-	assert.Equal(t, int64(4000), ref.W1)
+	assert.Equal(t, int64(3000), ref.W1, "wallclock bounds span anchors, since groups carry no wallclock end")
 }
 
-// Commit order is not time order: a producer may backfill, and an epoch change
-// resets media time outright. The summary must widen to cover every group or a
-// range search will step over data that is really there.
-func TestSealedManifest_summarize_OutOfOrderGroups(t *testing.T) {
+// Wallclock is optional, so the bounds must cover only the groups that have an
+// anchor — a missing one is not an anchor at the Unix epoch.
+func TestSealedManifest_summarize_PartialWallclock(t *testing.T) {
 	manifest := SealedManifest{
 		Groups: []GroupMeta{
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 500, T1: 600, W0: 5000, W1: 6000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 100, T1: 200, W0: 1000, W1: 2000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 900, T1: 1000, W0: 9000, W1: 10000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 100, Duration: 100},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 200, Duration: 100, W0: 5000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 300, Duration: 100, W0: 7000},
+		},
+	}
+
+	ref := manifest.summarize("k")
+
+	assert.Equal(t, int64(5000), ref.W0, "the group without an anchor must not drag W0 to zero")
+	assert.Equal(t, int64(7000), ref.W1)
+}
+
+func TestSealedManifest_summarize_NoWallclock(t *testing.T) {
+	manifest := SealedManifest{
+		Groups: []GroupMeta{{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, Duration: 100}},
+	}
+
+	ref := manifest.summarize("k")
+
+	assert.Zero(t, ref.W0)
+	assert.Zero(t, ref.W1)
+	assert.Equal(t, int64(200), ref.T1, "the media bounds are unaffected")
+}
+
+// A sealed run spans more than one epoch when a producer restarts mid-run, and
+// an epoch resets media time outright. The summary must widen to cover every
+// group or a range search will step over data that is really there.
+func TestSealedManifest_summarize_AcrossEpochs(t *testing.T) {
+	manifest := SealedManifest{
+		Groups: []GroupMeta{
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 500, Duration: 100, W0: 5000},
+			{GroupRef: GroupRef{Epoch: 2, Sequence: 0}, T0: 100, Duration: 100, W0: 6000},
+			{GroupRef: GroupRef{Epoch: 2, Sequence: 1}, T0: 900, Duration: 100, W0: 9000},
 		},
 	}
 
@@ -86,8 +115,8 @@ func TestSealedManifest_summarize_OutOfOrderGroups(t *testing.T) {
 
 	assert.Equal(t, int64(100), ref.T0, "the summary must reach the earliest group, not the first one committed")
 	assert.Equal(t, int64(1000), ref.T1)
-	assert.Equal(t, int64(1000), ref.W0)
-	assert.Equal(t, int64(10000), ref.W1)
+	assert.Equal(t, int64(5000), ref.W0)
+	assert.Equal(t, int64(9000), ref.W1)
 }
 
 func TestSealedManifest_summarize_Empty(t *testing.T) {
@@ -96,27 +125,6 @@ func TestSealedManifest_summarize_Empty(t *testing.T) {
 	assert.Equal(t, "k", ref.Key)
 	assert.Equal(t, 0, ref.Groups)
 	assert.Equal(t, GroupRef{}, ref.First)
-}
-
-func TestSealedRef_Covers(t *testing.T) {
-	ref := SealedRef{W0: 1000, W1: 2000}
-
-	tests := map[string]struct {
-		instant  int64
-		expected bool
-	}{
-		"before":      {instant: 999, expected: false},
-		"lower bound": {instant: 1000, expected: true},
-		"inside":      {instant: 1500, expected: true},
-		"upper bound": {instant: 2000, expected: false},
-		"after":       {instant: 2001, expected: false},
-	}
-
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, ref.Covers(tt.instant))
-		})
-	}
 }
 
 func TestDecodeManifest_RejectsNewerVersion(t *testing.T) {

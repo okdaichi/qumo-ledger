@@ -43,11 +43,13 @@ writer, _ := ledger.CreateTrack(ctx, store, "live/cam1/video", ledger.TrackConfi
     Encoding:   "fmp4",
 })
 
-// A sealed group, with both timelines populated by the caller.
+// A sealed group. Only T0 is required — Duration and W0 are optional.
 writer.AppendGroup(ctx, ledger.GroupMeta{
-    GroupRef: ledger.GroupRef{Epoch: 1, Sequence: 42},
-    T0:       7560000, T1: 7740000,     // media time, in timescale units
-    W0:       w0, W1: w1,               // wallclock, Unix nanoseconds
+    GroupRef:    ledger.GroupRef{Epoch: 1, Sequence: 42},
+    T0:          7560000, // media anchor, in timescale units
+    Duration:    180000,  // optional: two seconds at 90 kHz
+    W0:          w0,      // optional: wallclock anchor, Unix nanoseconds
+    ObjectCount: 60,
 }, payload)
 
 // Readers need only store access.
@@ -62,10 +64,16 @@ for delta, err := range reader.Follow(ctx, 0, ledger.DefaultPollInterval) {
 }
 ```
 
-Every group carries **two** independent time ranges. Media time is exact and
-skew-free but relative to one track's origin; wallclock is absolute and
-comparable across tracks, which is what makes *"the video and the sensor
-readings at 14:32"* a question with an answer.
+A group is **anchored** on two timelines rather than described as an interval,
+because groups are serial — the start of one is the end of the last. Media time
+(`T0`) is exact and skew-free but relative to one track's origin; wallclock
+(`W0`) is absolute and comparable across tracks, which is what makes *"the video
+and the sensor readings at 14:32"* a question with an answer.
+
+`Duration` and `W0` are optional. `Duration` is stored rather than derived from
+the next group because that derivation breaks across a dropped group and is
+undefined for the newest one — and it is exactly what HLS `EXTINF` and DASH `@d`
+need. A group that contradicts its predecessor is refused at append time.
 
 ## Object layout
 

@@ -91,18 +91,23 @@ type RootManifest struct {
 
 // SealedRef summarizes a sealed manifest so the root can be searched without
 // fetching its contents.
+//
+// Every field is derived at seal time; nothing here is supplied by a caller.
 type SealedRef struct {
 	Key        string `json:"key"`
 	FirstDelta uint64 `json:"firstDelta"`
 	LastDelta  uint64 `json:"lastDelta"`
 	Groups     int    `json:"groups"`
 
-	// The covered ranges, mirroring GroupMeta so a reader can binary-search
-	// either timeline.
+	// T0 and T1 bound the run in media time. T1 reaches the end of the last
+	// group whose duration is known, and equals the final anchor otherwise.
 	T0 int64 `json:"t0"`
 	T1 int64 `json:"t1"`
-	W0 int64 `json:"w0"`
-	W1 int64 `json:"w1"`
+
+	// W0 and W1 bound the run in wallclock time, across only those groups
+	// that carry an anchor. Both are zero when none does.
+	W0 int64 `json:"w0,omitempty"`
+	W1 int64 `json:"w1,omitempty"`
 
 	First GroupRef `json:"first"`
 	Last  GroupRef `json:"last"`
@@ -172,27 +177,27 @@ func (m SealedManifest) summarize(key string) SealedRef {
 
 	first, last := m.Groups[0], m.Groups[len(m.Groups)-1]
 	ref.First, ref.Last = first.GroupRef, last.GroupRef
-	ref.T0, ref.T1 = first.T0, last.T1
-	ref.W0, ref.W1 = first.W0, last.W1
+	ref.T0, ref.T1 = first.T0, last.MediaEnd()
 
-	// Groups are appended in commit order, which is not necessarily time
-	// order — a producer may backfill, and an epoch change resets media time
-	// entirely. Widen the bounds so a range search cannot miss a group.
+	// A run spans more than one epoch whenever a producer restarts mid-run,
+	// and an epoch resets media time outright. Widen the bounds over every
+	// group so a range search cannot step over one.
 	for _, g := range m.Groups {
 		ref.T0 = min(ref.T0, g.T0)
-		ref.T1 = max(ref.T1, g.T1)
-		ref.W0 = min(ref.W0, g.W0)
-		ref.W1 = max(ref.W1, g.W1)
+		ref.T1 = max(ref.T1, g.MediaEnd())
+
+		// Wallclock is optional, so the bounds cover only the groups that
+		// carry an anchor. Zero means "no anchor", never "the epoch".
+		if !g.HasWallclock() {
+			continue
+		}
+		if ref.W0 == 0 || g.W0 < ref.W0 {
+			ref.W0 = g.W0
+		}
+		ref.W1 = max(ref.W1, g.W0)
 	}
 
 	return ref
-}
-
-// Covers reports whether the sealed run may contain the given wallclock
-// instant. It is deliberately inclusive: a false positive costs one wasted
-// fetch, whereas a false negative silently loses data.
-func (r SealedRef) Covers(unixNano int64) bool {
-	return unixNano >= r.W0 && unixNano < r.W1
 }
 
 func encodeManifest(v any) ([]byte, error) {
