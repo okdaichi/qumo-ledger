@@ -1,4 +1,4 @@
-// Package fsstore provides a local-filesystem [objectstore.Store].
+// Package fsstore provides a local-filesystem [store.Store].
 //
 // It exists so the ledger can run with no cloud dependency — for development,
 // for single-node deployments, and for tests that want real durability. Object
@@ -28,7 +28,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
 // ErrInvalidKey reports a key that does not name a location inside the root.
@@ -44,8 +44,8 @@ type Store struct {
 }
 
 var (
-	_ objectstore.Store  = (*Store)(nil)
-	_ objectstore.Lister = (*Store)(nil)
+	_ store.Store  = (*Store)(nil)
+	_ store.Lister = (*Store)(nil)
 )
 
 // New returns a Store rooted at dir, creating dir if it does not exist.
@@ -57,78 +57,78 @@ func New(dir string) (*Store, error) {
 	return &Store{root: dir}, nil
 }
 
-// Get implements [objectstore.Store].
-func (s *Store) Get(ctx context.Context, key string) ([]byte, objectstore.Version, error) {
+// Get implements [store.Store].
+func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, objectstore.NoVersion, err
+		return nil, store.NoVersion, err
 	}
 
 	name, err := s.resolve(key)
 	if err != nil {
-		return nil, objectstore.NoVersion, err
+		return nil, store.NoVersion, err
 	}
 
 	data, err := os.ReadFile(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, objectstore.NoVersion, fmt.Errorf("fsstore: get %q: %w", key, objectstore.ErrNotExist)
+			return nil, store.NoVersion, fmt.Errorf("fsstore: get %q: %w", key, store.ErrNotExist)
 		}
-		return nil, objectstore.NoVersion, fmt.Errorf("fsstore: get %q: %w", key, err)
+		return nil, store.NoVersion, fmt.Errorf("fsstore: get %q: %w", key, err)
 	}
 
 	return data, version(data), nil
 }
 
-// Create implements [objectstore.Store]. Exclusivity comes from O_EXCL, so it
+// Create implements [store.Store]. Exclusivity comes from O_EXCL, so it
 // is atomic against other processes as well as other goroutines.
-func (s *Store) Create(ctx context.Context, key string, data []byte) (objectstore.Version, error) {
+func (s *Store) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	name, err := s.resolve(key)
 	if err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, err)
 	}
 
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return objectstore.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, objectstore.ErrExist)
+			return store.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, store.ErrExist)
 		}
-		return objectstore.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: create %q: %w", key, err)
 	}
 	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: write %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: write %q: %w", key, err)
 	}
 
 	// Objects are immutable and referenced only after the write returns, so a
 	// torn file after a crash is indistinguishable from one that was never
 	// created — both are simply absent from any manifest.
 	if err := f.Sync(); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: sync %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: sync %q: %w", key, err)
 	}
 
 	return version(data), nil
 }
 
-// Swap implements [objectstore.Store] via a temporary file and rename, which
+// Swap implements [store.Store] via a temporary file and rename, which
 // is atomic on both POSIX and Windows. See the package docs for the
 // single-process caveat.
-func (s *Store) Swap(ctx context.Context, key string, data []byte, expect objectstore.Version) (objectstore.Version, error) {
+func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	name, err := s.resolve(key)
 	if err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	s.mu.Lock()
@@ -137,47 +137,47 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect object
 	current, err := os.ReadFile(name)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		if expect != objectstore.NoVersion {
-			return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, objectstore.ErrNotExist)
+		if expect != store.NoVersion {
+			return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, store.ErrNotExist)
 		}
 	case err != nil:
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	default:
 		if version(current) != expect {
-			return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, objectstore.ErrVersionMismatch)
+			return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, store.ErrVersionMismatch)
 		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(name), ".swap-*")
 	if err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 	defer os.Remove(tmp.Name())
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 
 	if err := os.Rename(tmp.Name(), name); err != nil {
-		return objectstore.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
+		return store.NoVersion, fmt.Errorf("fsstore: swap %q: %w", key, err)
 	}
 
 	return version(data), nil
 }
 
-// Delete implements [objectstore.Store].
+// Delete implements [store.Store].
 func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -195,7 +195,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Keys implements [objectstore.Lister].
+// Keys implements [store.Lister].
 func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		walkErr := filepath.WalkDir(s.root, func(name string, d fs.DirEntry, err error) error {
@@ -272,10 +272,10 @@ func (s *Store) resolve(key string) (string, error) {
 // version derives an object version from its content. A real backend would
 // return the ETag it already maintains; deriving it here keeps the semantics
 // identical without a sidecar file or extended attributes.
-func version(data []byte) objectstore.Version {
+func version(data []byte) store.Version {
 	h := fnv.New64a()
 	// not actionable: hash.Hash.Write is documented never to return an error.
 	_, _ = h.Write(data)
 
-	return objectstore.Version(strconv.FormatUint(h.Sum64(), 16))
+	return store.Version(strconv.FormatUint(h.Sum64(), 16))
 }

@@ -1,4 +1,8 @@
-// Package objectstore defines the storage substrate qumo-ledger is built on.
+// Package store defines the storage substrate qumo-ledger is built on.
+//
+// It sits under [github.com/okdaichi/qumo-ledger/ledger] but stays a leaf: the
+// ledger consumes this contract and backends implement it, so a backend never
+// has to import the ledger to be usable by it.
 //
 // The ledger is object-store native: every durable artifact is an object, and a
 // reader holding nothing but object-store access can seek and replay a track
@@ -30,4 +34,4 @@
 // external service is expected to mint scoped credentials or signed URLs so
 // that clients keep reading objects directly. Backends that can presign let
 // that service delegate instead of proxying bytes.
-package objectstore
+package store

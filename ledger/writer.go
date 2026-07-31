@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
 // DefaultSealThreshold is how many bytes of open manifest accumulate before the
@@ -33,8 +33,8 @@ const DefaultSealThreshold = 64 << 10
 //
 // Writer is safe for concurrent use.
 type Writer struct {
-	store objectstore.Store
-	track TrackPath
+	objects store.Store
+	track   TrackPath
 
 	sealThreshold int64
 	now           func() time.Time
@@ -42,8 +42,8 @@ type Writer struct {
 
 	mu          sync.Mutex
 	root        RootManifest
-	rootVersion objectstore.Version
-	headVersion objectstore.Version
+	rootVersion store.Version
+	headVersion store.Version
 
 	// nextDelta is the delta number the next commit will claim.
 	nextDelta uint64
@@ -95,7 +95,7 @@ func WithLogger(logger *slog.Logger) WriterOption {
 
 // CreateTrack writes a new root manifest and returns a Writer positioned at the
 // start of the track. It returns ErrTrackExists if the track already has one.
-func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, cfg TrackConfig, opts ...WriterOption) (*Writer, error) {
+func CreateTrack(ctx context.Context, objects store.Store, track TrackPath, cfg TrackConfig, opts ...WriterOption) (*Writer, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, 
 		return nil, err
 	}
 
-	w := newWriter(store, track, opts)
+	w := newWriter(objects, track, opts)
 
 	w.root = RootManifest{
 		Version:    ManifestVersion,
@@ -122,9 +122,9 @@ func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, 
 		return nil, err
 	}
 
-	version, err := store.Create(ctx, rootKey(track), data)
+	version, err := objects.Create(ctx, rootKey(track), data)
 	if err != nil {
-		if errors.Is(err, objectstore.ErrExist) {
+		if errors.Is(err, store.ErrExist) {
 			return nil, fmt.Errorf("%w: %s", ErrTrackExists, track)
 		}
 		return nil, fmt.Errorf("ledger: create track %s: %w", track, err)
@@ -141,14 +141,14 @@ func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, 
 // immutable and written atomically, any delta that exists is committed, whether
 // or not head knows about it. A writer that crashed mid-append therefore
 // resumes without losing committed groups and without a repair pass.
-func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, opts ...WriterOption) (*Writer, error) {
+func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts ...WriterOption) (*Writer, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
 
-	w := newWriter(store, track, opts)
+	w := newWriter(objects, track, opts)
 
-	root, version, err := fetchRoot(ctx, store, track)
+	root, version, err := fetchRoot(ctx, objects, track)
 	if err != nil {
 		return nil, err
 	}
@@ -156,19 +156,19 @@ func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, o
 
 	// head is only a hint. Trust it to skip ahead, never to stop early.
 	from := root.OpenFrom
-	if head, headVersion, err := fetchHead(ctx, store, track); err == nil {
+	if head, headVersion, err := fetchHead(ctx, objects, track); err == nil {
 		w.headVersion = headVersion
 		if head.Delta >= from {
 			from = head.Delta
 		}
-	} else if !errors.Is(err, objectstore.ErrNotExist) {
+	} else if !errors.Is(err, store.ErrNotExist) {
 		return nil, err
 	}
 
 	// Replay the open region so the seal threshold and group rows are accurate.
 	for n := root.OpenFrom; ; n++ {
-		data, _, err := store.Get(ctx, deltaKey(track, n))
-		if errors.Is(err, objectstore.ErrNotExist) {
+		data, _, err := objects.Get(ctx, deltaKey(track, n))
+		if errors.Is(err, store.ErrNotExist) {
 			if n < from {
 				// A gap below the head pointer means deltas were lost, which
 				// immutability should make impossible. Refuse rather than
@@ -206,9 +206,9 @@ func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, o
 	return w, nil
 }
 
-func newWriter(store objectstore.Store, track TrackPath, opts []WriterOption) *Writer {
+func newWriter(objects store.Store, track TrackPath, opts []WriterOption) *Writer {
 	w := &Writer{
-		store:         store,
+		objects:       objects,
 		track:         track,
 		sealThreshold: DefaultSealThreshold,
 		now:           time.Now,
@@ -277,8 +277,8 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	meta.Object = groupKey(w.track, meta.GroupRef)
 	meta.Size = int64(len(payload))
 
-	if _, err := w.store.Create(ctx, meta.Object, payload); err != nil {
-		if errors.Is(err, objectstore.ErrExist) {
+	if _, err := w.objects.Create(ctx, meta.Object, payload); err != nil {
+		if errors.Is(err, store.ErrExist) {
 			return GroupMeta{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
 		}
 		return GroupMeta{}, fmt.Errorf("ledger: write group %s: %w", meta.GroupRef, err)
@@ -297,8 +297,8 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	}
 
 	// This create is the commit point.
-	if _, err := w.store.Create(ctx, deltaKey(w.track, w.nextDelta), data); err != nil {
-		if errors.Is(err, objectstore.ErrExist) {
+	if _, err := w.objects.Create(ctx, deltaKey(w.track, w.nextDelta), data); err != nil {
+		if errors.Is(err, store.ErrExist) {
 			// Another writer claimed this delta number. Immutability turned a
 			// silent split-brain into a clean failure.
 			return GroupMeta{}, fmt.Errorf("ledger: delta %d already committed on %s: %w", w.nextDelta, w.track, err)
@@ -408,7 +408,7 @@ func (w *Writer) seal(ctx context.Context) error {
 	// an object already under this key covers exactly these deltas, so it holds
 	// the same groups. A retry after a wider range has accumulated writes a
 	// different key and leaves the earlier object unreferenced for collection.
-	if _, err := w.store.Create(ctx, key, data); err != nil && !errors.Is(err, objectstore.ErrExist) {
+	if _, err := w.objects.Create(ctx, key, data); err != nil && !errors.Is(err, store.ErrExist) {
 		return fmt.Errorf("ledger: write sealed manifest %d-%d: %w", firstDelta, lastDelta, err)
 	}
 
@@ -425,7 +425,7 @@ func (w *Writer) seal(ctx context.Context) error {
 	// Reclaiming the superseded deltas is best-effort: they are now redundant
 	// rather than harmful, and a failure here must not fail the seal.
 	for n := firstDelta; n <= lastDelta; n++ {
-		if err := w.store.Delete(ctx, deltaKey(w.track, n)); err != nil {
+		if err := w.objects.Delete(ctx, deltaKey(w.track, n)); err != nil {
 			w.logger.Debug("ledger: could not reclaim sealed delta",
 				"track", w.track, "delta", n, "error", err)
 		}
@@ -446,7 +446,7 @@ func (w *Writer) updateRoot(ctx context.Context, mutate func(*RootManifest)) err
 		return err
 	}
 
-	version, err := w.store.Swap(ctx, rootKey(w.track), data, w.rootVersion)
+	version, err := w.objects.Swap(ctx, rootKey(w.track), data, w.rootVersion)
 	if err != nil {
 		return fmt.Errorf("ledger: update root of %s: %w", w.track, err)
 	}
@@ -478,14 +478,14 @@ func (w *Writer) publishHead(ctx context.Context, latest GroupRef) error {
 		return err
 	}
 
-	version, err := w.store.Swap(ctx, headKey(w.track), data, w.headVersion)
-	if errors.Is(err, objectstore.ErrVersionMismatch) || errors.Is(err, objectstore.ErrNotExist) {
+	version, err := w.objects.Swap(ctx, headKey(w.track), data, w.headVersion)
+	if errors.Is(err, store.ErrVersionMismatch) || errors.Is(err, store.ErrNotExist) {
 		// Someone else wrote head, or it vanished. Re-read and try once more;
 		// beyond that, let the next append carry it forward.
-		if _, current, getErr := fetchHead(ctx, w.store, w.track); getErr == nil {
-			version, err = w.store.Swap(ctx, headKey(w.track), data, current)
-		} else if errors.Is(getErr, objectstore.ErrNotExist) {
-			version, err = w.store.Swap(ctx, headKey(w.track), data, objectstore.NoVersion)
+		if _, current, getErr := fetchHead(ctx, w.objects, w.track); getErr == nil {
+			version, err = w.objects.Swap(ctx, headKey(w.track), data, current)
+		} else if errors.Is(getErr, store.ErrNotExist) {
+			version, err = w.objects.Swap(ctx, headKey(w.track), data, store.NoVersion)
 		}
 	}
 	if err != nil {

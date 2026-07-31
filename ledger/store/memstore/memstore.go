@@ -1,4 +1,4 @@
-// Package memstore provides an in-memory [objectstore.Store].
+// Package memstore provides an in-memory [store.Store].
 //
 // It implements the full contract, including compare-and-swap and listing, so
 // it doubles as the reference backend: if behaviour differs between memstore
@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
 // Store keeps objects in a map. The zero value is not usable; call [New].
@@ -30,12 +30,12 @@ type Store struct {
 
 type object struct {
 	data    []byte
-	version objectstore.Version
+	version store.Version
 }
 
 var (
-	_ objectstore.Store  = (*Store)(nil)
-	_ objectstore.Lister = (*Store)(nil)
+	_ store.Store  = (*Store)(nil)
+	_ store.Lister = (*Store)(nil)
 )
 
 // New returns an empty Store.
@@ -43,10 +43,10 @@ func New() *Store {
 	return &Store{objects: make(map[string]object)}
 }
 
-// Get implements [objectstore.Store].
-func (s *Store) Get(ctx context.Context, key string) ([]byte, objectstore.Version, error) {
+// Get implements [store.Store].
+func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, objectstore.NoVersion, err
+		return nil, store.NoVersion, err
 	}
 
 	s.mu.RLock()
@@ -54,32 +54,32 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, objectstore.Versio
 
 	obj, ok := s.objects[key]
 	if !ok {
-		return nil, objectstore.NoVersion, fmt.Errorf("memstore: get %q: %w", key, objectstore.ErrNotExist)
+		return nil, store.NoVersion, fmt.Errorf("memstore: get %q: %w", key, store.ErrNotExist)
 	}
 
 	return slices.Clone(obj.data), obj.version, nil
 }
 
-// Create implements [objectstore.Store].
-func (s *Store) Create(ctx context.Context, key string, data []byte) (objectstore.Version, error) {
+// Create implements [store.Store].
+func (s *Store) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.objects[key]; ok {
-		return objectstore.NoVersion, fmt.Errorf("memstore: create %q: %w", key, objectstore.ErrExist)
+		return store.NoVersion, fmt.Errorf("memstore: create %q: %w", key, store.ErrExist)
 	}
 
 	return s.storeLocked(key, data), nil
 }
 
-// Swap implements [objectstore.Store].
-func (s *Store) Swap(ctx context.Context, key string, data []byte, expect objectstore.Version) (objectstore.Version, error) {
+// Swap implements [store.Store].
+func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
 	if err := ctx.Err(); err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	s.mu.Lock()
@@ -87,16 +87,16 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect object
 
 	obj, ok := s.objects[key]
 	switch {
-	case !ok && expect != objectstore.NoVersion:
-		return objectstore.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, objectstore.ErrNotExist)
+	case !ok && expect != store.NoVersion:
+		return store.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, store.ErrNotExist)
 	case ok && obj.version != expect:
-		return objectstore.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, objectstore.ErrVersionMismatch)
+		return store.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, store.ErrVersionMismatch)
 	}
 
 	return s.storeLocked(key, data), nil
 }
 
-// Delete implements [objectstore.Store].
+// Delete implements [store.Store].
 func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -110,7 +110,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Keys implements [objectstore.Lister]. Keys are yielded in sorted order so
+// Keys implements [store.Lister]. Keys are yielded in sorted order so
 // that tests observing enumeration are deterministic; callers must not rely on
 // ordering, since real backends do not guarantee it.
 func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error] {
@@ -149,9 +149,9 @@ func (s *Store) Len() int {
 
 // storeLocked writes data under key and assigns a fresh version.
 // s.mu must be held for writing.
-func (s *Store) storeLocked(key string, data []byte) objectstore.Version {
+func (s *Store) storeLocked(key string, data []byte) store.Version {
 	s.nextVersion++
-	version := objectstore.Version(strconv.FormatUint(s.nextVersion, 10))
+	version := store.Version(strconv.FormatUint(s.nextVersion, 10))
 	s.objects[key] = object{data: slices.Clone(data), version: version}
 
 	return version

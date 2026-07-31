@@ -3,8 +3,8 @@ package ledger
 import (
 	"context"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
-	"github.com/okdaichi/qumo-ledger/objectstore/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 )
 
 // FakeStore is an object store that behaves like a real one until told
@@ -17,7 +17,7 @@ import (
 type FakeStore struct {
 	// Inner serves every operation that is not failed. It is created on first
 	// use when nil.
-	Inner objectstore.Store
+	Inner store.Store
 
 	// CreateErr, SwapErr and GetErr fail the matching operation for a key,
 	// every time it is called.
@@ -50,9 +50,9 @@ func (s *FakeStore) GetCount(match func(key string) bool) int {
 	return n
 }
 
-var _ objectstore.Store = (*FakeStore)(nil)
+var _ store.Store = (*FakeStore)(nil)
 
-func (s *FakeStore) inner() objectstore.Store {
+func (s *FakeStore) inner() store.Store {
 	if s.Inner == nil {
 		s.Inner = memstore.New()
 	}
@@ -60,32 +60,32 @@ func (s *FakeStore) inner() objectstore.Store {
 	return s.Inner
 }
 
-func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, objectstore.Version, error) {
+func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	s.Gets = append(s.Gets, key)
 	if err := s.GetErr[key]; err != nil {
-		return nil, objectstore.NoVersion, err
+		return nil, store.NoVersion, err
 	}
 
 	return s.inner().Get(ctx, key)
 }
 
-func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (objectstore.Version, error) {
+func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	s.Creates = append(s.Creates, key)
 	if err := s.CreateErr[key]; err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	return s.inner().Create(ctx, key, data)
 }
 
-func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect objectstore.Version) (objectstore.Version, error) {
+func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
 	s.Swaps = append(s.Swaps, key)
 	if err := s.SwapErr[key]; err != nil {
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 	if err := s.SwapErrOnce[key]; err != nil {
 		delete(s.SwapErrOnce, key)
-		return objectstore.NoVersion, err
+		return store.NoVersion, err
 	}
 
 	return s.inner().Swap(ctx, key, data, expect)

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
-	"github.com/okdaichi/qumo-ledger/objectstore/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,21 +52,21 @@ func testGroup(tb testing.TB, sequence uint64) GroupMeta {
 }
 
 // newTestWriter creates a fresh track and returns its writer along with the
-// store backing it.
+// objects backing it.
 func newTestWriter(tb testing.TB, opts ...WriterOption) (*Writer, *memstore.Store) {
 	tb.Helper()
 
-	store := memstore.New()
-	w, err := CreateTrack(tb.Context(), store, testTrack, testConfig(tb), opts...)
+	objects := memstore.New()
+	w, err := CreateTrack(tb.Context(), objects, testTrack, testConfig(tb), opts...)
 	require.NoError(tb, err)
 
-	return w, store
+	return w, objects
 }
 
 func TestCreateTrack(t *testing.T) {
-	store := memstore.New()
+	objects := memstore.New()
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	root := w.Root()
@@ -78,17 +78,17 @@ func TestCreateTrack(t *testing.T) {
 	assert.Equal(t, uint64(0), root.OpenFrom)
 	assert.Empty(t, root.Sealed)
 
-	_, _, err = store.Get(t.Context(), rootKey(testTrack))
+	_, _, err = objects.Get(t.Context(), rootKey(testTrack))
 	assert.NoError(t, err)
 }
 
 func TestCreateTrack_AlreadyExists(t *testing.T) {
-	store := memstore.New()
+	objects := memstore.New()
 
-	_, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	_, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
-	_, err = CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	_, err = CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	assert.ErrorIs(t, err, ErrTrackExists)
 }
 
@@ -111,7 +111,7 @@ func TestCreateTrack_InvalidInput(t *testing.T) {
 }
 
 func TestWriter_AppendGroup(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 	payload := []byte("frames for group 0")
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), payload)
@@ -120,11 +120,11 @@ func TestWriter_AppendGroup(t *testing.T) {
 	assert.Equal(t, groupKey(testTrack, GroupRef{Epoch: 1, Sequence: 0}), meta.Object)
 	assert.Equal(t, int64(len(payload)), meta.Size)
 
-	stored, _, err := store.Get(t.Context(), meta.Object)
+	stored, _, err := objects.Get(t.Context(), meta.Object)
 	require.NoError(t, err)
 	assert.Equal(t, payload, stored)
 
-	data, _, err := store.Get(t.Context(), deltaKey(testTrack, 0))
+	data, _, err := objects.Get(t.Context(), deltaKey(testTrack, 0))
 	require.NoError(t, err)
 
 	delta, err := decodeManifest(data, func(d DeltaManifest) int { return d.Version })
@@ -135,14 +135,14 @@ func TestWriter_AppendGroup(t *testing.T) {
 }
 
 func TestWriter_AppendGroup_PublishesHead(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("a"))
 	require.NoError(t, err)
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 1), []byte("b"))
 	require.NoError(t, err)
 
-	head, _, err := fetchHead(t.Context(), store, testTrack)
+	head, _, err := fetchHead(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(1), head.Delta)
@@ -281,13 +281,13 @@ func TestWriter_AppendGroup_LeavesWallclockUnsetForFrameTracks(t *testing.T) {
 
 // A track declaring ledger-clock timestamps gets one stamped.
 func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
-	store := memstore.New()
+	objects := memstore.New()
 	stamped := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
 	config := testConfig(t)
 	config.TimeSource = TimeSourceIngest
 
-	w, err := CreateTrack(t.Context(), store, testTrack, config,
+	w, err := CreateTrack(t.Context(), objects, testTrack, config,
 		WithClock(func() time.Time { return stamped }))
 	require.NoError(t, err)
 
@@ -301,7 +301,7 @@ func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
 }
 
 func TestWriter_Seal(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 
 	for sequence := range uint64(3) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
@@ -319,7 +319,7 @@ func TestWriter_Seal(t *testing.T) {
 	assert.Equal(t, uint64(0), ref.FirstDelta)
 	assert.Equal(t, uint64(2), ref.LastDelta)
 
-	data, _, err := store.Get(t.Context(), ref.Key)
+	data, _, err := objects.Get(t.Context(), ref.Key)
 	require.NoError(t, err)
 
 	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
@@ -328,8 +328,8 @@ func TestWriter_Seal(t *testing.T) {
 
 	// The deltas the sealed manifest replaced are redundant and reclaimed.
 	for n := range uint64(3) {
-		_, _, err := store.Get(t.Context(), deltaKey(testTrack, n))
-		assert.ErrorIs(t, err, objectstore.ErrNotExist, "delta %d should have been reclaimed", n)
+		_, _, err := objects.Get(t.Context(), deltaKey(testTrack, n))
+		assert.ErrorIs(t, err, store.ErrNotExist, "delta %d should have been reclaimed", n)
 	}
 }
 
@@ -339,11 +339,11 @@ func TestWriter_Seal(t *testing.T) {
 // ErrExist, publish a root summary describing groups the object does not hold,
 // and then reclaim the deltas that were their only other copy.
 func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
-	store := &FakeStore{
+	objects := &FakeStore{
 		SwapErrOnce: map[string]error{rootKey(testTrack): errors.New("transient failure")},
 	}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	for sequence := range uint64(3) {
@@ -360,7 +360,7 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 	root := w.Root()
 	require.Len(t, root.Sealed, 1)
 
-	data, _, err := store.Get(t.Context(), root.Sealed[0].Key)
+	data, _, err := objects.Get(t.Context(), root.Sealed[0].Key)
 	require.NoError(t, err)
 	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
 	require.NoError(t, err)
@@ -368,7 +368,7 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 	assert.Equal(t, root.Sealed[0].Groups, len(sealed.Groups),
 		"the root summary must match the sealed manifest it points at")
 
-	r, err := OpenReader(t.Context(), store, testTrack)
+	r, err := OpenReader(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
 	var seen []uint64
@@ -399,7 +399,7 @@ func TestWriter_AppendGroup_SealsAtThreshold(t *testing.T) {
 }
 
 func TestOpenWriter(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 
 	for sequence := range uint64(2) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
@@ -407,7 +407,7 @@ func TestOpenWriter(t *testing.T) {
 	}
 
 	// Reopening stands in for a process restart.
-	reopened, err := OpenWriter(t.Context(), store, testTrack)
+	reopened, err := OpenWriter(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(2), reopened.nextDelta)
@@ -417,22 +417,22 @@ func TestOpenWriter(t *testing.T) {
 	_, err = reopened.AppendGroup(t.Context(), testGroup(t, 2), []byte("payload"))
 	require.NoError(t, err)
 
-	_, _, err = store.Get(t.Context(), deltaKey(testTrack, 2))
+	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, 2))
 	assert.NoError(t, err, "the reopened writer must continue the delta sequence, not restart it")
 }
 
 // head is a cache. Losing it must cost nothing but a probe.
 func TestOpenWriter_WithoutHead(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 
 	for sequence := range uint64(3) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, store.Delete(t.Context(), headKey(testTrack)))
+	require.NoError(t, objects.Delete(t.Context(), headKey(testTrack)))
 
-	reopened, err := OpenWriter(t.Context(), store, testTrack)
+	reopened, err := OpenWriter(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(3), reopened.nextDelta,
@@ -441,7 +441,7 @@ func TestOpenWriter_WithoutHead(t *testing.T) {
 
 // A stale head must not stop recovery short either: probing continues past it.
 func TestOpenWriter_StaleHead(t *testing.T) {
-	w, store := newTestWriter(t)
+	w, objects := newTestWriter(t)
 
 	for sequence := range uint64(3) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
@@ -452,13 +452,13 @@ func TestOpenWriter_StaleHead(t *testing.T) {
 	stale, err := encodeManifest(Head{Version: ManifestVersion, Delta: 0})
 	require.NoError(t, err)
 
-	_, currentVersion, err := store.Get(t.Context(), headKey(testTrack))
+	_, currentVersion, err := objects.Get(t.Context(), headKey(testTrack))
 	require.NoError(t, err)
 
-	_, err = store.Swap(t.Context(), headKey(testTrack), stale, currentVersion)
+	_, err = objects.Swap(t.Context(), headKey(testTrack), stale, currentVersion)
 	require.NoError(t, err)
 
-	reopened, err := OpenWriter(t.Context(), store, testTrack)
+	reopened, err := OpenWriter(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(3), reopened.nextDelta)
@@ -474,17 +474,17 @@ func TestOpenWriter_TrackNotFound(t *testing.T) {
 // group committed and the call successful.
 func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	store := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
+	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err, "head is a discovery cache; failing to publish it must not fail a durable commit")
 
-	_, _, err = store.Get(t.Context(), deltaKey(testTrack, 0))
+	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, 0))
 	assert.NoError(t, err)
-	_, _, err = store.Get(t.Context(), meta.Object)
+	_, _, err = objects.Get(t.Context(), meta.Object)
 	assert.NoError(t, err)
 }
 
@@ -494,9 +494,9 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 // test.
 func TestWriter_publishHead(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	store := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
+	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -511,16 +511,16 @@ func TestWriter_publishHead(t *testing.T) {
 // orphaned object that no reader can see — recoverable. The reverse order would
 // leave a manifest pointing at nothing.
 func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
-	store := &FakeStore{}
+	objects := &FakeStore{}
 
-	w, err := CreateTrack(t.Context(), store, testTrack, testConfig(t))
+	w, err := CreateTrack(t.Context(), objects, testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	payloadIndex := indexOf(store.Creates, meta.Object)
-	deltaIndex := indexOf(store.Creates, deltaKey(testTrack, 0))
+	payloadIndex := indexOf(objects.Creates, meta.Object)
+	deltaIndex := indexOf(objects.Creates, deltaKey(testTrack, 0))
 
 	require.NotEqual(t, -1, payloadIndex)
 	require.NotEqual(t, -1, deltaIndex)

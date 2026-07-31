@@ -34,11 +34,11 @@ jobs:
         run: go test -v ./...
 
       - name: Test with coverage
-        # Scope to library packages (ledger + objectstore) so cross-package
+        # Scope to the library tree so cross-package
         # execution is attributed. cmd/ and internal/version are excluded —
         # they aren't unit-tested, so including them reads as uncovered and
         # noises up codecov/patch without flagging real gaps.
-        run: go test -coverprofile=coverage.out -covermode=atomic -coverpkg=./ledger/...,./objectstore/... ./ledger/... ./objectstore/...
+        run: go test -coverprofile=coverage.out -covermode=atomic -coverpkg=./ledger/... ./ledger/...
 
       - name: Upload coverage report
         uses: codecov/codecov-action@v5

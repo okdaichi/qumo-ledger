@@ -17,7 +17,7 @@ import (
 
 	"github.com/okdaichi/qumo-ledger/internal/version"
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/objectstore/fsstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
 )
 
 func main() {

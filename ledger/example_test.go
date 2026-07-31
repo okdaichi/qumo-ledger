@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/objectstore/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 )
 
 // videoTimescale is the usual 90 kHz media clock; ticksPerGroup is two seconds

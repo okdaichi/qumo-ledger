@@ -80,7 +80,7 @@ The PUT rate is identical either way: one object write per group. Immutability
 costs object count and a reclaim pass, not writes.
 
 **Consequence.** `head` is the sole exception, and the sole reason
-`objectstore.Store` has a `Swap` method.
+`store.Store` has a `Swap` method.
 
 ## 5. The delta write is the commit; head is a discovery cache
 
@@ -196,7 +196,7 @@ running anywhere. The format is the product.
 **Consequence for authorization.** It is deliberately not the ledger's job. An
 external service authorizes access and mints scoped credentials or signed URLs;
 clients keep reading objects directly, and the core never sees a principal.
-`objectstore.Presigner` exists so that service can delegate rather than proxy.
+`store.Presigner` exists so that service can delegate rather than proxy.
 
 **Consequence for notification.** Object stores do not push, so following a
 track means polling — probe forward by deterministic key. A deployment wanting

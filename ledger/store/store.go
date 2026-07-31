@@ -1,4 +1,4 @@
-package objectstore
+package store
 
 import (
 	"context"
@@ -11,20 +11,20 @@ import (
 // backends must wrap rather than replace these.
 var (
 	// ErrNotExist reports that no object is stored under the key.
-	ErrNotExist = errors.New("objectstore: object does not exist")
+	ErrNotExist = errors.New("store: object does not exist")
 
 	// ErrExist reports that Create found an object already stored under the
 	// key. Because ledger objects are immutable, this is a normal control-flow
 	// signal rather than a failure: it is how a duplicate append is rejected
 	// and how a zombie writer is fenced off after a failover.
-	ErrExist = errors.New("objectstore: object already exists")
+	ErrExist = errors.New("store: object already exists")
 
 	// ErrVersionMismatch reports that Swap found a version other than the one
 	// the caller expected, meaning someone else wrote first.
-	ErrVersionMismatch = errors.New("objectstore: version mismatch")
+	ErrVersionMismatch = errors.New("store: version mismatch")
 
 	// ErrUnsupported reports that a backend cannot perform the operation.
-	ErrUnsupported = errors.New("objectstore: operation not supported")
+	ErrUnsupported = errors.New("store: operation not supported")
 )
 
 // Version identifies one revision of an object, mapping onto an S3 ETag, a GCS

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/objectstore/fsstore"
-	"github.com/okdaichi/qumo-ledger/objectstore/storetest"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

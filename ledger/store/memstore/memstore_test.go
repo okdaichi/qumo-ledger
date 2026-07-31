@@ -3,8 +3,8 @@ package memstore_test
 import (
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/objectstore/memstore"
-	"github.com/okdaichi/qumo-ledger/objectstore/storetest"
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/okdaichi/qumo-ledger/objectstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
 // DefaultPollInterval is how often [Reader.Follow] probes for the next delta.
@@ -41,26 +41,26 @@ const DefaultPollInterval = 500 * time.Millisecond
 //
 // Reader is safe for concurrent use.
 type Reader struct {
-	store objectstore.Store
-	track TrackPath
+	objects store.Store
+	track   TrackPath
 
 	mu          sync.RWMutex
 	root        RootManifest
-	rootVersion objectstore.Version
+	rootVersion store.Version
 }
 
 // OpenReader loads a track's root manifest.
-func OpenReader(ctx context.Context, store objectstore.Store, track TrackPath) (*Reader, error) {
+func OpenReader(ctx context.Context, objects store.Store, track TrackPath) (*Reader, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
 
-	root, version, err := fetchRoot(ctx, store, track)
+	root, version, err := fetchRoot(ctx, objects, track)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Reader{store: store, track: track, root: root, rootVersion: version}, nil
+	return &Reader{objects: objects, track: track, root: root, rootVersion: version}, nil
 }
 
 // Track returns the path being read.
@@ -81,7 +81,7 @@ func (r *Reader) Root() RootManifest {
 // Reader was opened. Tailing does not require it — the open region is
 // discovered by probing — but seeking into history does.
 func (r *Reader) Refresh(ctx context.Context) error {
-	root, version, err := fetchRoot(ctx, r.store, r.track)
+	root, version, err := fetchRoot(ctx, r.objects, r.track)
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func (r *Reader) Refresh(ctx context.Context) error {
 // Head is a discovery cache and may lag the true tip. Use it to start near the
 // end of a track, never to decide that a track has ended.
 func (r *Reader) Head(ctx context.Context) (Head, error) {
-	head, _, err := fetchHead(ctx, r.store, r.track)
+	head, _, err := fetchHead(ctx, r.objects, r.track)
 
 	return head, err
 }
@@ -107,9 +107,9 @@ func (r *Reader) Head(ctx context.Context) (Head, error) {
 // exist yet. Absence is the normal signal that a reader has caught up with the
 // writer, not a failure.
 func (r *Reader) delta(ctx context.Context, n uint64) (DeltaManifest, error) {
-	data, _, err := r.store.Get(ctx, deltaKey(r.track, n))
+	data, _, err := r.objects.Get(ctx, deltaKey(r.track, n))
 	if err != nil {
-		if errors.Is(err, objectstore.ErrNotExist) {
+		if errors.Is(err, store.ErrNotExist) {
 			return DeltaManifest{}, fmt.Errorf("%w: %s delta %d", ErrNotCommitted, r.track, n)
 		}
 		return DeltaManifest{}, fmt.Errorf("ledger: read delta %d: %w", n, err)
@@ -120,7 +120,7 @@ func (r *Reader) delta(ctx context.Context, n uint64) (DeltaManifest, error) {
 
 // Sealed returns a sealed manifest by its reference in the root.
 func (r *Reader) sealed(ctx context.Context, ref SealedRef) (SealedManifest, error) {
-	data, _, err := r.store.Get(ctx, ref.Key)
+	data, _, err := r.objects.Get(ctx, ref.Key)
 	if err != nil {
 		return SealedManifest{}, fmt.Errorf("ledger: read sealed manifest %q: %w", ref.Key, err)
 	}
@@ -149,7 +149,7 @@ func (r *Reader) sealed(ctx context.Context, ref SealedRef) (SealedManifest, err
 // It reads [GroupMeta.Object] rather than deriving a key, because producer
 // sequences are gappy and a derived key can name a group that was dropped.
 func (r *Reader) ReadGroup(ctx context.Context, meta GroupMeta) ([]byte, error) {
-	data, _, err := r.store.Get(ctx, meta.Object)
+	data, _, err := r.objects.Get(ctx, meta.Object)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: read group %s: %w", meta.GroupRef, err)
 	}
@@ -229,8 +229,8 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 // least once by design; a consumer that must not act twice should be idempotent
 // or track [GroupRef] itself.
 func (r *Reader) Tip(ctx context.Context) (Cursor, error) {
-	head, _, err := fetchHead(ctx, r.store, r.track)
-	if errors.Is(err, objectstore.ErrNotExist) {
+	head, _, err := fetchHead(ctx, r.objects, r.track)
+	if errors.Is(err, store.ErrNotExist) {
 		// No head yet means nothing has been committed, so the start of the
 		// track already is the tip.
 		return Cursor{}, nil
@@ -571,36 +571,36 @@ func (r *Reader) seek(
 	return best, nil
 }
 
-func fetchRoot(ctx context.Context, store objectstore.Store, track TrackPath) (RootManifest, objectstore.Version, error) {
-	data, version, err := store.Get(ctx, rootKey(track))
+func fetchRoot(ctx context.Context, objects store.Store, track TrackPath) (RootManifest, store.Version, error) {
+	data, version, err := objects.Get(ctx, rootKey(track))
 	if err != nil {
-		if errors.Is(err, objectstore.ErrNotExist) {
-			return RootManifest{}, objectstore.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
+		if errors.Is(err, store.ErrNotExist) {
+			return RootManifest{}, store.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
 		}
-		return RootManifest{}, objectstore.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
+		return RootManifest{}, store.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
 	}
 
 	root, err := decodeManifest(data, func(m RootManifest) int { return m.Version })
 	if err != nil {
-		return RootManifest{}, objectstore.NoVersion, err
+		return RootManifest{}, store.NoVersion, err
 	}
 	if root.Track != track {
-		return RootManifest{}, objectstore.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
+		return RootManifest{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
 			ErrManifestMismatch, rootKey(track), root.Track, track)
 	}
 
 	return root, version, nil
 }
 
-func fetchHead(ctx context.Context, store objectstore.Store, track TrackPath) (Head, objectstore.Version, error) {
-	data, version, err := store.Get(ctx, headKey(track))
+func fetchHead(ctx context.Context, objects store.Store, track TrackPath) (Head, store.Version, error) {
+	data, version, err := objects.Get(ctx, headKey(track))
 	if err != nil {
-		return Head{}, objectstore.NoVersion, err
+		return Head{}, store.NoVersion, err
 	}
 
 	head, err := decodeManifest(data, func(h Head) int { return h.Version })
 	if err != nil {
-		return Head{}, objectstore.NoVersion, err
+		return Head{}, store.NoVersion, err
 	}
 
 	return head, version, nil
