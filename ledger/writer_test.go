@@ -39,14 +39,14 @@ const (
 //
 // The wallclock anchor is offset from a fixed base because zero means "no
 // anchor", which would make group 0 untestable for correlation.
-func testGroup(tb testing.TB, sequence uint64) GroupMeta {
+func testGroup(tb testing.TB, sequence uint64) GroupInfo {
 	tb.Helper()
 
-	return GroupMeta{
+	return GroupInfo{
 		GroupRef:    GroupRef{Epoch: 1, Sequence: sequence},
-		T0:          int64(sequence) * ticksPerGroup,
+		MediaTime:   int64(sequence) * ticksPerGroup,
 		Duration:    ticksPerGroup,
-		W0:          wallclockBase + int64(sequence)*nanosPerGroup,
+		Wallclock:   wallclockBase + int64(sequence)*nanosPerGroup,
 		ObjectCount: 60,
 	}
 }
@@ -117,10 +117,10 @@ func TestWriter_AppendGroup(t *testing.T) {
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), payload)
 	require.NoError(t, err)
 
-	assert.Equal(t, groupKey(testTrack, GroupRef{Epoch: 1, Sequence: 0}), meta.Object)
+	assert.Equal(t, groupKey(testTrack, GroupRef{Epoch: 1, Sequence: 0}), meta.ObjectKey)
 	assert.Equal(t, int64(len(payload)), meta.Size)
 
-	stored, _, err := objects.Get(t.Context(), meta.Object)
+	stored, _, err := objects.Get(t.Context(), meta.ObjectKey)
 	require.NoError(t, err)
 	assert.Equal(t, payload, stored)
 
@@ -164,7 +164,7 @@ func TestWriter_AppendGroup_Duplicate(t *testing.T) {
 func TestWriter_AppendGroup_InvalidMeta(t *testing.T) {
 	w, _ := newTestWriter(t)
 
-	_, err := w.AppendGroup(t.Context(), GroupMeta{GroupRef: GroupRef{Epoch: 0, Sequence: 1}}, []byte("x"))
+	_, err := w.AppendGroup(t.Context(), GroupInfo{GroupRef: GroupRef{Epoch: 0, Sequence: 1}}, []byte("x"))
 
 	assert.ErrorIs(t, err, ErrInvalidGroup)
 }
@@ -196,7 +196,7 @@ func TestWriter_AppendGroup_EpochSeparatesProducerLifetimes(t *testing.T) {
 	second, err := w.AppendGroup(t.Context(), restarted, []byte("after restart"))
 	require.NoError(t, err, "a new epoch must give the reused sequence a fresh keyspace")
 
-	assert.NotEqual(t, first.Object, second.Object)
+	assert.NotEqual(t, first.ObjectKey, second.ObjectKey)
 	assert.Equal(t, uint64(2), w.Root().Epoch, "the root advances to the epoch being written")
 }
 
@@ -210,7 +210,7 @@ func TestWriter_AppendGroup_RejectsOverlap(t *testing.T) {
 	require.NoError(t, err)
 
 	overlapping := testGroup(t, 1)
-	overlapping.T0 = ticksPerGroup - 1 // one tick before group 0 ends
+	overlapping.MediaTime = ticksPerGroup - 1 // one tick before group 0 ends
 
 	_, err = w.AppendGroup(t.Context(), overlapping, []byte("payload"))
 
@@ -225,7 +225,7 @@ func TestWriter_AppendGroup_AllowsGapAfterPredecessor(t *testing.T) {
 	require.NoError(t, err)
 
 	later := testGroup(t, 5)
-	later.T0 = 10 * ticksPerGroup
+	later.MediaTime = 10 * ticksPerGroup
 
 	_, err = w.AppendGroup(t.Context(), later, []byte("payload"))
 
@@ -258,7 +258,7 @@ func TestWriter_AppendGroup_OrderingResetsWithEpoch(t *testing.T) {
 
 	restarted := testGroup(t, 0)
 	restarted.Epoch = 2
-	restarted.T0 = 0
+	restarted.MediaTime = 0
 
 	_, err = w.AppendGroup(t.Context(), restarted, []byte("payload"))
 
@@ -271,7 +271,7 @@ func TestWriter_AppendGroup_LeavesWallclockUnsetForFrameTracks(t *testing.T) {
 	w, _ := newTestWriter(t)
 
 	group := testGroup(t, 0)
-	group.W0 = 0
+	group.Wallclock = 0
 
 	meta, err := w.AppendGroup(t.Context(), group, []byte("payload"))
 	require.NoError(t, err)
@@ -292,12 +292,12 @@ func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
 	require.NoError(t, err)
 
 	group := testGroup(t, 0)
-	group.W0 = 0
+	group.Wallclock = 0
 
 	meta, err := w.AppendGroup(t.Context(), group, []byte("payload"))
 	require.NoError(t, err)
 
-	assert.Equal(t, stamped.UnixNano(), meta.W0)
+	assert.Equal(t, stamped.UnixNano(), meta.Wallclock)
 }
 
 func TestWriter_Seal(t *testing.T) {
@@ -484,7 +484,7 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 
 	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, 0))
 	assert.NoError(t, err)
-	_, _, err = objects.Get(t.Context(), meta.Object)
+	_, _, err = objects.Get(t.Context(), meta.ObjectKey)
 	assert.NoError(t, err)
 }
 
@@ -520,7 +520,7 @@ func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
 	require.NoError(t, err)
 
 	_, creates, _, _ := objects.Calls()
-	payloadIndex := indexOf(creates, meta.Object)
+	payloadIndex := indexOf(creates, meta.ObjectKey)
 	deltaIndex := indexOf(creates, deltaKey(testTrack, 0))
 
 	require.NotEqual(t, -1, payloadIndex)

@@ -70,7 +70,7 @@ func (s TimeSource) valid() bool {
 
 // TrackConfig describes a track at creation time. It is written once into the
 // root manifest and never changes; anything that can vary between groups
-// belongs in [GroupMeta] instead.
+// belongs in [GroupInfo] instead.
 type TrackConfig struct {
 	// Timescale is the number of media time units per second, following the
 	// same convention as a media container or a moq-lite track — 90000 for

@@ -47,62 +47,62 @@ func TestGroupRef_Before(t *testing.T) {
 	}
 }
 
-func TestGroupMeta_MediaEnd(t *testing.T) {
-	assert.Equal(t, int64(1500), GroupMeta{T0: 500, Duration: 1000}.mediaEnd())
-	assert.Equal(t, int64(500), GroupMeta{T0: 500}.mediaEnd(),
+func TestGroupInfo_MediaEnd(t *testing.T) {
+	assert.Equal(t, int64(1500), GroupInfo{MediaTime: 500, Duration: 1000}.mediaEnd())
+	assert.Equal(t, int64(500), GroupInfo{MediaTime: 500}.mediaEnd(),
 		"with no duration the end collapses onto the anchor")
 }
 
-// Duration and W0 are optional, so every consumer needs a way to tell "absent"
+// Duration and Wallclock are optional, so every consumer needs a way to tell "absent"
 // from a real value before using one.
-func TestGroupMeta_HasDuration(t *testing.T) {
-	assert.True(t, GroupMeta{Duration: 1}.hasDuration())
-	assert.False(t, GroupMeta{}.hasDuration(), "zero means the producer did not supply an extent")
+func TestGroupInfo_HasDuration(t *testing.T) {
+	assert.True(t, GroupInfo{Duration: 1}.hasDuration())
+	assert.False(t, GroupInfo{}.hasDuration(), "zero means the producer did not supply an extent")
 }
 
-func TestGroupMeta_HasWallclock(t *testing.T) {
-	assert.True(t, GroupMeta{W0: 1}.hasWallclock())
-	assert.False(t, GroupMeta{}.hasWallclock(), "zero means no anchor, not the Unix epoch")
+func TestGroupInfo_HasWallclock(t *testing.T) {
+	assert.True(t, GroupInfo{Wallclock: 1}.hasWallclock())
+	assert.False(t, GroupInfo{}.hasWallclock(), "zero means no anchor, not the Unix epoch")
 }
 
-func TestGroupMeta_wallclockEnd(t *testing.T) {
+func TestGroupInfo_wallclockEnd(t *testing.T) {
 	tests := map[string]struct {
-		group     GroupMeta
+		group     GroupInfo
 		timescale uint32
 		expected  int64
 		ok        bool
 	}{
 		"anchor and extent present": {
 			// Two seconds at 90 kHz is 180000 units.
-			group:     GroupMeta{W0: 1_000_000_000, Duration: 180000},
+			group:     GroupInfo{Wallclock: 1_000_000_000, Duration: 180000},
 			timescale: 90000,
 			expected:  3_000_000_000,
 			ok:        true,
 		},
 		"no wallclock anchor": {
-			group:     GroupMeta{Duration: 180000},
+			group:     GroupInfo{Duration: 180000},
 			timescale: 90000,
 			ok:        false,
 		},
 		"no duration": {
-			group:     GroupMeta{W0: 1_000_000_000},
+			group:     GroupInfo{Wallclock: 1_000_000_000},
 			timescale: 90000,
 			ok:        false,
 		},
 		"no timescale": {
-			group:     GroupMeta{W0: 1_000_000_000, Duration: 180000},
+			group:     GroupInfo{Wallclock: 1_000_000_000, Duration: 180000},
 			timescale: 0,
 			ok:        false,
 		},
 		// A coarse timescale reaches the int64 nanosecond ceiling with a
 		// duration that is otherwise unremarkable.
 		"conversion overflows": {
-			group:     GroupMeta{W0: 1, Duration: math.MaxInt64 / 2},
+			group:     GroupInfo{Wallclock: 1, Duration: math.MaxInt64 / 2},
 			timescale: 1,
 			ok:        false,
 		},
 		"sum overflows the anchor": {
-			group:     GroupMeta{W0: math.MaxInt64 - 1, Duration: 90000},
+			group:     GroupInfo{Wallclock: math.MaxInt64 - 1, Duration: 90000},
 			timescale: 90000,
 			ok:        false,
 		},
@@ -119,43 +119,43 @@ func TestGroupMeta_wallclockEnd(t *testing.T) {
 	}
 }
 
-func TestGroupMeta_validate(t *testing.T) {
+func TestGroupInfo_validate(t *testing.T) {
 	tests := map[string]struct {
-		meta    GroupMeta
+		meta    GroupInfo
 		wantErr bool
 	}{
 		"well formed": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 0, Duration: 100, W0: 1},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 0, Duration: 100, Wallclock: 1},
 			wantErr: false,
 		},
 		"duration and wallclock are both optional": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100},
 			wantErr: false,
 		},
 		"sequence zero is legal because producers may start there": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 0}, T0: 0, Duration: 1},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 0}, MediaTime: 0, Duration: 1},
 			wantErr: false,
 		},
 		"epoch zero is reserved": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 0, Sequence: 1}},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 0, Sequence: 1}},
 			wantErr: true,
 		},
 		"negative duration": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, Duration: -1},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100, Duration: -1},
 			wantErr: true,
 		},
 		"negative wallclock": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, W0: -1},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, Wallclock: -1},
 			wantErr: true,
 		},
 		// A wrapped media end reads as before its own start, which would let
 		// the ordering check wave through everything after it.
 		"media range overflows": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: math.MaxInt64 - 1, Duration: 2},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: math.MaxInt64 - 1, Duration: 2},
 			wantErr: true,
 		},
 		"negative size": {
-			meta:    GroupMeta{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, Size: -1},
+			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, Size: -1},
 			wantErr: true,
 		},
 	}

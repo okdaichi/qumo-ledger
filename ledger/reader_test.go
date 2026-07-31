@@ -70,7 +70,7 @@ func TestReader_Groups_EmptyTrack(t *testing.T) {
 	r, err := OpenReader(t.Context(), objects, testTrack)
 	require.NoError(t, err)
 
-	var groups []GroupMeta
+	var groups []GroupInfo
 	for group, err := range r.Groups(t.Context()) {
 		require.NoError(t, err)
 		groups = append(groups, group)
@@ -148,7 +148,7 @@ func TestReader_SeekWallclock_OutOfRange(t *testing.T) {
 	for name, instant := range tests {
 		t.Run(name, func(t *testing.T) {
 			_, err := r.SeekWallclock(t.Context(), instant)
-			assert.ErrorIs(t, err, ErrNoGroupFound)
+			assert.ErrorIs(t, err, ErrGroupNotFound)
 		})
 	}
 }
@@ -163,7 +163,7 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 	require.NoError(t, err)
 
 	unanchored := testGroup(t, 1)
-	unanchored.W0 = 0
+	unanchored.Wallclock = 0
 	_, err = w.AppendGroup(t.Context(), unanchored, []byte("payload"))
 	require.NoError(t, err)
 
@@ -211,7 +211,7 @@ func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
 }
 
 // collect drains a group iterator into the sequence numbers it yielded.
-func collect(tb testing.TB, seq iter.Seq2[GroupMeta, error]) []uint64 {
+func collect(tb testing.TB, seq iter.Seq2[GroupInfo, error]) []uint64 {
 	tb.Helper()
 
 	var sequences []uint64
@@ -288,7 +288,7 @@ func TestReader_RangeWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 	for sequence := range uint64(3) {
 		group := testGroup(t, sequence)
 		if sequence == 1 {
-			group.W0 = 0
+			group.Wallclock = 0
 		}
 		_, err := w.AppendGroup(t.Context(), group, []byte("payload"))
 		require.NoError(t, err)

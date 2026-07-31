@@ -40,7 +40,7 @@ func TestNew_CreatesRoot(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
-// A reader takes a group's key from GroupMeta.Object, which is manifest data,
+// A reader takes a group's key from GroupInfo.ObjectKey, which is manifest data,
 // so a malformed key must be refused rather than resolved.
 func TestStore_RejectsEscapingKeys(t *testing.T) {
 	base := t.TempDir()

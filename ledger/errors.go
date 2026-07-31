@@ -17,7 +17,7 @@ var (
 	// ErrInvalidTrackPath reports a malformed track path.
 	ErrInvalidTrackPath = errors.New("ledger: invalid track path")
 
-	// ErrInvalidGroup reports a GroupMeta that violates an invariant on its
+	// ErrInvalidGroup reports a GroupInfo that violates an invariant on its
 	// own — a negative duration, size, or wallclock, or a missing epoch.
 	ErrInvalidGroup = errors.New("ledger: invalid group")
 
@@ -37,10 +37,10 @@ var (
 	// that a misfiled or swapped object is caught rather than trusted.
 	ErrManifestMismatch = errors.New("ledger: manifest does not match its key")
 
-	// ErrNoGroupFound reports that a seek found no group at or before the
+	// ErrGroupNotFound reports that a seek found no group at or before the
 	// requested instant, or that the instant falls past the end of the last
 	// group whose duration is known.
-	ErrNoGroupFound = errors.New("ledger: no group found")
+	ErrGroupNotFound = errors.New("ledger: no group found")
 
 	// ErrNotCommitted reports that a delta has not been written yet. It is the
 	// expected outcome of probing past the tip of a track and is how a tailing

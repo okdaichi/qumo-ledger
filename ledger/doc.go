@@ -66,17 +66,17 @@
 // interval, because groups are serial within an epoch: the start of one is the
 // end of the last.
 //
-// [GroupMeta.T0] is the media-time anchor and is always present. It is exact,
+// [GroupInfo.MediaTime] is the media-time anchor and is always present. It is exact,
 // arrives with the data, and is immune to clock skew, but is relative to one
-// track's origin and cannot be compared across publishers. [GroupMeta.W0] is
+// track's origin and cannot be compared across publishers. [GroupInfo.Wallclock] is
 // the wallclock anchor, absolute and comparable across every track and source
 // type — what makes "show me the video and the sensor readings at 14:32"
 // answerable at all — but it depends on a clock and drifts.
 //
-// W0 is optional, since not every producer has a clock worth trusting, and a
+// Wallclock is optional, since not every producer has a clock worth trusting, and a
 // Group without one still replays within its own track.
 //
-// [GroupMeta.Duration] is also optional, and is stored rather than derived from
+// [GroupInfo.Duration] is also optional, and is stored rather than derived from
 // the next Group's anchor. That derivation fails in the two places that matter:
 // across a dropped Group it would silently span the gap, and the newest Group
 // has no successor, so a live HLS playlist could not include its newest segment
@@ -85,7 +85,7 @@
 //
 // This package does not compute media time. Extracting it means parsing a
 // transport's wire format, and the core deliberately depends on no transport.
-// Callers supply a fully populated [GroupMeta]; adapters such as a Media over
+// Callers supply a fully populated [GroupInfo]; adapters such as a Media over
 // QUIC ingest are where frame parsing belongs.
 //
 // # Reading without the ledger

@@ -63,7 +63,7 @@ func sealedKey(track TrackPath, first, last uint64) string {
 
 // groupKey returns the storage key of a group's payload.
 //
-// Only the writer calls this. Readers take the key from [GroupMeta.Object]
+// Only the writer calls this. Readers take the key from [GroupInfo.ObjectKey]
 // instead, because producer sequences are gappy and a derived key may name an
 // object that was never written.
 func groupKey(track TrackPath, ref GroupRef) string {
@@ -108,15 +108,16 @@ type SealedRef struct {
 	LastDelta  uint64 `json:"lastDelta"`
 	Groups     int    `json:"groups"`
 
-	// T0 and T1 bound the run in media time. T1 reaches the end of the last
-	// group whose duration is known, and equals the final anchor otherwise.
-	T0 int64 `json:"t0"`
-	T1 int64 `json:"t1"`
+	// MediaStart and MediaEnd bound the run in media time. MediaEnd reaches
+	// the end of the last group whose duration is known, and equals the final
+	// anchor otherwise.
+	MediaStart int64 `json:"mediaStart"`
+	MediaEnd   int64 `json:"mediaEnd"`
 
-	// W0 and W1 bound the run in wallclock time, across only those groups
+	// WallclockStart and WallclockEnd bound the run across only those groups
 	// that carry an anchor. Both are zero when none does.
-	W0 int64 `json:"w0,omitempty"`
-	W1 int64 `json:"w1,omitempty"`
+	WallclockStart int64 `json:"wallclockStart,omitempty"`
+	WallclockEnd   int64 `json:"wallclockEnd,omitempty"`
 
 	First GroupRef `json:"first"`
 	Last  GroupRef `json:"last"`
@@ -132,7 +133,7 @@ type SealedRef struct {
 type DeltaManifest struct {
 	Version int         `json:"version"`
 	Seq     uint64      `json:"seq"`
-	Groups  []GroupMeta `json:"groups"`
+	Groups  []GroupInfo `json:"groups"`
 
 	CommittedAt int64 `json:"committedAt"`
 }
@@ -146,7 +147,7 @@ type SealedManifest struct {
 	Seq        uint64      `json:"seq"`
 	FirstDelta uint64      `json:"firstDelta"`
 	LastDelta  uint64      `json:"lastDelta"`
-	Groups     []GroupMeta `json:"groups"`
+	Groups     []GroupInfo `json:"groups"`
 
 	SealedAt int64 `json:"sealedAt"`
 }
@@ -186,24 +187,24 @@ func (m SealedManifest) summarize(key string) SealedRef {
 
 	first, last := m.Groups[0], m.Groups[len(m.Groups)-1]
 	ref.First, ref.Last = first.GroupRef, last.GroupRef
-	ref.T0, ref.T1 = first.T0, last.mediaEnd()
+	ref.MediaStart, ref.MediaEnd = first.MediaTime, last.mediaEnd()
 
 	// A run spans more than one epoch whenever a producer restarts mid-run,
 	// and an epoch resets media time outright. Widen the bounds over every
 	// group so a range search cannot step over one.
 	for _, g := range m.Groups {
-		ref.T0 = min(ref.T0, g.T0)
-		ref.T1 = max(ref.T1, g.mediaEnd())
+		ref.MediaStart = min(ref.MediaStart, g.MediaTime)
+		ref.MediaEnd = max(ref.MediaEnd, g.mediaEnd())
 
 		// Wallclock is optional, so the bounds cover only the groups that
 		// carry an anchor. Zero means "no anchor", never "the epoch".
 		if !g.hasWallclock() {
 			continue
 		}
-		if ref.W0 == 0 || g.W0 < ref.W0 {
-			ref.W0 = g.W0
+		if ref.WallclockStart == 0 || g.Wallclock < ref.WallclockStart {
+			ref.WallclockStart = g.Wallclock
 		}
-		ref.W1 = max(ref.W1, g.W0)
+		ref.WallclockEnd = max(ref.WallclockEnd, g.Wallclock)
 	}
 
 	return ref

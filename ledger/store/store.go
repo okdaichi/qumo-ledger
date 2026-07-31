@@ -66,7 +66,7 @@ type Store interface {
 // Lister enumerates keys. It exists solely for garbage collection, which must
 // find group objects that no manifest references. The read path never lists.
 type Lister interface {
-	// Keys iterates every key under prefix in unspecified order. Iteration
+	// List iterates every key under prefix in unspecified order. Iteration
 	// stops at the first error yielded.
-	Keys(ctx context.Context, prefix string) iter.Seq2[string, error]
+	List(ctx context.Context, prefix string) iter.Seq2[string, error]
 }

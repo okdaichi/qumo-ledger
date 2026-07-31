@@ -210,7 +210,7 @@ func RunLister[T ListerStore](t *testing.T, newStore func(t *testing.T) T) {
 		}
 
 		var found []string
-		for key, err := range backend.Keys(t.Context(), "live/cam1/groups/") {
+		for key, err := range backend.List(t.Context(), "live/cam1/groups/") {
 			require.NoError(t, err)
 			found = append(found, key)
 		}
@@ -225,7 +225,7 @@ func RunLister[T ListerStore](t *testing.T, newStore func(t *testing.T) T) {
 		require.NoError(t, err)
 
 		var found []string
-		for key, err := range backend.Keys(t.Context(), "no/such/prefix/") {
+		for key, err := range backend.List(t.Context(), "no/such/prefix/") {
 			require.NoError(t, err)
 			found = append(found, key)
 		}

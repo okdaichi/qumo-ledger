@@ -39,7 +39,7 @@ it.
 can be forced into a MoQT-shaped API, but only by lying about three of them.
 
 **Consequence.** The core cannot compute media timestamps, because extracting
-them means parsing a wire format. Callers supply a fully populated `GroupMeta`;
+them means parsing a wire format. Callers supply a fully populated `GroupInfo`;
 see decision 8.
 
 ## 2. The ledger is not on the live path
@@ -123,7 +123,7 @@ only by garbage collection.
 
 **Group sequences are producer-assigned and gappy.** Groups are legitimately
 dropped under congestion, so a gap is real information rather than corruption.
-Readers must take a Group's key from `GroupMeta.Object` and never derive it.
+Readers must take a Group's key from `GroupInfo.ObjectKey` and never derive it.
 
 ## 8. Group identity is `(Epoch, Sequence)`
 
@@ -144,20 +144,20 @@ a group carries **anchors** rather than a closed range:
 
 | field | required | purpose |
 |---|---|---|
-| `T0` | yes | media-time anchor; orders the group and resolves media seeks |
+| `MediaTime` | yes | media-time anchor; orders the group and resolves media seeks |
 | `Duration` | no | media extent; becomes `EXTINF` and DASH `@d` |
-| `W0` | no | wallclock anchor; the cross-track correlation key |
+| `Wallclock` | no | wallclock anchor; the cross-track correlation key |
 
 **Why two clocks.** Media time is exact, arrives with the data, and is immune to
 clock skew — but it is relative to one track's origin and cannot be compared
 across publishers. Wallclock is absolute and comparable across every track and
 source type, which is what makes *"show me the video and the sensor readings at
-14:32"* answerable at all — but it depends on a clock and drifts. `W0` is
+14:32"* answerable at all — but it depends on a clock and drifts. `Wallclock` is
 optional because not every producer has a clock worth trusting; a group without
 one still replays within its own track, it just cannot be correlated.
 
 **Why `Duration` is stored rather than derived.** Deriving it from the next
-group's `T0` fails in the two places that matter. Across a **dropped group** it
+group's anchor fails in the two places that matter. Across a **dropped group** it
 would silently span the gap, so a player waits on media that was never stored.
 And the **newest group has no successor**, so a live HLS playlist could not carry
 its newest segment until the following one landed — a full group of added
@@ -177,10 +177,10 @@ behind the track's. Gaps stay legal — they are real data.
 
 **Note on provenance.** moq-lite draft-05 added a `Timestamp Delta` to `FRAME`,
 zigzag-encoded in the track's negotiated `Timescale`, with the first frame of a
-group delta-encoded from zero — so a group's `T0` is readable from the first
+group delta-encoded from zero — so a group's `MediaTime` is readable from the first
 varint of its first frame, and `Duration` accumulates for free while writing.
 Earlier drafts carry no timestamps at all, so those tracks declare
-`TimeSource: ingest` and the ledger stamps `W0` from its own clock.
+`TimeSource: ingest` and the ledger stamps `Wallclock` from its own clock.
 
 Per-frame timestamps stay inside the payload. Indexing them in the manifest would
 multiply metadata by the frame rate — a hundredfold for 100 Hz sensor data — and
@@ -217,7 +217,7 @@ resident memory. A known length also means a single PUT and a freely retryable
 write.
 
 **Consequence.** Adapters layer the ergonomic API. A MoQT adapter accumulates
-frames, derives `T0`/`T1` from their timestamp deltas, and calls through.
+frames, derives `MediaTime`/`Duration` from their timestamp deltas, and calls through.
 
 ---
 

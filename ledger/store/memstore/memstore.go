@@ -110,10 +110,10 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Keys implements [store.Lister]. Keys are yielded in sorted order so
+// List implements [store.Lister]. Keys are yielded in sorted order so
 // that tests observing enumeration are deterministic; callers must not rely on
 // ordering, since real backends do not guarantee it.
-func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error] {
+func (s *Store) List(ctx context.Context, prefix string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		// Snapshot the key set under a deliberately short critical section
 		// rather than deferring the unlock: yield runs caller code, which may

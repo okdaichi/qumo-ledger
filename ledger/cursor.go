@@ -62,10 +62,10 @@ func (c *Cursor) UnmarshalText(text []byte) error {
 // Update is a group observed by a follower, paired with the cursor that resumes
 // immediately after it.
 //
-// GroupMeta is embedded, so a consumer reaches the group's fields directly and
+// GroupInfo is embedded, so a consumer reaches the group's fields directly and
 // only reaches for Cursor when it needs to record progress.
 type Update struct {
-	GroupMeta
+	GroupInfo
 
 	// Cursor resumes a follower at the group after this one.
 	Cursor Cursor

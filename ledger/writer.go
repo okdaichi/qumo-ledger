@@ -49,7 +49,7 @@ type Writer struct {
 	nextDelta uint64
 	// openGroups accumulates the rows committed since the last seal. Rows are
 	// small, so holding them avoids re-fetching the open region at seal time.
-	openGroups []GroupMeta
+	openGroups []GroupInfo
 	// openBytes tracks the encoded size of the open region against the seal
 	// threshold.
 	openBytes int64
@@ -57,7 +57,7 @@ type Writer struct {
 	// last is the most recently committed group, kept so the next append can
 	// be checked against it. hasLast distinguishes "no group yet" from a
 	// zero-valued group.
-	last    GroupMeta
+	last    GroupInfo
 	hasLast bool
 }
 
@@ -199,7 +199,7 @@ func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts 
 	// Only the epoch and end matter for ordering the next append.
 	if !w.hasLast && len(root.Sealed) > 0 {
 		newest := root.Sealed[len(root.Sealed)-1]
-		w.last = GroupMeta{GroupRef: newest.Last, T0: newest.T1}
+		w.last = GroupInfo{GroupRef: newest.Last, MediaTime: newest.MediaEnd}
 		w.hasLast = true
 	}
 
@@ -237,7 +237,7 @@ func (w *Writer) Root() RootManifest {
 
 // AppendGroup stores a sealed group and commits it.
 //
-// The caller supplies a fully populated GroupMeta because the core parses no
+// The caller supplies a fully populated GroupInfo because the core parses no
 // wire format: media timestamps live inside the payload, and only an adapter
 // that understands the encoding can extract them. Object and Size are filled in
 // here and any caller-supplied values are ignored.
@@ -248,9 +248,9 @@ func (w *Writer) Root() RootManifest {
 // pointing at an object that does not exist, which readers cannot recover from.
 //
 // AppendGroup returns the committed row.
-func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte) (GroupMeta, error) {
+func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte) (GroupInfo, error) {
 	if err := meta.validate(); err != nil {
-		return GroupMeta{}, err
+		return GroupInfo{}, err
 	}
 
 	w.mu.Lock()
@@ -259,41 +259,41 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 	// A track that declares its timestamps come from the ledger's own clock is
 	// stamped here. One that declares them frame-derived is left alone, so an
 	// absent anchor stays absent rather than being invented.
-	if meta.W0 == 0 && w.root.TimeSource == TimeSourceIngest {
-		meta.W0 = w.now().UnixNano()
+	if meta.Wallclock == 0 && w.root.TimeSource == TimeSourceIngest {
+		meta.Wallclock = w.now().UnixNano()
 	}
 
 	// Re-appending the group just committed is a duplicate rather than a
 	// timeline contradiction, and saying so is more useful than the ordering
 	// error the check below would produce. It also saves a doomed round trip.
 	if w.hasLast && meta.GroupRef == w.last.GroupRef {
-		return GroupMeta{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
+		return GroupInfo{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
 	}
 
 	if err := w.checkOrder(meta); err != nil {
-		return GroupMeta{}, err
+		return GroupInfo{}, err
 	}
 
-	meta.Object = groupKey(w.track, meta.GroupRef)
+	meta.ObjectKey = groupKey(w.track, meta.GroupRef)
 	meta.Size = int64(len(payload))
 
-	if _, err := w.objects.Create(ctx, meta.Object, payload); err != nil {
+	if _, err := w.objects.Create(ctx, meta.ObjectKey, payload); err != nil {
 		if errors.Is(err, store.ErrExist) {
-			return GroupMeta{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
+			return GroupInfo{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.GroupRef, w.track)
 		}
-		return GroupMeta{}, fmt.Errorf("ledger: write group %s: %w", meta.GroupRef, err)
+		return GroupInfo{}, fmt.Errorf("ledger: write group %s: %w", meta.GroupRef, err)
 	}
 
 	delta := DeltaManifest{
 		Version:     ManifestVersion,
 		Seq:         w.nextDelta,
-		Groups:      []GroupMeta{meta},
+		Groups:      []GroupInfo{meta},
 		CommittedAt: w.now().UnixNano(),
 	}
 
 	data, err := encodeManifest(delta)
 	if err != nil {
-		return GroupMeta{}, err
+		return GroupInfo{}, err
 	}
 
 	// This create is the commit point.
@@ -301,9 +301,9 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 		if errors.Is(err, store.ErrExist) {
 			// Another writer claimed this delta number. Immutability turned a
 			// silent split-brain into a clean failure.
-			return GroupMeta{}, fmt.Errorf("ledger: delta %d already committed on %s: %w", w.nextDelta, w.track, err)
+			return GroupInfo{}, fmt.Errorf("ledger: delta %d already committed on %s: %w", w.nextDelta, w.track, err)
 		}
-		return GroupMeta{}, fmt.Errorf("ledger: commit delta %d: %w", w.nextDelta, err)
+		return GroupInfo{}, fmt.Errorf("ledger: commit delta %d: %w", w.nextDelta, err)
 	}
 
 	w.nextDelta++
@@ -346,7 +346,7 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupMeta, payload []byte
 // quietly returns the wrong group months later.
 //
 // A new epoch restarts the timeline, so no ordering is implied across one.
-func (w *Writer) checkOrder(meta GroupMeta) error {
+func (w *Writer) checkOrder(meta GroupInfo) error {
 	if meta.Epoch < w.root.Epoch {
 		return fmt.Errorf("%w: group %s is in epoch %d, behind the track's epoch %d",
 			ErrGroupOutOfOrder, meta.GroupRef, meta.Epoch, w.root.Epoch)
@@ -355,9 +355,9 @@ func (w *Writer) checkOrder(meta GroupMeta) error {
 		return nil
 	}
 
-	if end := w.last.mediaEnd(); meta.T0 < end {
+	if end := w.last.mediaEnd(); meta.MediaTime < end {
 		return fmt.Errorf("%w: group %s starts at %d, before group %s ends at %d",
-			ErrGroupOutOfOrder, meta.GroupRef, meta.T0, w.last.GroupRef, end)
+			ErrGroupOutOfOrder, meta.GroupRef, meta.MediaTime, w.last.GroupRef, end)
 	}
 
 	return nil
@@ -395,7 +395,7 @@ func (w *Writer) seal(ctx context.Context) error {
 		Seq:        seq,
 		FirstDelta: firstDelta,
 		LastDelta:  lastDelta,
-		Groups:     append([]GroupMeta(nil), w.openGroups...),
+		Groups:     append([]GroupInfo(nil), w.openGroups...),
 		SealedAt:   w.now().UnixNano(),
 	}
 

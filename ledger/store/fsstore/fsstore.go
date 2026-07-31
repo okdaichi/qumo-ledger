@@ -195,8 +195,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// Keys implements [store.Lister].
-func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error] {
+// List implements [store.Lister].
+func (s *Store) List(ctx context.Context, prefix string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		walkErr := filepath.WalkDir(s.root, func(name string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -235,7 +235,7 @@ func (s *Store) Keys(ctx context.Context, prefix string) iter.Seq2[string, error
 // would escape the root or name two objects with one key.
 //
 // Keys are not all self-authored: a reader takes a group's key from
-// GroupMeta.Object, which is manifest data, so resolve is a trust boundary
+// GroupInfo.ObjectKey, which is manifest data, so resolve is a trust boundary
 // rather than a formatting helper.
 func (s *Store) resolve(key string) (string, error) {
 	if key == "" {

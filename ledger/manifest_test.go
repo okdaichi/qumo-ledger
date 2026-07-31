@@ -59,10 +59,10 @@ func TestSealedManifest_summarize(t *testing.T) {
 	manifest := SealedManifest{
 		FirstDelta: 4,
 		LastDelta:  6,
-		Groups: []GroupMeta{
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 100, Duration: 100, W0: 1000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 200, Duration: 100, W0: 2000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 300, Duration: 100, W0: 3000},
+		Groups: []GroupInfo{
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, MediaTime: 100, Duration: 100, Wallclock: 1000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, MediaTime: 200, Duration: 100, Wallclock: 2000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, MediaTime: 300, Duration: 100, Wallclock: 3000},
 		},
 	}
 
@@ -74,39 +74,39 @@ func TestSealedManifest_summarize(t *testing.T) {
 	assert.Equal(t, 3, ref.Groups)
 	assert.Equal(t, GroupRef{Epoch: 1, Sequence: 10}, ref.First)
 	assert.Equal(t, GroupRef{Epoch: 1, Sequence: 12}, ref.Last)
-	assert.Equal(t, int64(100), ref.T0)
-	assert.Equal(t, int64(400), ref.T1)
-	assert.Equal(t, int64(1000), ref.W0)
-	assert.Equal(t, int64(3000), ref.W1, "wallclock bounds span anchors, since groups carry no wallclock end")
+	assert.Equal(t, int64(100), ref.MediaStart)
+	assert.Equal(t, int64(400), ref.MediaEnd)
+	assert.Equal(t, int64(1000), ref.WallclockStart)
+	assert.Equal(t, int64(3000), ref.WallclockEnd, "wallclock bounds span anchors, since groups carry no wallclock end")
 }
 
 // Wallclock is optional, so the bounds must cover only the groups that have an
 // anchor — a missing one is not an anchor at the Unix epoch.
 func TestSealedManifest_summarize_PartialWallclock(t *testing.T) {
 	manifest := SealedManifest{
-		Groups: []GroupMeta{
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 100, Duration: 100},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, T0: 200, Duration: 100, W0: 5000},
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, T0: 300, Duration: 100, W0: 7000},
+		Groups: []GroupInfo{
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, MediaTime: 100, Duration: 100},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, MediaTime: 200, Duration: 100, Wallclock: 5000},
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 12}, MediaTime: 300, Duration: 100, Wallclock: 7000},
 		},
 	}
 
 	ref := manifest.summarize("k")
 
-	assert.Equal(t, int64(5000), ref.W0, "the group without an anchor must not drag W0 to zero")
-	assert.Equal(t, int64(7000), ref.W1)
+	assert.Equal(t, int64(5000), ref.WallclockStart, "the group without an anchor must not drag the start to zero")
+	assert.Equal(t, int64(7000), ref.WallclockEnd)
 }
 
 func TestSealedManifest_summarize_NoWallclock(t *testing.T) {
 	manifest := SealedManifest{
-		Groups: []GroupMeta{{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, T0: 100, Duration: 100}},
+		Groups: []GroupInfo{{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100, Duration: 100}},
 	}
 
 	ref := manifest.summarize("k")
 
-	assert.Zero(t, ref.W0)
-	assert.Zero(t, ref.W1)
-	assert.Equal(t, int64(200), ref.T1, "the media bounds are unaffected")
+	assert.Zero(t, ref.WallclockStart)
+	assert.Zero(t, ref.WallclockEnd)
+	assert.Equal(t, int64(200), ref.MediaEnd, "the media bounds are unaffected")
 }
 
 // A sealed run spans more than one epoch when a producer restarts mid-run, and
@@ -114,19 +114,19 @@ func TestSealedManifest_summarize_NoWallclock(t *testing.T) {
 // group or a range search will step over data that is really there.
 func TestSealedManifest_summarize_AcrossEpochs(t *testing.T) {
 	manifest := SealedManifest{
-		Groups: []GroupMeta{
-			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, T0: 500, Duration: 100, W0: 5000},
-			{GroupRef: GroupRef{Epoch: 2, Sequence: 0}, T0: 100, Duration: 100, W0: 6000},
-			{GroupRef: GroupRef{Epoch: 2, Sequence: 1}, T0: 900, Duration: 100, W0: 9000},
+		Groups: []GroupInfo{
+			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, MediaTime: 500, Duration: 100, Wallclock: 5000},
+			{GroupRef: GroupRef{Epoch: 2, Sequence: 0}, MediaTime: 100, Duration: 100, Wallclock: 6000},
+			{GroupRef: GroupRef{Epoch: 2, Sequence: 1}, MediaTime: 900, Duration: 100, Wallclock: 9000},
 		},
 	}
 
 	ref := manifest.summarize("k")
 
-	assert.Equal(t, int64(100), ref.T0, "the summary must reach the earliest group, not the first one committed")
-	assert.Equal(t, int64(1000), ref.T1)
-	assert.Equal(t, int64(5000), ref.W0)
-	assert.Equal(t, int64(9000), ref.W1)
+	assert.Equal(t, int64(100), ref.MediaStart, "the summary must reach the earliest group, not the first one committed")
+	assert.Equal(t, int64(1000), ref.MediaEnd)
+	assert.Equal(t, int64(5000), ref.WallclockStart)
+	assert.Equal(t, int64(9000), ref.WallclockEnd)
 }
 
 func TestSealedManifest_summarize_Empty(t *testing.T) {

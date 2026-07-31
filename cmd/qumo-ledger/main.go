@@ -114,15 +114,15 @@ func inspect(ctx context.Context, args []string) error {
 		}
 
 		// Duration is optional; without one a group is just its anchor.
-		media := strconv.FormatInt(group.T0, 10)
+		media := strconv.FormatInt(group.MediaTime, 10)
 		if group.Duration > 0 {
-			media += ".." + strconv.FormatInt(group.T0+group.Duration, 10)
+			media += ".." + strconv.FormatInt(group.MediaTime+group.Duration, 10)
 		}
 
 		// A zero wallclock means no anchor, not the Unix epoch.
 		wallclock := "-"
-		if group.W0 != 0 {
-			wallclock = time.Unix(0, group.W0).UTC().Format(time.RFC3339Nano)
+		if group.Wallclock != 0 {
+			wallclock = time.Unix(0, group.Wallclock).UTC().Format(time.RFC3339Nano)
 		}
 
 		fmt.Fprintf(out, "%s\t%s\t%s\t%d\t%d\n",
@@ -170,7 +170,7 @@ func follow(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Printf("%s  group %s  media %d+%d  %d objects  %d bytes\n",
-			update.Cursor, update.GroupRef, update.T0, update.Duration,
+			update.Cursor, update.GroupRef, update.MediaTime, update.Duration,
 			update.ObjectCount, update.Size)
 	}
 

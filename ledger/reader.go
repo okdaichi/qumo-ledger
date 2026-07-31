@@ -146,10 +146,10 @@ func (r *Reader) sealed(ctx context.Context, ref SealedRef) (SealedManifest, err
 
 // ReadGroup fetches a group's payload.
 //
-// It reads [GroupMeta.Object] rather than deriving a key, because producer
+// It reads [GroupInfo.ObjectKey] rather than deriving a key, because producer
 // sequences are gappy and a derived key can name a group that was dropped.
-func (r *Reader) ReadGroup(ctx context.Context, meta GroupMeta) ([]byte, error) {
-	data, _, err := r.objects.Get(ctx, meta.Object)
+func (r *Reader) ReadGroup(ctx context.Context, meta GroupInfo) ([]byte, error) {
+	data, _, err := r.objects.Get(ctx, meta.ObjectKey)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: read group %s: %w", meta.GroupRef, err)
 	}
@@ -162,17 +162,17 @@ func (r *Reader) ReadGroup(ctx context.Context, meta GroupMeta) ([]byte, error) 
 //
 // This reads the whole recording. Prefer [Reader.RangeWallclock],
 // [Reader.RangeMedia] or [Reader.GroupsFrom] for anything narrower.
-func (r *Reader) Groups(ctx context.Context) iter.Seq2[GroupMeta, error] {
+func (r *Reader) Groups(ctx context.Context) iter.Seq2[GroupInfo, error] {
 	return r.walk(ctx, nil)
 }
 
 // GroupsFrom iterates from a group onward, in commit order, including the group
 // itself. It is the resumption path for a consumer that recorded how far it got.
-func (r *Reader) GroupsFrom(ctx context.Context, from GroupRef) iter.Seq2[GroupMeta, error] {
+func (r *Reader) GroupsFrom(ctx context.Context, from GroupRef) iter.Seq2[GroupInfo, error] {
 	return filterGroups(
 		// A sealed run whose last group precedes the mark holds nothing wanted.
 		r.walk(ctx, func(ref SealedRef) bool { return !ref.Last.Before(from) }),
-		func(group GroupMeta) bool { return !group.GroupRef.Before(from) },
+		func(group GroupInfo) bool { return !group.GroupRef.Before(from) },
 	)
 }
 
@@ -183,16 +183,16 @@ func (r *Reader) GroupsFrom(ctx context.Context, from GroupRef) iter.Seq2[GroupM
 // group *containing* from is returned even though it starts earlier — which is
 // what a player needs to decode into the window. A group with no duration is a
 // point, and is included only when its anchor falls inside.
-func (r *Reader) RangeMedia(ctx context.Context, from, to int64) iter.Seq2[GroupMeta, error] {
+func (r *Reader) RangeMedia(ctx context.Context, from, to int64) iter.Seq2[GroupInfo, error] {
 	if from >= to {
 		return emptyGroups
 	}
 
 	return filterGroups(
-		// T1 is a true end, so a run finishing at or before the window cannot
+		// MediaEnd is a true end, so a run finishing at or before the window cannot
 		// contribute and need not be fetched.
-		r.walk(ctx, func(ref SealedRef) bool { return ref.T0 < to && ref.T1 > from }),
-		func(group GroupMeta) bool { return group.overlapsMedia(from, to) },
+		r.walk(ctx, func(ref SealedRef) bool { return ref.MediaStart < to && ref.MediaEnd > from }),
+		func(group GroupInfo) bool { return group.overlapsMedia(from, to) },
 	)
 }
 
@@ -202,7 +202,7 @@ func (r *Reader) RangeMedia(ctx context.Context, from, to int64) iter.Seq2[Group
 //
 // This is the cross-track query. Running it over a video track and a sensor
 // track with the same window is what lines the two recordings up.
-func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[GroupMeta, error] {
+func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[GroupInfo, error] {
 	if from >= to {
 		return emptyGroups
 	}
@@ -211,13 +211,13 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 
 	return filterGroups(
 		r.walk(ctx, func(ref SealedRef) bool {
-			// SealedRef.W1 is the last anchor rather than an end, so a group
+			// SealedRef.WallclockEnd is the last anchor rather than an end, so a group
 			// sitting on it may still reach into the window. Only a run that
 			// begins after the window can be ruled out. A run with no anchors
 			// at all cannot be ruled out either.
-			return ref.W0 == 0 || ref.W0 < to
+			return ref.WallclockStart == 0 || ref.WallclockStart < to
 		}),
-		func(group GroupMeta) bool { return group.overlapsWallclock(from, to, timescale) },
+		func(group GroupInfo) bool { return group.overlapsWallclock(from, to, timescale) },
 	)
 }
 
@@ -276,7 +276,7 @@ func (r *Reader) Follow(ctx context.Context, from Cursor, interval time.Duration
 						continue
 					}
 					update := Update{
-						GroupMeta: group,
+						GroupInfo: group,
 						Cursor:    Cursor{delta: at.delta, index: i + 1},
 					}
 					if !yield(update, nil) {
@@ -402,7 +402,7 @@ func (r *Reader) resume(
 
 	cursor := Cursor{delta: ref.LastDelta + 1}
 	for _, group := range sealed.Groups {
-		if !yield(Update{GroupMeta: group, Cursor: cursor}, nil) {
+		if !yield(Update{GroupInfo: group, Cursor: cursor}, nil) {
 			return at, resumeStopped, nil
 		}
 	}
@@ -423,8 +423,8 @@ func sealedCovering(root RootManifest, delta uint64) (SealedRef, bool) {
 
 // walk iterates the track in commit order, fetching only the sealed runs that
 // include accepts. A nil include fetches every run.
-func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Seq2[GroupMeta, error] {
-	return func(yield func(GroupMeta, error) bool) {
+func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Seq2[GroupInfo, error] {
+	return func(yield func(GroupInfo, error) bool) {
 		root := r.Root()
 
 		for _, ref := range root.Sealed {
@@ -434,7 +434,7 @@ func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Se
 
 			sealed, err := r.sealed(ctx, ref)
 			if err != nil {
-				yield(GroupMeta{}, err)
+				yield(GroupInfo{}, err)
 				return
 			}
 			for _, group := range sealed.Groups {
@@ -450,7 +450,7 @@ func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Se
 				return
 			}
 			if err != nil {
-				yield(GroupMeta{}, err)
+				yield(GroupInfo{}, err)
 				return
 			}
 			for _, group := range delta.Groups {
@@ -463,11 +463,11 @@ func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Se
 }
 
 // filterGroups drops groups that keep rejects, passing errors straight through.
-func filterGroups(seq iter.Seq2[GroupMeta, error], keep func(GroupMeta) bool) iter.Seq2[GroupMeta, error] {
-	return func(yield func(GroupMeta, error) bool) {
+func filterGroups(seq iter.Seq2[GroupInfo, error], keep func(GroupInfo) bool) iter.Seq2[GroupInfo, error] {
+	return func(yield func(GroupInfo, error) bool) {
 		for group, err := range seq {
 			if err != nil {
-				yield(GroupMeta{}, err)
+				yield(GroupInfo{}, err)
 				return
 			}
 			if !keep(group) {
@@ -481,7 +481,7 @@ func filterGroups(seq iter.Seq2[GroupMeta, error], keep func(GroupMeta) bool) it
 }
 
 // emptyGroups yields nothing, for a window that cannot contain anything.
-func emptyGroups(func(GroupMeta, error) bool) {}
+func emptyGroups(func(GroupInfo, error) bool) {}
 
 // SeekWallclock returns the group anchored at or before a Unix-nanosecond
 // instant, skipping groups that carry no wallclock anchor.
@@ -490,23 +490,23 @@ func emptyGroups(func(GroupMeta, error) bool) {}
 // what makes correlated replay — video alongside the sensor readings recorded
 // with it — possible at all. For seeking within one track, use
 // [Reader.SeekMedia], which is exact and immune to clock skew.
-func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupMeta, error) {
+func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupInfo, error) {
 	timescale := r.Root().Timescale
 
 	return r.seek(ctx, unixNano,
-		func(g GroupMeta) (int64, bool) { return g.W0, g.hasWallclock() },
-		func(g GroupMeta) (int64, bool) { return g.wallclockEnd(timescale) },
-		func(ref SealedRef) (int64, bool) { return ref.W0, ref.W0 != 0 },
+		func(g GroupInfo) (int64, bool) { return g.Wallclock, g.hasWallclock() },
+		func(g GroupInfo) (int64, bool) { return g.wallclockEnd(timescale) },
+		func(ref SealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
 	)
 }
 
 // SeekMedia returns the group anchored at or before a media timestamp, in the
 // track's timescale units.
-func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupMeta, error) {
+func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, error) {
 	return r.seek(ctx, mediaTime,
-		func(g GroupMeta) (int64, bool) { return g.T0, true },
-		func(g GroupMeta) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
-		func(ref SealedRef) (int64, bool) { return ref.T0, true },
+		func(g GroupInfo) (int64, bool) { return g.MediaTime, true },
+		func(g GroupInfo) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
+		func(ref SealedRef) (int64, bool) { return ref.MediaStart, true },
 	)
 }
 
@@ -530,17 +530,17 @@ func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupMeta, err
 func (r *Reader) seek(
 	ctx context.Context,
 	target int64,
-	anchor func(GroupMeta) (int64, bool),
-	end func(GroupMeta) (int64, bool),
+	anchor func(GroupInfo) (int64, bool),
+	end func(GroupInfo) (int64, bool),
 	start func(SealedRef) (int64, bool),
-) (GroupMeta, error) {
+) (GroupInfo, error) {
 	root := r.Root()
 
 	var (
-		best     GroupMeta
+		best     GroupInfo
 		bestAt   int64
 		found    bool
-		consider = func(group GroupMeta) {
+		consider = func(group GroupInfo) {
 			at, ok := anchor(group)
 			if !ok || at > target {
 				return
@@ -557,7 +557,7 @@ func (r *Reader) seek(
 			break
 		}
 		if err != nil {
-			return GroupMeta{}, err
+			return GroupInfo{}, err
 		}
 		for _, group := range delta.Groups {
 			consider(group)
@@ -577,7 +577,7 @@ func (r *Reader) seek(
 
 		sealed, err := r.sealed(ctx, ref)
 		if err != nil {
-			return GroupMeta{}, err
+			return GroupInfo{}, err
 		}
 		for _, group := range sealed.Groups {
 			consider(group)
@@ -585,10 +585,10 @@ func (r *Reader) seek(
 	}
 
 	if !found {
-		return GroupMeta{}, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrNoGroupFound, r.track, target)
+		return GroupInfo{}, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrGroupNotFound, r.track, target)
 	}
 	if at, ok := end(best); ok && target >= at {
-		return GroupMeta{}, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrNoGroupFound, target, best.GroupRef, r.track)
+		return GroupInfo{}, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrGroupNotFound, target, best.GroupRef, r.track)
 	}
 
 	return best, nil
