@@ -50,17 +50,17 @@ type Reader struct {
 }
 
 // OpenReader loads a track's root manifest.
-func OpenReader(ctx context.Context, objects store.Store, track TrackPath) (*Reader, error) {
+func (b *Bucket) OpenReader(ctx context.Context, track TrackPath) (*Reader, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
 
-	root, version, err := fetchRoot(ctx, objects, track)
+	root, version, err := fetchRoot(ctx, b.objects, track)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Reader{objects: objects, track: track, root: root, rootVersion: version}, nil
+	return &Reader{objects: b.objects, track: track, root: root, rootVersion: version}, nil
 }
 
 // Track returns the path being read.

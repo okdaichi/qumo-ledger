@@ -34,9 +34,13 @@ go get github.com/okdaichi/qumo-ledger
 ## Usage
 
 ```go
-store, _ := fsstore.New("/var/lib/qumo-ledger")
+objects, _ := fsstore.New("/var/lib/qumo-ledger")
 
-writer, _ := ledger.CreateTrack(ctx, store, "live/cam1/video", ledger.TrackConfig{
+// Bind the store once. Writers and readers come from the bucket, so a logger
+// or clock is configured in one place rather than at every call.
+bucket := ledger.New(objects, ledger.WithLogger(log))
+
+writer, _ := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
     Timescale:  90000,                  // 90 kHz, the usual video timescale
     TimeSource: ledger.TimeSourceFrame, // timestamps came from the data itself
     MIME:       "video/mp4",
@@ -53,7 +57,7 @@ writer.AppendGroup(ctx, ledger.GroupInfo{
 }, payload)
 
 // Readers need only store access.
-reader, _ := ledger.OpenReader(ctx, store, "live/cam1/video")
+reader, _ := bucket.OpenReader(ctx, "live/cam1/video")
 
 // A window, not a point. Run the same window over a video track and a sensor
 // track and the two recordings line up.

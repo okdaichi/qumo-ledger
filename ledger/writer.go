@@ -61,41 +61,9 @@ type Writer struct {
 	hasLast bool
 }
 
-// WriterOption configures a Writer.
-type WriterOption func(*Writer)
-
-// WithSealThreshold sets the open-manifest byte size that triggers a seal.
-func WithSealThreshold(bytes int64) WriterOption {
-	return func(w *Writer) {
-		if bytes > 0 {
-			w.sealThreshold = bytes
-		}
-	}
-}
-
-// WithClock replaces the wallclock source, for tests and for producers that
-// supply their own notion of ingest time.
-func WithClock(now func() time.Time) WriterOption {
-	return func(w *Writer) {
-		if now != nil {
-			w.now = now
-		}
-	}
-}
-
-// WithLogger sets the logger used for events that do not affect correctness,
-// such as a failed head update.
-func WithLogger(logger *slog.Logger) WriterOption {
-	return func(w *Writer) {
-		if logger != nil {
-			w.logger = logger
-		}
-	}
-}
-
 // CreateTrack writes a new root manifest and returns a Writer positioned at the
 // start of the track. It returns ErrTrackExists if the track already has one.
-func CreateTrack(ctx context.Context, objects store.Store, track TrackPath, cfg TrackConfig, opts ...WriterOption) (*Writer, error) {
+func (b *Bucket) CreateTrack(ctx context.Context, track TrackPath, cfg TrackConfig) (*Writer, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
@@ -103,7 +71,7 @@ func CreateTrack(ctx context.Context, objects store.Store, track TrackPath, cfg 
 		return nil, err
 	}
 
-	w := newWriter(objects, track, opts)
+	w := b.newWriter(track)
 
 	w.root = RootManifest{
 		Version:    ManifestVersion,
@@ -122,7 +90,7 @@ func CreateTrack(ctx context.Context, objects store.Store, track TrackPath, cfg 
 		return nil, err
 	}
 
-	version, err := objects.Create(ctx, rootKey(track), data)
+	version, err := b.objects.Create(ctx, rootKey(track), data)
 	if err != nil {
 		if errors.Is(err, store.ErrExist) {
 			return nil, fmt.Errorf("%w: %s", ErrTrackExists, track)
@@ -141,14 +109,14 @@ func CreateTrack(ctx context.Context, objects store.Store, track TrackPath, cfg 
 // immutable and written atomically, any delta that exists is committed, whether
 // or not head knows about it. A writer that crashed mid-append therefore
 // resumes without losing committed groups and without a repair pass.
-func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts ...WriterOption) (*Writer, error) {
+func (b *Bucket) OpenWriter(ctx context.Context, track TrackPath) (*Writer, error) {
 	if err := track.validate(); err != nil {
 		return nil, err
 	}
 
-	w := newWriter(objects, track, opts)
+	w := b.newWriter(track)
 
-	root, version, err := fetchRoot(ctx, objects, track)
+	root, version, err := fetchRoot(ctx, b.objects, track)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +124,7 @@ func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts 
 
 	// head is only a hint. Trust it to skip ahead, never to stop early.
 	from := root.OpenFrom
-	if head, headVersion, err := fetchHead(ctx, objects, track); err == nil {
+	if head, headVersion, err := fetchHead(ctx, b.objects, track); err == nil {
 		w.headVersion = headVersion
 		if head.Delta >= from {
 			from = head.Delta
@@ -167,7 +135,7 @@ func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts 
 
 	// Replay the open region so the seal threshold and group rows are accurate.
 	for n := root.OpenFrom; ; n++ {
-		data, _, err := objects.Get(ctx, deltaKey(track, n))
+		data, _, err := b.objects.Get(ctx, deltaKey(track, n))
 		if errors.Is(err, store.ErrNotExist) {
 			if n < from {
 				// A gap below the head pointer means deltas were lost, which
@@ -206,19 +174,15 @@ func OpenWriter(ctx context.Context, objects store.Store, track TrackPath, opts 
 	return w, nil
 }
 
-func newWriter(objects store.Store, track TrackPath, opts []WriterOption) *Writer {
-	w := &Writer{
-		objects:       objects,
+// newWriter builds a writer carrying the bucket's shared settings.
+func (b *Bucket) newWriter(track TrackPath) *Writer {
+	return &Writer{
+		objects:       b.objects,
 		track:         track,
-		sealThreshold: DefaultSealThreshold,
-		now:           time.Now,
-		logger:        slog.Default(),
+		sealThreshold: b.sealThreshold,
+		now:           b.now,
+		logger:        b.logger,
 	}
-	for _, opt := range opts {
-		opt(w)
-	}
-
-	return w
 }
 
 // Track returns the path being written.

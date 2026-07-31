@@ -178,10 +178,10 @@ func follow(ctx context.Context, args []string) error {
 }
 
 func openReader(ctx context.Context, root, track string) (*ledger.Reader, error) {
-	store, err := fsstore.New(root)
+	objects, err := fsstore.New(root)
 	if err != nil {
 		return nil, err
 	}
 
-	return ledger.OpenReader(ctx, store, ledger.TrackPath(track))
+	return ledger.New(objects).OpenReader(ctx, ledger.TrackPath(track))
 }
