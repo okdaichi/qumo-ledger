@@ -18,17 +18,13 @@ type TrackPath string
 // String returns the path as a string.
 func (p TrackPath) String() string { return string(p) }
 
-// Prefix reports whether the track lives under dir, which is how the tracks of
-// a single broadcast are enumerated.
-func (p TrackPath) Prefix(dir string) bool {
-	return strings.HasPrefix(string(p), strings.TrimSuffix(dir, "/")+"/")
-}
-
-// Validate reports whether the path is usable as an object key prefix. Paths
+// validate reports whether the path is usable as an object key prefix. Paths
 // must be relative, free of empty or dot segments, and free of backslashes —
 // a backslash is a legal character in an S3 key but becomes a separator once
 // the filesystem backend maps a key onto a path.
-func (p TrackPath) Validate() error {
+//
+// Every entry point validates for the caller, so this stays unexported.
+func (p TrackPath) validate() error {
 	s := string(p)
 	switch {
 	case s == "":
@@ -67,8 +63,8 @@ const (
 	TimeSourceIngest TimeSource = "ingest"
 )
 
-// Valid reports whether the time source is one this package understands.
-func (s TimeSource) Valid() bool {
+// valid reports whether the time source is one this package understands.
+func (s TimeSource) valid() bool {
 	return s == TimeSourceFrame || s == TimeSourceIngest
 }
 
@@ -98,7 +94,7 @@ func (c TrackConfig) validate() error {
 	if c.Timescale == 0 {
 		return fmt.Errorf("%w: timescale must be non-zero", ErrInvalidGroup)
 	}
-	if !c.TimeSource.Valid() {
+	if !c.TimeSource.valid() {
 		return fmt.Errorf("%w: unknown time source %q", ErrInvalidGroup, c.TimeSource)
 	}
 

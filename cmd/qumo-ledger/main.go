@@ -59,7 +59,8 @@ func usage() {
 
 Usage:
   qumo-ledger inspect -root <dir> -track <path>   summarize a track
-  qumo-ledger follow  -root <dir> -track <path>   tail commits as they land
+  qumo-ledger follow  -root <dir> -track <path>   tail groups as they land
+                      [-tip] [-cursor <c>]       start at the tip, or resume
   qumo-ledger version
 
 Only the local filesystem backend is wired up so far. Object-store backends
@@ -112,14 +113,15 @@ func inspect(ctx context.Context, args []string) error {
 			return err
 		}
 
+		// Duration is optional; without one a group is just its anchor.
 		media := strconv.FormatInt(group.T0, 10)
-		if group.HasDuration() {
-			media += ".." + strconv.FormatInt(group.MediaEnd(), 10)
+		if group.Duration > 0 {
+			media += ".." + strconv.FormatInt(group.T0+group.Duration, 10)
 		}
 
-		// Both anchors are optional, so say so rather than printing the epoch.
+		// A zero wallclock means no anchor, not the Unix epoch.
 		wallclock := "-"
-		if group.HasWallclock() {
+		if group.W0 != 0 {
 			wallclock = time.Unix(0, group.W0).UTC().Format(time.RFC3339Nano)
 		}
 
@@ -134,7 +136,8 @@ func follow(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("follow", flag.ExitOnError)
 	root := flags.String("root", ".", "storage root directory")
 	track := flags.String("track", "", "track path, for example live/cam1/video")
-	from := flags.Uint64("from", 0, "first delta to read")
+	cursor := flags.String("cursor", "", "resume from a cursor printed by an earlier run")
+	tip := flags.Bool("tip", false, "start after everything already committed")
 	interval := flags.Duration("interval", ledger.DefaultPollInterval, "poll interval")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -148,14 +151,27 @@ func follow(ctx context.Context, args []string) error {
 		return err
 	}
 
-	for delta, err := range reader.Follow(ctx, *from, *interval) {
+	// The zero cursor is the start of the track, so an unflagged run replays
+	// everything and then tails.
+	var start ledger.Cursor
+	switch {
+	case *cursor != "":
+		if err := start.UnmarshalText([]byte(*cursor)); err != nil {
+			return err
+		}
+	case *tip:
+		if start, err = reader.Tip(ctx); err != nil {
+			return err
+		}
+	}
+
+	for update, err := range reader.Follow(ctx, start, *interval) {
 		if err != nil {
 			return err
 		}
-		for _, group := range delta.Groups {
-			fmt.Printf("delta %d  group %s  media %d+%d  %d objects  %d bytes\n",
-				delta.Seq, group.GroupRef, group.T0, group.Duration, group.ObjectCount, group.Size)
-		}
+		fmt.Printf("%s  group %s  media %d+%d  %d objects  %d bytes\n",
+			update.Cursor, update.GroupRef, update.T0, update.Duration,
+			update.ObjectCount, update.Size)
 	}
 
 	return nil

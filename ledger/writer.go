@@ -96,7 +96,7 @@ func WithLogger(logger *slog.Logger) WriterOption {
 // CreateTrack writes a new root manifest and returns a Writer positioned at the
 // start of the track. It returns ErrTrackExists if the track already has one.
 func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, cfg TrackConfig, opts ...WriterOption) (*Writer, error) {
-	if err := track.Validate(); err != nil {
+	if err := track.validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.validate(); err != nil {
@@ -142,7 +142,7 @@ func CreateTrack(ctx context.Context, store objectstore.Store, track TrackPath, 
 // or not head knows about it. A writer that crashed mid-append therefore
 // resumes without losing committed groups and without a repair pass.
 func OpenWriter(ctx context.Context, store objectstore.Store, track TrackPath, opts ...WriterOption) (*Writer, error) {
-	if err := track.Validate(); err != nil {
+	if err := track.validate(); err != nil {
 		return nil, err
 	}
 
@@ -355,7 +355,7 @@ func (w *Writer) checkOrder(meta GroupMeta) error {
 		return nil
 	}
 
-	if end := w.last.MediaEnd(); meta.T0 < end {
+	if end := w.last.mediaEnd(); meta.T0 < end {
 		return fmt.Errorf("%w: group %s starts at %d, before group %s ends at %d",
 			ErrGroupOutOfOrder, meta.GroupRef, meta.T0, w.last.GroupRef, end)
 	}

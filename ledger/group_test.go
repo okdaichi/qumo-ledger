@@ -48,21 +48,21 @@ func TestGroupRef_Before(t *testing.T) {
 }
 
 func TestGroupMeta_MediaEnd(t *testing.T) {
-	assert.Equal(t, int64(1500), GroupMeta{T0: 500, Duration: 1000}.MediaEnd())
-	assert.Equal(t, int64(500), GroupMeta{T0: 500}.MediaEnd(),
+	assert.Equal(t, int64(1500), GroupMeta{T0: 500, Duration: 1000}.mediaEnd())
+	assert.Equal(t, int64(500), GroupMeta{T0: 500}.mediaEnd(),
 		"with no duration the end collapses onto the anchor")
 }
 
 // Duration and W0 are optional, so every consumer needs a way to tell "absent"
 // from a real value before using one.
 func TestGroupMeta_HasDuration(t *testing.T) {
-	assert.True(t, GroupMeta{Duration: 1}.HasDuration())
-	assert.False(t, GroupMeta{}.HasDuration(), "zero means the producer did not supply an extent")
+	assert.True(t, GroupMeta{Duration: 1}.hasDuration())
+	assert.False(t, GroupMeta{}.hasDuration(), "zero means the producer did not supply an extent")
 }
 
 func TestGroupMeta_HasWallclock(t *testing.T) {
-	assert.True(t, GroupMeta{W0: 1}.HasWallclock())
-	assert.False(t, GroupMeta{}.HasWallclock(), "zero means no anchor, not the Unix epoch")
+	assert.True(t, GroupMeta{W0: 1}.hasWallclock())
+	assert.False(t, GroupMeta{}.hasWallclock(), "zero means no anchor, not the Unix epoch")
 }
 
 func TestGroupMeta_wallclockEnd(t *testing.T) {

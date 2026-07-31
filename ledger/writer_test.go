@@ -276,7 +276,7 @@ func TestWriter_AppendGroup_LeavesWallclockUnsetForFrameTracks(t *testing.T) {
 	meta, err := w.AppendGroup(t.Context(), group, []byte("payload"))
 	require.NoError(t, err)
 
-	assert.False(t, meta.HasWallclock())
+	assert.False(t, meta.hasWallclock())
 }
 
 // A track declaring ledger-clock timestamps gets one stamped.

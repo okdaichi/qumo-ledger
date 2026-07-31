@@ -59,8 +59,20 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("group %s covers media %d..%d\n", group.GroupRef, group.T0, group.MediaEnd())
+	fmt.Printf("seek landed on %s at media %d\n", group.GroupRef, group.T0)
+
+	// A window rather than a point: every group overlapping the middle four
+	// seconds, which is the query a correlated replay actually runs.
+	window := start.Add(2 * time.Second)
+	for group, err := range reader.RangeWallclock(ctx, window.UnixNano(), window.Add(4*time.Second).UnixNano()) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("in window: %s\n", group.GroupRef)
+	}
 
 	// Output:
-	// group e000001-g00000002 covers media 360000..540000
+	// seek landed on e000001-g00000002 at media 360000
+	// in window: e000001-g00000001
+	// in window: e000001-g00000002
 }

@@ -98,25 +98,25 @@ type GroupMeta struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
-// HasDuration reports whether the producer supplied a media extent.
-func (m GroupMeta) HasDuration() bool { return m.Duration > 0 }
+// hasDuration reports whether the producer supplied a media extent.
+func (m GroupMeta) hasDuration() bool { return m.Duration > 0 }
 
-// HasWallclock reports whether the group carries a wallclock anchor, and so
+// hasWallclock reports whether the group carries a wallclock anchor, and so
 // whether it can be correlated against another track.
-func (m GroupMeta) HasWallclock() bool { return m.W0 != 0 }
+func (m GroupMeta) hasWallclock() bool { return m.W0 != 0 }
 
-// MediaEnd returns the group's end in media time. When the duration is unknown
-// it equals T0, so check [GroupMeta.HasDuration] before treating it as an end.
+// mediaEnd returns the group's end in media time. It equals T0 when no duration
+// was supplied, so callers must establish that one was.
 //
 // A group whose range would overflow an int64 is refused at append, so this
 // cannot wrap for anything the ledger stored.
-func (m GroupMeta) MediaEnd() int64 { return m.T0 + m.Duration }
+func (m GroupMeta) mediaEnd() int64 { return m.T0 + m.Duration }
 
 // wallclockEnd returns the group's end in Unix nanoseconds for a track of the
 // given timescale, reporting false when an anchor or extent is missing, or when
 // the result would not fit in an int64.
 func (m GroupMeta) wallclockEnd(timescale uint32) (int64, bool) {
-	if !m.HasWallclock() || !m.HasDuration() {
+	if !m.hasWallclock() || !m.hasDuration() {
 		return 0, false
 	}
 
@@ -126,6 +126,33 @@ func (m GroupMeta) wallclockEnd(timescale uint32) (int64, bool) {
 	}
 
 	return m.W0 + nanos, true
+}
+
+// overlapsMedia reports whether the group intersects the half-open media-time
+// window [from, to). A group with a duration counts if any of it falls inside,
+// so the group containing from is kept even though it starts earlier. Without a
+// duration a group is a point at its anchor.
+func (m GroupMeta) overlapsMedia(from, to int64) bool {
+	if !m.hasDuration() {
+		return m.T0 >= from && m.T0 < to
+	}
+
+	return m.T0 < to && m.mediaEnd() > from
+}
+
+// overlapsWallclock is overlapsMedia on the shared timeline. A group with no
+// anchor cannot be placed on it and never matches.
+func (m GroupMeta) overlapsWallclock(from, to int64, timescale uint32) bool {
+	if !m.hasWallclock() {
+		return false
+	}
+
+	end, ok := m.wallclockEnd(timescale)
+	if !ok {
+		return m.W0 >= from && m.W0 < to
+	}
+
+	return m.W0 < to && end > from
 }
 
 // mediaToNanos converts a media-time extent into nanoseconds, reporting false

@@ -186,18 +186,18 @@ func (m SealedManifest) summarize(key string) SealedRef {
 
 	first, last := m.Groups[0], m.Groups[len(m.Groups)-1]
 	ref.First, ref.Last = first.GroupRef, last.GroupRef
-	ref.T0, ref.T1 = first.T0, last.MediaEnd()
+	ref.T0, ref.T1 = first.T0, last.mediaEnd()
 
 	// A run spans more than one epoch whenever a producer restarts mid-run,
 	// and an epoch resets media time outright. Widen the bounds over every
 	// group so a range search cannot step over one.
 	for _, g := range m.Groups {
 		ref.T0 = min(ref.T0, g.T0)
-		ref.T1 = max(ref.T1, g.MediaEnd())
+		ref.T1 = max(ref.T1, g.mediaEnd())
 
 		// Wallclock is optional, so the bounds cover only the groups that
 		// carry an anchor. Zero means "no anchor", never "the epoch".
-		if !g.HasWallclock() {
+		if !g.hasWallclock() {
 			continue
 		}
 		if ref.W0 == 0 || g.W0 < ref.W0 {

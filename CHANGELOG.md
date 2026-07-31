@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ledger:** Root and sealed manifests are verified against the key they were fetched from — track for both, delta range for sealed (`ErrManifestMismatch`). Manifests are self-describing precisely so a misfiled or swapped object is caught rather than trusted.
 - **CI:** `lint.yml`'s job renamed `build` → `lint`, so two workflows no longer report the same check context and leave a required-status rule ambiguous. The required-stub gained a matching `lint` job, filtered separately because `lint.yml`'s paths differ from `go.yml`'s. The gofmt check now covers the whole repository instead of a hardcoded package list.
 
+### Changed
+
+- **ledger:** Added the range and cursor API, and pruned the surface it replaced. A temporal store could previously answer "which group covers this instant" but not "which groups cover this window" — a range query meant iterating the whole recording and filtering client-side. `Reader.RangeMedia`, `Reader.RangeWallclock` and `Reader.GroupsFrom` answer it directly, skipping the sealed runs that cannot contribute.
+- **ledger:** `Reader.Follow` yields `Update` (a group plus the cursor that resumes after it) instead of `DeltaManifest`, and takes an opaque `Cursor` instead of a raw delta number. The commit-numbering scheme is no longer the public contract, so how commits are chunked can change without breaking callers. `Reader.Tip` gives a follower "everything from now", replacing a `Head()` call plus an off-by-one the caller had to get right. `Cursor` marshals as text, so a follower can persist its position and resume through a restart.
+- **ledger:** `Reader.Delta` and `Reader.Sealed` are unexported. They were storage plumbing that no consumer needed.
+- **ledger:** A follower resuming from a cursor whose deltas have since been sealed no longer waits forever for a reclaimed object. Sealing deletes the deltas it folds up, so any persisted cursor became a permanent hang once a seal passed it — found by running the CLI against a real track. Those groups are served from the sealed run instead. The cursor issued during that replay points after the whole run, because a sealed manifest does not record which delta each group came from, so a consumer stopping mid-replay sees the run again — within the at-least-once contract `Follow` already carries.
+- **ledger:** Removed `TrackPath.Prefix`, which had no caller and implied a track-discovery API that does not exist. Unexported `TrackPath.Validate`, `TimeSource.Valid`, `GroupRef.Before`, and `GroupMeta`'s `HasDuration`/`HasWallclock`/`MediaEnd` — all one-line derivations of exported fields, and `MediaEnd` in particular invited treating a group with no duration as ending at its own start.
+
 ### Notes
 
 - Deferred deliberately, with rationale in `docs/ARCHITECTURE.md`: garbage collection, retention, the MoQT adapter, HLS/DASH renderers, and an S3 backend.

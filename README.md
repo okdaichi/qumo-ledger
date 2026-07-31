@@ -55,12 +55,24 @@ writer.AppendGroup(ctx, ledger.GroupMeta{
 // Readers need only store access.
 reader, _ := ledger.OpenReader(ctx, store, "live/cam1/video")
 
-group, _ := reader.SeekWallclock(ctx, time.Now().Add(-time.Hour).UnixNano())
-frames, _ := reader.ReadGroup(ctx, group)
+// A window, not a point. Run the same window over a video track and a sensor
+// track and the two recordings line up.
+for group, err := range reader.RangeWallclock(ctx, from, to) {
+    if err != nil {
+        return err   // the error is terminal; nothing follows it
+    }
+    frames, _ := reader.ReadGroup(ctx, group)
+    _ = frames
+}
 
-// Following is polling: object stores do not push.
-for delta, err := range reader.Follow(ctx, 0, ledger.DefaultPollInterval) {
-    // ...
+// Following is polling: object stores do not push. Each update carries the
+// cursor that resumes after it, so a follower can persist its position.
+tip, _ := reader.Tip(ctx)
+for update, err := range reader.Follow(ctx, tip, ledger.DefaultPollInterval) {
+    if err != nil {
+        return err
+    }
+    save(update.Cursor) // survives a restart: it marshals as text
 }
 ```
 

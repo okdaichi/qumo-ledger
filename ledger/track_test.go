@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestTrackPath_Validate(t *testing.T) {
+func TestTrackPath_validate(t *testing.T) {
 	tests := map[string]struct {
 		path    TrackPath
 		wantErr bool
@@ -25,7 +25,7 @@ func TestTrackPath_Validate(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := tt.path.Validate()
+			err := tt.path.validate()
 			if tt.wantErr {
 				assert.ErrorIs(t, err, ErrInvalidTrackPath)
 				return
@@ -35,28 +35,7 @@ func TestTrackPath_Validate(t *testing.T) {
 	}
 }
 
-func TestTrackPath_Prefix(t *testing.T) {
-	tests := map[string]struct {
-		path     TrackPath
-		dir      string
-		expected bool
-	}{
-		"direct child":                    {path: "live/cam1/video", dir: "live/cam1", expected: true},
-		"trailing slash on dir":           {path: "live/cam1/video", dir: "live/cam1/", expected: true},
-		"grandparent":                     {path: "live/cam1/video", dir: "live", expected: true},
-		"sibling":                         {path: "live/cam2/video", dir: "live/cam1", expected: false},
-		"the track itself":                {path: "live/cam1", dir: "live/cam1", expected: false},
-		"partial segment is not a prefix": {path: "live/cam10/video", dir: "live/cam1", expected: false},
-	}
-
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.path.Prefix(tt.dir))
-		})
-	}
-}
-
-func TestTimeSource_Valid(t *testing.T) {
+func TestTimeSource_valid(t *testing.T) {
 	tests := map[string]struct {
 		source   TimeSource
 		expected bool
@@ -69,7 +48,7 @@ func TestTimeSource_Valid(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.source.Valid())
+			assert.Equal(t, tt.expected, tt.source.valid())
 		})
 	}
 }
