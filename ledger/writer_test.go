@@ -53,20 +53,29 @@ func testGroup(tb testing.TB, sequence uint64) GroupInfo {
 
 // newTestWriter creates a fresh track and returns its writer along with the
 // objects backing it.
-func newTestWriter(tb testing.TB, opts ...Option) (*Writer, *memstore.Store) {
+func newTestWriter(tb testing.TB) (*Writer, *memstore.Store) {
 	tb.Helper()
 
 	objects := memstore.New()
-	w, err := New(objects, opts...).CreateTrack(tb.Context(), testTrack, testConfig(tb))
+
+	return newTestWriterIn(tb, &Bucket{Store: objects}), objects
+}
+
+// newTestWriterIn creates the standard test track in a caller-configured
+// bucket, for the cases that need a non-default setting.
+func newTestWriterIn(tb testing.TB, bucket *Bucket) *Writer {
+	tb.Helper()
+
+	w, err := bucket.CreateTrack(tb.Context(), testTrack, testConfig(tb))
 	require.NoError(tb, err)
 
-	return w, objects
+	return w
 }
 
 func TestBucket_CreateTrack(t *testing.T) {
 	objects := memstore.New()
 
-	w, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	w, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	root := w.Root()
@@ -85,11 +94,39 @@ func TestBucket_CreateTrack(t *testing.T) {
 func TestBucket_CreateTrack_AlreadyExists(t *testing.T) {
 	objects := memstore.New()
 
-	_, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	_, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
-	_, err = New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	_, err = (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	assert.ErrorIs(t, err, ErrTrackExists)
+}
+
+// Store has no sensible default, so a bucket without one reports it rather
+// than dereferencing nil somewhere further in.
+func TestBucket_NoStore(t *testing.T) {
+	bucket := &Bucket{}
+
+	_, err := bucket.CreateTrack(t.Context(), testTrack, testConfig(t))
+	assert.ErrorIs(t, err, ErrNoStore)
+
+	_, err = bucket.OpenWriter(t.Context(), testTrack)
+	assert.ErrorIs(t, err, ErrNoStore)
+
+	_, err = bucket.OpenReader(t.Context(), testTrack)
+	assert.ErrorIs(t, err, ErrNoStore)
+}
+
+// Every field but Store means a documented default when left zero, so the
+// smallest usable bucket is a single field.
+func TestBucket_Defaults(t *testing.T) {
+	bucket := &Bucket{Store: memstore.New()}
+
+	assert.Equal(t, int64(DefaultSealThreshold), bucket.sealThreshold())
+	assert.NotNil(t, bucket.clock())
+	assert.NotNil(t, bucket.logger())
+
+	_, err := bucket.CreateTrack(t.Context(), testTrack, testConfig(t))
+	assert.NoError(t, err)
 }
 
 func TestBucket_CreateTrack_InvalidInput(t *testing.T) {
@@ -104,7 +141,7 @@ func TestBucket_CreateTrack_InvalidInput(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := New(memstore.New()).CreateTrack(t.Context(), tt.track, tt.config)
+			_, err := (&Bucket{Store: memstore.New()}).CreateTrack(t.Context(), tt.track, tt.config)
 			assert.ErrorIs(t, err, tt.wantErr)
 		})
 	}
@@ -287,8 +324,8 @@ func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
 	config := testConfig(t)
 	config.TimeSource = TimeSourceIngest
 
-	w, err := New(objects, WithClock(func() time.Time { return stamped })).
-		CreateTrack(t.Context(), testTrack, config)
+	bucket := &Bucket{Store: objects, Clock: func() time.Time { return stamped }}
+	w, err := bucket.CreateTrack(t.Context(), testTrack, config)
 	require.NoError(t, err)
 
 	group := testGroup(t, 0)
@@ -343,7 +380,7 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 		SwapErrOnce: map[string]error{rootKey(testTrack): errors.New("transient failure")},
 	}
 
-	w, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	w, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	for sequence := range uint64(3) {
@@ -368,7 +405,7 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 	assert.Equal(t, root.Sealed[0].Groups, len(sealed.Groups),
 		"the root summary must match the sealed manifest it points at")
 
-	r, err := New(objects).OpenReader(t.Context(), testTrack)
+	r, err := (&Bucket{Store: objects}).OpenReader(t.Context(), testTrack)
 	require.NoError(t, err)
 
 	var seen []uint64
@@ -389,7 +426,7 @@ func TestWriter_Seal_Empty(t *testing.T) {
 
 func TestWriter_AppendGroup_SealsAtThreshold(t *testing.T) {
 	// One byte guarantees every append crosses the threshold.
-	w, _ := newTestWriter(t, WithSealThreshold(1))
+	w := newTestWriterIn(t, &Bucket{Store: memstore.New(), SealThreshold: 1})
 
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
@@ -407,7 +444,7 @@ func TestBucket_OpenWriter(t *testing.T) {
 	}
 
 	// Reopening stands in for a process restart.
-	reopened, err := New(objects).OpenWriter(t.Context(), testTrack)
+	reopened, err := (&Bucket{Store: objects}).OpenWriter(t.Context(), testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(2), reopened.nextDelta)
@@ -432,7 +469,7 @@ func TestBucket_OpenWriter_WithoutHead(t *testing.T) {
 
 	require.NoError(t, objects.Delete(t.Context(), headKey(testTrack)))
 
-	reopened, err := New(objects).OpenWriter(t.Context(), testTrack)
+	reopened, err := (&Bucket{Store: objects}).OpenWriter(t.Context(), testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(3), reopened.nextDelta,
@@ -458,14 +495,14 @@ func TestBucket_OpenWriter_StaleHead(t *testing.T) {
 	_, err = objects.Swap(t.Context(), headKey(testTrack), stale, currentVersion)
 	require.NoError(t, err)
 
-	reopened, err := New(objects).OpenWriter(t.Context(), testTrack)
+	reopened, err := (&Bucket{Store: objects}).OpenWriter(t.Context(), testTrack)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint64(3), reopened.nextDelta)
 }
 
 func TestBucket_OpenWriter_TrackNotFound(t *testing.T) {
-	_, err := New(memstore.New()).OpenWriter(t.Context(), testTrack)
+	_, err := (&Bucket{Store: memstore.New()}).OpenWriter(t.Context(), testTrack)
 
 	assert.ErrorIs(t, err, ErrTrackNotFound)
 }
@@ -476,7 +513,7 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	headFailure := errors.New("head unavailable")
 	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	w, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -496,7 +533,7 @@ func TestWriter_publishHead(t *testing.T) {
 	headFailure := errors.New("head unavailable")
 	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack): headFailure}}
 
-	w, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	w, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -513,7 +550,7 @@ func TestWriter_publishHead(t *testing.T) {
 func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
 	objects := &FakeStore{}
 
-	w, err := New(objects).CreateTrack(t.Context(), testTrack, testConfig(t))
+	w, err := (&Bucket{Store: objects}).CreateTrack(t.Context(), testTrack, testConfig(t))
 	require.NoError(t, err)
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))

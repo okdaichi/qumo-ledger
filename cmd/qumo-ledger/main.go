@@ -183,5 +183,7 @@ func openReader(ctx context.Context, root, track string) (*ledger.Reader, error)
 		return nil, err
 	}
 
-	return ledger.New(objects).OpenReader(ctx, ledger.TrackPath(track))
+	bucket := &ledger.Bucket{Store: objects}
+
+	return bucket.OpenReader(ctx, ledger.TrackPath(track))
 }

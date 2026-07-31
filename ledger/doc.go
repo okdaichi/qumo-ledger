@@ -4,6 +4,8 @@
 // [Bucket] is the entry point: it binds an object store once, and every
 // [Writer] and [Reader] is opened from it.
 //
+//	bucket := &ledger.Bucket{Store: objects}
+//
 // The design borrows the append-only ordered log from Kafka and the
 // independently-decodable segment from HLS, then keeps the two ideas separate:
 // a Group is both the unit of independent decoding and the unit of storage,

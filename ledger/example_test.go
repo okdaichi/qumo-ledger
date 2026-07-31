@@ -27,7 +27,7 @@ var exampleStart = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 // wallclock.
 func Example() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 
 	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
 		Timescale:  videoTimescale,
@@ -80,7 +80,7 @@ func Example() {
 // incomparable media clocks — is what lines the two recordings up.
 func ExampleReader_RangeWallclock() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 
 	// A 90 kHz video track in two-second groups.
 	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
@@ -118,7 +118,7 @@ func ExampleReader_RangeWallclock() {
 // any frames inside the window at all.
 func ExampleReader_RangeMedia() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
 	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
@@ -149,7 +149,7 @@ func ExampleReader_RangeMedia() {
 // ledger could not tell a gap from a group that simply runs long.
 func ExampleReader_SeekMedia() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 
 	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
 		Timescale:  videoTimescale,
@@ -203,7 +203,7 @@ func ExampleReader_SeekMedia() {
 // persist its position and pick up exactly where it stopped.
 func ExampleReader_Follow() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
 	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
@@ -258,7 +258,7 @@ func ExampleReader_Follow() {
 // numbering survives for clients aligning replay against a live relay.
 func ExampleWriter_AppendGroup() {
 	ctx := context.Background()
-	bucket := ledger.New(memstore.New())
+	bucket := &ledger.Bucket{Store: memstore.New()}
 
 	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
 		Timescale:  videoTimescale,
@@ -320,7 +320,7 @@ func ExampleBucket_OpenWriter() {
 	// Kept separately here only so the example can delete the head pointer
 	// behind the ledger's back; Bucket.Store() reaches it too.
 	objects := memstore.New()
-	bucket := ledger.New(objects)
+	bucket := &ledger.Bucket{Store: objects}
 
 	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
 		Timescale:  videoTimescale,

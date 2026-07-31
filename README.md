@@ -37,8 +37,9 @@ go get github.com/okdaichi/qumo-ledger
 objects, _ := fsstore.New("/var/lib/qumo-ledger")
 
 // Bind the store once. Writers and readers come from the bucket, so a logger
-// or clock is configured in one place rather than at every call.
-bucket := ledger.New(objects, ledger.WithLogger(log))
+// or clock is configured in one place rather than at every call. Every field
+// but Store means a documented default when left zero.
+bucket := &ledger.Bucket{Store: objects, Logger: log}
 
 writer, _ := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
     Timescale:  90000,                  // 90 kHz, the usual video timescale

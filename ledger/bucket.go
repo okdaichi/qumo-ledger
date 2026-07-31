@@ -1,14 +1,18 @@
 package ledger
 
 import (
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
+// ErrNoStore reports a Bucket used before its Store was set.
+var ErrNoStore = errors.New("ledger: Bucket.Store is not set")
+
 // Bucket holds tracks in an object store and is the entry point to everything
-// else: a [Writer] or [Reader] is obtained from it rather than constructed
+// else: a [Writer] or [Reader] is opened from it rather than constructed
 // against a bare store.
 //
 // Binding the store once is what lets settings be shared. A logger or a clock
@@ -20,66 +24,63 @@ import (
 // a prefix inside an S3 bucket, a local directory, or memory, and several may
 // share one backend. It holds no resources and needs no closing.
 //
-// Bucket is safe for concurrent use.
-type Bucket struct {
-	objects store.Store
-
-	sealThreshold int64
-	now           func() time.Time
-	logger        *slog.Logger
-}
-
-// Option configures a [Bucket] and, through it, every Writer it opens.
-type Option func(*Bucket)
-
-// WithSealThreshold sets the open-manifest byte size that triggers a seal.
-func WithSealThreshold(bytes int64) Option {
-	return func(b *Bucket) {
-		if bytes > 0 {
-			b.sealThreshold = bytes
-		}
-	}
-}
-
-// WithClock replaces the wallclock source, for tests and for producers that
-// supply their own notion of ingest time.
-func WithClock(now func() time.Time) Option {
-	return func(b *Bucket) {
-		if now != nil {
-			b.now = now
-		}
-	}
-}
-
-// WithLogger sets the logger used for events that do not affect correctness,
-// such as a failed head update.
-func WithLogger(logger *slog.Logger) Option {
-	return func(b *Bucket) {
-		if logger != nil {
-			b.logger = logger
-		}
-	}
-}
-
-// New binds an object store as a bucket of tracks.
+//	bucket := &ledger.Bucket{Store: objects, Logger: logger}
 //
-// It performs no I/O — nothing is read or written until a track is created,
-// opened, or appended to — so it cannot fail and returns no error.
-func New(objects store.Store, opts ...Option) *Bucket {
-	b := &Bucket{
-		objects:       objects,
-		sealThreshold: DefaultSealThreshold,
-		now:           time.Now,
-		logger:        slog.Default(),
-	}
-	for _, opt := range opts {
-		opt(b)
-	}
+// [Bucket.Store] must be set; every other field means a documented default when
+// left zero. A Bucket is safe for concurrent use, but must not be modified once
+// a Writer or Reader has been opened from it.
+type Bucket struct {
+	// Store is the object store the tracks live in. It has no default and
+	// must be set.
+	Store store.Store
 
-	return b
+	// SealThreshold is how many bytes of open manifest accumulate before the
+	// open region is rotated into a sealed manifest. Zero means
+	// [DefaultSealThreshold].
+	SealThreshold int64
+
+	// Clock supplies wallclock time, for tests and for producers with their
+	// own notion of ingest time. Nil means [time.Now].
+	Clock func() time.Time
+
+	// Logger receives events that do not affect correctness, such as a failed
+	// head update. Nil means [slog.Default].
+	Logger *slog.Logger
 }
 
-// Store returns the object store the bucket was built on, so that tooling —
-// garbage collection, a backup pass — can reach it without being handed the
-// store separately.
-func (b *Bucket) Store() store.Store { return b.objects }
+// sealThreshold resolves the configured threshold or its default.
+func (b *Bucket) sealThreshold() int64 {
+	if b.SealThreshold > 0 {
+		return b.SealThreshold
+	}
+
+	return DefaultSealThreshold
+}
+
+// clock resolves the configured clock or its default.
+func (b *Bucket) clock() func() time.Time {
+	if b.Clock != nil {
+		return b.Clock
+	}
+
+	return time.Now
+}
+
+// logger resolves the configured logger or its default.
+func (b *Bucket) logger() *slog.Logger {
+	if b.Logger != nil {
+		return b.Logger
+	}
+
+	return slog.Default()
+}
+
+// check reports whether the bucket is usable. Returning an error rather than
+// letting a nil store panic keeps the common mistake legible.
+func (b *Bucket) check() error {
+	if b.Store == nil {
+		return ErrNoStore
+	}
+
+	return nil
+}
