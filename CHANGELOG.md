@@ -10,42 +10,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+First release: an object-store-native store for temporal data — video, audio,
+logs, sensor readings — where the manifest is the source of truth and the
+payload is immutable objects. It takes the append-only ordered log from Kafka
+and the independently-decodable segment from HLS, and makes a **Group** both at
+once: the unit of independent decoding *and* the unit of storage.
+
 ### Added
 
-- **ledger:** Initial core. `TrackPath`, `TrackConfig`, `GroupRef{Epoch, Sequence}`, and `GroupInfo`. A group is *anchored* on two timelines rather than described as a closed interval, because groups are serial within an epoch — the start of one is the end of the last. `MediaTime` (media anchor) is required; `Duration` and `Wallclock` (wallclock anchor) are optional. Media time is exact and skew-free but relative to one track's origin; wallclock is absolute and comparable across publishers, which is what makes cross-track correlation possible at all. `Duration` is stored rather than derived from the next group's anchor because that derivation spans a dropped group silently and is undefined for the newest group — and it is what HLS `EXTINF` and DASH `@d` consume. Seeks resolve to the last group anchored at or before the target, so they keep working when a producer supplies no duration.
-- **ledger:** `AppendGroup` refuses a group that contradicts its predecessor — one starting before the previous ended, or carrying an epoch behind the track's (`ErrGroupOutOfOrder`). Gaps remain legal, since a dropped group is real information.
-- **ledger:** `Writer` with size-triggered sealing and crash recovery. Writing a delta manifest *is* the commit — a delta is an atomic whole-object write and immutable, so an object that exists is valid by construction. `head` is a discovery cache, not a transaction boundary: it may lag or vanish, and recovery reads it for a hint before probing forward to the true tip. Consequently nothing at the manifest layer can be orphaned; only a group object can, which gives garbage collection exactly one job.
-- **ledger:** `Reader` with `Groups`, `SeekMedia`, `SeekWallclock`, and a polling `Follow`. Reads require object-store access and nothing else — no ledger process has to be running anywhere.
-- **ledger:** Group identity is `(Epoch, Sequence)`. Producers reset numbering on restart, and because group objects are immutable a reused sequence would collide rather than overwrite. The producer's own numbering is preserved rather than renumbered so clients can align replay against a relay serving the same track live.
-- **ledger/store:** `Store` interface built around conditional create (`ErrExist`), with compare-and-swap needed only for the single mutable `head` object, plus optional `Lister` (garbage collection only — the read path never lists). It sits under `ledger` but stays a leaf package, so a backend never has to import the ledger to be usable by it — the same shape as `database/sql/driver`.
-- **ledger/store:** `memstore` and `fsstore` backends, and `storetest` — a shared conformance suite both backends run, so guarantees are enforced rather than per-backend folklore.
-- **cmd/qumo-ledger:** `inspect` and `follow`, using only the public API.
-- **docs:** `docs/ARCHITECTURE.md` recording the design decisions and their rationale.
-- **CI:** Go build/coverage, race, Windows, and tidy/gofmt/magefiles jobs; golangci-lint via reviewdog; release-on-tag; CHANGELOG enforcement; Dependabot for both modules and for Actions.
+- **ledger:** `Bucket` is the entry point. `&ledger.Bucket{Store: objects}`
+  binds an object store once, and every `Writer` and `Reader` is opened from it,
+  so settings that belong to a deployment rather than a track — a logger, a
+  clock, the seal threshold — are configured in one place. Configuration is
+  exported struct fields with documented zero-value defaults, following
+  `http.Server` and `tls.Config`. `Store` is the one field with no default.
 
-### Fixed
+- **ledger:** A group is *anchored* on two timelines rather than described as a
+  closed interval, because groups are serial within an epoch — the start of one
+  is the end of the last. `GroupInfo.MediaTime` is required; `Duration` and
+  `Wallclock` are optional. Media time is exact and skew-free but relative to one
+  track's origin; wallclock is absolute and comparable across publishers, which
+  is what makes cross-track correlation possible at all. `Duration` is stored
+  rather than derived from the next group's anchor, because that derivation
+  silently spans a dropped group and is undefined for the newest one — and it is
+  exactly what HLS `EXTINF` and DASH `@d` consume. Conversions between the two
+  timelines are range-checked, so a coarse timescale over a long recording
+  reports failure rather than returning a wrapped value.
 
-- **ledger:** A sealed manifest's key now names the delta range it covers (`sealed-<first>-<last>.manifest`) rather than its position. A seal whose root update failed left the manifest object behind; retrying after more groups had arrived recomputed a wider manifest but reused the same positional key, so `Create` returned `ErrExist`, the retry was silently discarded, and the root was then published with a summary describing groups the stored object did not hold — after which the superseding deltas were reclaimed, making those groups unreachable. Naming the range makes `ErrExist` mean exactly "this identical seal already landed".
-- **fsstore:** Reject keys that are not local to the root. `resolve` previously rejected `../` but treated a backslash as an ordinary character, so `..\outside` escaped the root on Windows — reachable from `GroupInfo.ObjectKey`, which is manifest data rather than caller-authored input. Keys are now checked with `filepath.IsLocal`, which also rejects Windows reserved device names such as `NUL` (where `Get` had reported a phantom empty object), and backslashes and non-canonical keys are refused on every platform so one key names exactly one object.
-- **ledger:** A seek now walks newest-first and fetches at most one sealed manifest, instead of one per sealed run for the length of the recording. Walking backwards also resolves what an epoch reset makes ambiguous: when a media timestamp exists in several epochs, the most recent wins.
-- **ledger:** Media-to-wallclock conversion no longer overflows. `units * 1e9 / timescale` wraps at only ~9.2e9 units on a `Timescale: 1` track, well inside a long sensor recording; the conversion now divides first and range-checks, reporting failure rather than returning a wrapped value. A group whose media range would overflow is refused at append, since `MediaEnd` cannot report failure and a wrapped end reads as preceding its own start.
-- **ledger:** Root and sealed manifests are verified against the key they were fetched from — track for both, delta range for sealed (`ErrManifestMismatch`). Manifests are self-describing precisely so a misfiled or swapped object is caught rather than trusted.
-- **CI:** `lint.yml`'s job renamed `build` → `lint`, so two workflows no longer report the same check context and leave a required-status rule ambiguous. The required-stub gained a matching `lint` job, filtered separately because `lint.yml`'s paths differ from `go.yml`'s. The gofmt check now covers the whole repository instead of a hardcoded package list.
+- **ledger:** `Writer` appends sealed groups, with size-triggered rotation of
+  the open region into sealed manifests. Writing a delta manifest *is* the
+  commit: a delta is an atomic whole-object write and immutable, so an object
+  that exists is valid by construction. Sealed manifests are keyed by the delta
+  range they cover, which makes a retried seal idempotent rather than colliding
+  with a narrower one. `head` is a discovery cache, not a transaction boundary —
+  it may lag or vanish, and recovery reads it for a hint before probing forward
+  to the true tip. Consequently nothing at the manifest layer can be orphaned;
+  only a group object can, which gives garbage collection exactly one job.
 
-### Changed
+- **ledger:** `AppendGroup` refuses a group that contradicts its predecessor —
+  one starting before the previous ended, or carrying an epoch behind the
+  track's (`ErrGroupOutOfOrder`). Gaps remain legal, since a dropped group is
+  real information rather than corruption.
 
-- **ledger:** `Bucket` is now the entry point. `CreateTrack`, `OpenWriter` and `OpenReader` were package-level functions each taking a `store.Store`, which left nowhere to put settings that belong to a deployment rather than a track — so a logger had to be repeated at every `CreateTrack`, and `OpenReader` could not accept one at all. `&ledger.Bucket{Store: objects}` binds the store once and the three constructors are methods on it. Configuration is exported struct fields rather than functional options, following `http.Server`, `http.Client` and `tls.Config`: every field but `Store` means a documented default when left zero, so `New`, `Option` and the three `With*` constructors are gone — five exported symbols replaced by four fields that document themselves in godoc. This is the `sql.DB` / `bolt.DB` / `blob.Bucket` shape; `io/fs` keeps free functions instead because its helpers dispatch on optional interfaces (`fs.ReadFile` checks for `ReadFileFS` before falling back), which is a different job. Deferred store-scoped work — garbage collection, retention, track discovery — now has an obvious home.
-- **ledger:** Renamed toward stdlib convention. `GroupMeta` → `GroupInfo`, matching `fs.FileInfo` — metadata describing a thing without its contents — and dropping an abbreviation Go avoids. `GroupInfo.T0`/`W0` → `MediaTime`/`Wallclock`, and `SealedRef.T0`/`T1`/`W0`/`W1` → `MediaStart`/`MediaEnd`/`WallclockStart`/`WallclockEnd`: two-character field names sat oddly beside a spelled-out `Duration`, and the terse forms meant nothing to a reader who had not read the design. `GroupInfo.Object` → `ObjectKey`, since it holds a key rather than an object. `ErrNoGroupFound` → `ErrGroupNotFound`, to match `ErrTrackNotFound` rather than inverting the word order. The JSON tags moved with the fields, so a manifest now reads `mediaTime`/`wallclock`/`objectKey` — which is the point of storing manifests as JSON at all.
-- **ledger/store:** `Lister.Keys` → `Lister.List`. A single-method interface takes its name from its method in Go (`io.Reader.Read`, `fmt.Stringer.String`); `Lister.Keys` matched neither half.
-- **ledger:** Added the range and cursor API, and pruned the surface it replaced. A temporal store could previously answer "which group covers this instant" but not "which groups cover this window" — a range query meant iterating the whole recording and filtering client-side. `Reader.RangeMedia`, `Reader.RangeWallclock` and `Reader.GroupsFrom` answer it directly, skipping the sealed runs that cannot contribute.
-- **ledger:** `Reader.Follow` yields `Update` (a group plus the cursor that resumes after it) instead of `DeltaManifest`, and takes an opaque `Cursor` instead of a raw delta number. The commit-numbering scheme is no longer the public contract, so how commits are chunked can change without breaking callers. `Reader.Tip` gives a follower "everything from now", replacing a `Head()` call plus an off-by-one the caller had to get right. `Cursor` marshals as text, so a follower can persist its position and resume through a restart.
-- **ledger:** `Reader.Delta` and `Reader.Sealed` are unexported. They were storage plumbing that no consumer needed.
-- **ledger:** A follower resuming from a cursor whose deltas have since been sealed no longer waits forever for a reclaimed object. Sealing deletes the deltas it folds up, so any persisted cursor became a permanent hang once a seal passed it — found by running the CLI against a real track. Those groups are served from the sealed run instead. The cursor issued during that replay points after the whole run, because a sealed manifest does not record which delta each group came from, so a consumer stopping mid-replay sees the run again — within the at-least-once contract `Follow` already carries.
-- **ledger:** Removed `TrackPath.Prefix`, which had no caller and implied a track-discovery API that does not exist. Unexported `TrackPath.Validate`, `TimeSource.Valid`, `GroupRef.Before`, and `GroupInfo`'s `HasDuration`/`HasWallclock`/`MediaEnd` — all one-line derivations of exported fields, and `MediaEnd` in particular invited treating a group with no duration as ending at its own start.
-- **ledger/store:** Removed `Presigner` and `ErrUnsupported`, the last two exported symbols with no implementation and no consumer. `Presigner` guessed at an interface for an authorization service that will hold a backend of its own and can declare the shape it needs where it consumes one. `ErrUnsupported` existed for backends that cannot do compare-and-swap, but every store the ledger targets can — S3 conditional writes, GCS generation preconditions, Azure ETags, a local rename — so `Swap` is required rather than optional, and the escape hatch was inviting a backend that would silently fail to fence a superseded writer.
-- **ledger:** An idle follower now costs one request per poll instead of two. `Follow` re-read the root manifest on every miss to tell "not committed yet" from "sealed and reclaimed"; the cached root already answers that in the common case, since `OpenReader` read it and a delta below `OpenFrom` is known sealed. The re-read now happens when a follower first stalls and periodically after, so a thousand idle followers no longer generate twice the traffic to learn nothing.
+- **ledger:** Group identity is `(Epoch, Sequence)`. Producers reset numbering
+  on restart, and because group objects are immutable a reused sequence would
+  collide rather than overwrite. The producer's own numbering is preserved
+  rather than renumbered, so clients can align replay against a relay serving
+  the same track live.
+
+- **ledger:** `Reader` answers windows, not just instants: `RangeMedia`,
+  `RangeWallclock` and `GroupsFrom` iterate the groups overlapping a range,
+  fetching only the sealed runs that can contribute. `SeekMedia` and
+  `SeekWallclock` resolve to the group anchored at or before a target, so a seek
+  keeps working when a producer supplies no duration and reports honestly when
+  the target falls in a gap. Reads need object-store access and nothing else —
+  no ledger process has to be running anywhere. Manifests are verified against
+  the key they were fetched from, so a misfiled or swapped object is caught
+  rather than trusted.
+
+- **ledger:** `Follow` tails a track by polling, since object stores do not
+  push, and yields each group with an opaque `Cursor` that resumes immediately
+  after it. The cursor marshals as text, so a follower survives a restart, and
+  it stays valid across a seal that reclaims the deltas it named.
+
+- **ledger/store:** The storage contract — conditional create (`ErrExist`) as
+  the primitive everything rests on, compare-and-swap for the single mutable
+  `head` object, and an optional `Lister` used only by garbage collection, since
+  the read path never lists. It sits under `ledger` but stays a leaf package, so
+  a backend never imports the ledger to be usable by it: the same shape as
+  `database/sql/driver`.
+
+- **ledger/store:** `memstore` and `fsstore` backends, plus `storetest` — a
+  conformance suite both run, so the contract is enforced rather than
+  per-backend folklore. `fsstore` refuses any key that is not local to its root,
+  which matters because keys reach it from manifest data rather than from
+  caller-authored input.
+
+- **cmd/qumo-ledger:** `inspect` and `follow`, built on the public API alone.
+
+- **docs:** `docs/ARCHITECTURE.md` records the design decisions and why each was
+  taken; the package documentation and worked examples cover the same ground for
+  someone reading the API.
+
+- **CI:** build, coverage, race, and Windows jobs; `gofmt`, `go mod tidy` and
+  magefiles verification; golangci-lint via reviewdog; release-on-tag; CHANGELOG
+  enforcement; Dependabot for both modules and for Actions.
 
 ### Notes
 
-- Deferred deliberately, with rationale in `docs/ARCHITECTURE.md`: garbage collection, retention, the MoQT adapter, HLS/DASH renderers, and an S3 backend.
-- Manifests are JSON. They are small, read far less often than payloads, and inspecting a broken track in a text editor is worth more than the bytes saved. `ManifestVersion` is what allows this to be revisited.
+- Deferred deliberately, with rationale in `docs/ARCHITECTURE.md`: garbage
+  collection, retention, the MoQT adapter, HLS/DASH renderers, and an S3
+  backend.
+- Manifests are JSON. They are small, read far less often than payloads, and
+  inspecting a broken track in a text editor is worth more than the bytes saved.
+  `ManifestVersion` is what allows this to be revisited.
