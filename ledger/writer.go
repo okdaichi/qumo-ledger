@@ -61,24 +61,27 @@ type Writer struct {
 	hasLast bool
 }
 
-// CreateTrack writes a new root manifest and returns a Writer positioned at the
-// start of the track. It returns ErrTrackExists if the track already has one.
-func (b *Bucket) CreateTrack(ctx context.Context, track TrackPath, cfg TrackConfig) (*Writer, error) {
-	if err := b.check(); err != nil {
+// Create establishes a new track, like CREATE TABLE: it writes the root
+// manifest and returns a Writer at the start of the track. It is the only way
+// to set a track's schema — Timescale, MIME, Encoding — which is then
+// immutable, and it returns ErrTrackExists if the track already has a root
+// manifest.
+func (t *Track) Create(ctx context.Context, cfg TrackConfig) (*Writer, error) {
+	if err := t.check(); err != nil {
 		return nil, err
 	}
-	if err := track.validate(); err != nil {
+	if err := t.path.validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 
-	w := b.newWriter(track)
+	w := t.newWriter()
 
 	w.root = RootManifest{
 		Version:    ManifestVersion,
-		Track:      track,
+		Track:      t.path,
 		Timescale:  cfg.Timescale,
 		TimeSource: cfg.TimeSource,
 		MIME:       cfg.MIME,
@@ -93,36 +96,36 @@ func (b *Bucket) CreateTrack(ctx context.Context, track TrackPath, cfg TrackConf
 		return nil, err
 	}
 
-	version, err := b.Store.Create(ctx, rootKey(track), data)
+	version, err := t.store.Create(ctx, rootKey(t.path), data)
 	if err != nil {
 		if errors.Is(err, store.ErrExist) {
-			return nil, fmt.Errorf("%w: %s", ErrTrackExists, track)
+			return nil, fmt.Errorf("%w: %s", ErrTrackExists, t.path)
 		}
-		return nil, fmt.Errorf("ledger: create track %s: %w", track, err)
+		return nil, fmt.Errorf("ledger: create track %s: %w", t.path, err)
 	}
 	w.rootVersion = version
 
 	return w, nil
 }
 
-// OpenWriter reopens an existing track and recovers its position.
+// Writer opens the track for appending and recovers its position.
 //
 // Recovery reads the head pointer for a starting guess and then probes forward
 // until a delta is absent. The absent delta is the true tip: because a delta is
 // immutable and written atomically, any delta that exists is committed, whether
 // or not head knows about it. A writer that crashed mid-append therefore
 // resumes without losing committed groups and without a repair pass.
-func (b *Bucket) OpenWriter(ctx context.Context, track TrackPath) (*Writer, error) {
-	if err := b.check(); err != nil {
+func (t *Track) Writer(ctx context.Context) (*Writer, error) {
+	if err := t.check(); err != nil {
 		return nil, err
 	}
-	if err := track.validate(); err != nil {
+	if err := t.path.validate(); err != nil {
 		return nil, err
 	}
 
-	w := b.newWriter(track)
+	w := t.newWriter()
 
-	root, version, err := fetchRoot(ctx, b.Store, track)
+	root, version, err := fetchRoot(ctx, t.store, t.path)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +133,7 @@ func (b *Bucket) OpenWriter(ctx context.Context, track TrackPath) (*Writer, erro
 
 	// head is only a hint. Trust it to skip ahead, never to stop early.
 	from := root.OpenFrom
-	if head, headVersion, err := fetchHead(ctx, b.Store, track); err == nil {
+	if head, headVersion, err := fetchHead(ctx, t.store, t.path); err == nil {
 		w.headVersion = headVersion
 		if head.Delta >= from {
 			from = head.Delta
@@ -141,19 +144,19 @@ func (b *Bucket) OpenWriter(ctx context.Context, track TrackPath) (*Writer, erro
 
 	// Replay the open region so the seal threshold and group rows are accurate.
 	for n := root.OpenFrom; ; n++ {
-		data, _, err := b.Store.Get(ctx, deltaKey(track, n))
+		data, _, err := t.store.Get(ctx, deltaKey(t.path, n))
 		if errors.Is(err, store.ErrNotExist) {
 			if n < from {
 				// A gap below the head pointer means deltas were lost, which
 				// immutability should make impossible. Refuse rather than
 				// silently truncating the track.
-				return nil, fmt.Errorf("ledger: track %s: delta %d missing below head %d", track, n, from)
+				return nil, fmt.Errorf("ledger: track %s: delta %d missing below head %d", t.path, n, from)
 			}
 			w.nextDelta = n
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("ledger: track %s: read delta %d: %w", track, n, err)
+			return nil, fmt.Errorf("ledger: track %s: read delta %d: %w", t.path, n, err)
 		}
 
 		delta, err := decodeManifest(data, func(d DeltaManifest) int { return d.Version })
@@ -180,14 +183,14 @@ func (b *Bucket) OpenWriter(ctx context.Context, track TrackPath) (*Writer, erro
 	return w, nil
 }
 
-// newWriter builds a writer carrying the bucket's shared settings.
-func (b *Bucket) newWriter(track TrackPath) *Writer {
+// newWriter builds a writer carrying the track's resolved settings.
+func (t *Track) newWriter() *Writer {
 	return &Writer{
-		objects:       b.Store,
-		track:         track,
-		sealThreshold: b.sealThreshold(),
-		now:           b.clock(),
-		logger:        b.logger(),
+		objects:       t.store,
+		track:         t.path,
+		sealThreshold: t.sealThreshold,
+		now:           t.clock,
+		logger:        t.logger,
 	}
 }
 

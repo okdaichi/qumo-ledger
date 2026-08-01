@@ -49,21 +49,22 @@ type Reader struct {
 	rootVersion store.Version
 }
 
-// OpenReader loads a track's root manifest.
-func (b *Bucket) OpenReader(ctx context.Context, track TrackPath) (*Reader, error) {
-	if err := b.check(); err != nil {
+// Reader opens the track for reading. It loads the root manifest and nothing
+// else: reading needs no recovery, so a reader joins cheaply.
+func (t *Track) Reader(ctx context.Context) (*Reader, error) {
+	if err := t.check(); err != nil {
 		return nil, err
 	}
-	if err := track.validate(); err != nil {
+	if err := t.path.validate(); err != nil {
 		return nil, err
 	}
 
-	root, version, err := fetchRoot(ctx, b.Store, track)
+	root, version, err := fetchRoot(ctx, t.store, t.path)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Reader{objects: b.Store, track: track, root: root, rootVersion: version}, nil
+	return &Reader{objects: t.store, track: t.path, root: root, rootVersion: version}, nil
 }
 
 // Track returns the path being read.
@@ -362,10 +363,10 @@ const (
 // moved, so they are served from the sealed run instead and the position jumps
 // past it.
 //
-// The cached root usually settles this without a request: OpenReader read it,
-// so a delta below OpenFrom is known sealed. Only a seal that happened since
-// needs a re-read, which is why that is rationed by rootRecheckEvery rather
-// than done on every tick.
+// The cached root usually settles this without a request: a Reader opens with
+// the root already loaded, so a delta below OpenFrom is known sealed. Only a
+// seal that happened since needs a re-read, which is why that is rationed by
+// rootRecheckEvery rather than done on every tick.
 //
 // The cursor handed out during a replay points after the whole run rather than
 // after each group: a sealed manifest does not record which delta each of its

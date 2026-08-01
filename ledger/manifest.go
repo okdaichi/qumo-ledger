@@ -18,7 +18,7 @@ const ManifestVersion = 1
 // Object key layout. The functions below are the single place the layout is
 // defined; nothing else in the package builds a key by hand.
 //
-// They are unexported: a Go consumer reaches a track through [OpenReader], and
+// They are unexported: a Go consumer reaches a track through [Track], and
 // tooling written against the raw store works from the layout documented in
 // docs/ARCHITECTURE.md rather than from this package.
 const (

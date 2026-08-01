@@ -22,12 +22,14 @@ once: the unit of independent decoding *and* the unit of storage.
 
 ### Added
 
-- **ledger:** `Bucket` is the entry point. `&ledger.Bucket{Store: objects}`
-  binds an object store once, and every `Writer` and `Reader` is opened from it,
-  so settings that belong to a deployment rather than a track — a logger, a
-  clock, the seal threshold — are configured in one place. Configuration is
-  exported struct fields with documented zero-value defaults, following
-  `http.Server` and `tls.Config`. `Store` is the one field with no default.
+- **ledger:** `Track` is the entry point. `ledger.NewTrack(store, path, cfg)`
+  returns an opaque handle to one track in a store — like a table in a database,
+  a persistent named thing you reference rather than open — and `Writer` and
+  `Reader` are built from it. `Track.Create` is the one-time act of establishing
+  a track (the schema: timescale, MIME, encoding); `Track.Writer` and
+  `Track.Reader` use an existing track with no separate open step. Settings that
+  belong to a deployment rather than a track — a logger, a clock, the seal
+  threshold — are passed in `Config`, whose zero value is usable.
 
 - **ledger:** A group is *anchored* on two timelines rather than described as a
   closed interval, because groups are serial within an epoch — the start of one

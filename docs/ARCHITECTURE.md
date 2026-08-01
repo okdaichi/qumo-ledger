@@ -190,8 +190,8 @@ without fetching.
 
 ## 10. Reads require object-store access and nothing else
 
-A reader with bucket credentials can seek and replay with no ledger process
-running anywhere. The format is the product.
+A reader with object-store credentials can seek and replay with no ledger
+process running anywhere. The format is the product.
 
 **Consequence for authorization.** It is deliberately not the ledger's job. An
 external service authorizes access and mints scoped credentials or signed URLs;
@@ -218,6 +218,36 @@ write.
 
 **Consequence.** Adapters layer the ergonomic API. A MoQT adapter accumulates
 frames, derives `MediaTime`/`Duration` from their timestamp deltas, and calls through.
+
+## 12. The API entry point is a track, not a container
+
+A `Track` is an opaque reference to one track in a store — built with
+`NewTrack(store, path, Config)` — and a `Writer` or `Reader` is derived from it.
+There is no container above it and no `Open` step.
+
+**Why a reference, not a container.** A track is a persistent, named thing whose
+schema is fixed at creation — a database table, not a file you open. You do not
+`OPEN` a table to query it; you hold a reference and act on it. Binding the path
+into the handle, rather than passing it to every call, also removes a class of
+mistake: you cannot wire a reader and a writer to different tracks by typo.
+
+**Why no open step.** Object stores have no open. The one piece of recovery a
+writer needs — probing forward to the true tip — is bounded by the seal
+threshold and cheap, so it folds into `Writer` rather than appearing as a
+separate verb. What looked like a create/open split collapses to: `Create`
+establishes a track once (its schema, like `CREATE TABLE`) and returns a writer
+at the start; `Writer` and `Reader` use an existing track. Constructing a `Track`
+does no I/O and never fails — a track that does not yet exist is discovered when
+`Create`, `Writer`, or `Reader` reaches the store.
+
+**Why the handle is opaque.** Its fields are unexported and set through `NewTrack`
+and `Config`, so the internal layout can change without breaking callers.
+Deployment-level settings — a logger, a clock, the seal threshold — belong to a
+process, not a track, so they ride on the handle in one place instead of on
+every call.
+
+**Consequence.** The ontology is one layer: a `Store` holds tracks. There is no
+separate "bucket" type to explain alongside it.
 
 ---
 

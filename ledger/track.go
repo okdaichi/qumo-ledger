@@ -2,8 +2,12 @@ package ledger
 
 import (
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
+	"time"
+
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
 // TrackPath identifies one track, using forward slashes to express hierarchy
@@ -96,6 +100,100 @@ func (c TrackConfig) validate() error {
 	}
 	if !c.TimeSource.valid() {
 		return fmt.Errorf("%w: unknown time source %q", ErrInvalidGroup, c.TimeSource)
+	}
+
+	return nil
+}
+
+// Config carries the deployment-level settings for a [Track]. The zero value is
+// usable: every field means a documented default when left zero, so the common
+// case is [NewTrack] with an empty [Config].
+//
+// These belong to a deployment rather than to one track — a logger or a clock
+// is the same for every track a process holds — which is why they live on the
+// handle rather than on each [Track.Create], [Track.Writer] or [Track.Reader]
+// call.
+type Config struct {
+	// SealThreshold is how many bytes of open manifest accumulate before the
+	// open region is rotated into a sealed manifest. Zero means
+	// [DefaultSealThreshold].
+	SealThreshold int64
+
+	// Clock supplies wallclock time, for tests and for producers with their
+	// own notion of ingest time. Nil means [time.Now].
+	Clock func() time.Time
+
+	// Logger receives events that do not affect correctness, such as a failed
+	// head update. Nil means [slog.Default].
+	Logger *slog.Logger
+}
+
+// Track is a reference to one track in a store — the handle a [Writer] or
+// [Reader] is built from. A track, like a table in a database, is a persistent
+// named thing whose schema is fixed at creation: you do not open one to use it,
+// you hold a reference and call its methods.
+//
+// Build one with [NewTrack]:
+//
+//	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
+//	writer, _ := track.Writer(ctx)
+//	reader, _ := track.Reader(ctx)
+//
+// [Track.Create] is the one-time act of establishing a new track — the
+// equivalent of CREATE TABLE, which sets the track's schema — and returns a
+// [Writer] at its start. To append to or read an existing track, hold a Track
+// from [NewTrack] and call [Track.Writer] or [Track.Reader]; there is no
+// separate open step.
+//
+// A Track holds no resources and needs no closing. It is safe for concurrent
+// use, but must not be modified once a Writer or Reader has been built from it.
+type Track struct {
+	store store.Store
+	path  TrackPath
+
+	sealThreshold int64
+	clock         func() time.Time
+	logger        *slog.Logger
+}
+
+// NewTrack returns a reference to path within store, configured by cfg.
+//
+// It does no I/O and never fails: a Track is a reference, not an open. A track
+// that does not yet exist is discovered when [Track.Create], [Track.Writer], or
+// [Track.Reader] reaches the store, so constructing a Track for a track that may
+// or may not exist costs nothing.
+//
+// The zero-value fields of cfg are resolved to their defaults here, so a Track
+// always carries usable settings.
+func NewTrack(store store.Store, path TrackPath, cfg Config) *Track {
+	t := &Track{
+		store: store,
+		path:  path,
+	}
+
+	t.sealThreshold = cfg.SealThreshold
+	if t.sealThreshold <= 0 {
+		t.sealThreshold = DefaultSealThreshold
+	}
+
+	t.clock = cfg.Clock
+	if t.clock == nil {
+		t.clock = time.Now
+	}
+
+	t.logger = cfg.Logger
+	if t.logger == nil {
+		t.logger = slog.Default()
+	}
+
+	return t
+}
+
+// check reports whether the track is usable. Returning an error rather than
+// letting a nil store panic keeps the common mistake legible.
+func (t *Track) check() error {
+	if t.store == nil {
+		return ErrNoStore
 	}
 
 	return nil

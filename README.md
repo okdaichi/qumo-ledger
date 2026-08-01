@@ -36,12 +36,15 @@ go get github.com/okdaichi/qumo-ledger
 ```go
 objects, _ := fsstore.New("/var/lib/qumo-ledger")
 
-// Bind the store once. Writers and readers come from the bucket, so a logger
-// or clock is configured in one place rather than at every call. Every field
-// but Store means a documented default when left zero.
-bucket := &ledger.Bucket{Store: objects, Logger: log}
+// A Track references one track in a store. NewTrack binds the store and path,
+// and the empty Config is the common case — every setting has a documented
+// default. Settings belong to a deployment rather than a track, so they live
+// on the handle in one place rather than at every call.
+track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{Logger: log})
 
-writer, _ := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
+// Create is the one-time act of establishing a track, like CREATE TABLE: it
+// fixes the schema and returns a Writer at the start.
+writer, _ := track.Create(ctx, ledger.TrackConfig{
     Timescale:  90000,                  // 90 kHz, the usual video timescale
     TimeSource: ledger.TimeSourceFrame, // timestamps came from the data itself
     MIME:       "video/mp4",
@@ -57,8 +60,8 @@ writer.AppendGroup(ctx, ledger.GroupInfo{
     ObjectCount: 60,
 }, payload)
 
-// Readers need only store access.
-reader, _ := bucket.OpenReader(ctx, "live/cam1/video")
+// Readers and further writers come from the same handle; there is no open step.
+reader, _ := track.Reader(ctx)
 
 // A window, not a point. Run the same window over a video track and a sensor
 // track and the two recordings line up.

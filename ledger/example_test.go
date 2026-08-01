@@ -27,9 +27,9 @@ var exampleStart = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 // wallclock.
 func Example() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
+	track := ledger.NewTrack(memstore.New(), "live/cam1/video", ledger.Config{})
 
-	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
+	writer, err := track.Create(ctx, ledger.TrackConfig{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 		MIME:       "video/mp4",
@@ -57,7 +57,7 @@ func Example() {
 	}
 
 	// A reader needs only store access — no writer, and no server.
-	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
+	reader, err := track.Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -80,20 +80,20 @@ func Example() {
 // incomparable media clocks — is what lines the two recordings up.
 func ExampleReader_RangeWallclock() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
+	store := memstore.New()
 
 	// A 90 kHz video track in two-second groups.
-	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
+	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 	// A 1 kHz sensor track in one-second groups. Its media clock shares nothing
 	// with the video track's; only the wallclock anchors are comparable.
-	writeTrack(ctx, bucket, "live/cam1/sensor", 1000, time.Second, 8)
+	writeTrack(ctx, store, "live/cam1/sensor", 1000, time.Second, 8)
 
 	// "What was happening between four and six seconds in?"
 	from := exampleStart.Add(4 * time.Second).UnixNano()
 	to := exampleStart.Add(6 * time.Second).UnixNano()
 
 	for _, track := range []ledger.TrackPath{"live/cam1/video", "live/cam1/sensor"} {
-		reader, err := bucket.OpenReader(ctx, track)
+		reader, err := ledger.NewTrack(store, track, ledger.Config{}).Reader(ctx)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -118,10 +118,10 @@ func ExampleReader_RangeWallclock() {
 // any frames inside the window at all.
 func ExampleReader_RangeMedia() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
-	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
+	store := memstore.New()
+	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
-	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
+	reader, err := ledger.NewTrack(store, "live/cam1/video", ledger.Config{}).Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -149,9 +149,9 @@ func ExampleReader_RangeMedia() {
 // ledger could not tell a gap from a group that simply runs long.
 func ExampleReader_SeekMedia() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
+	track := ledger.NewTrack(memstore.New(), "live/cam1/video", ledger.Config{})
 
-	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
+	writer, err := track.Create(ctx, ledger.TrackConfig{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	})
@@ -172,7 +172,7 @@ func ExampleReader_SeekMedia() {
 		}
 	}
 
-	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
+	reader, err := track.Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -203,10 +203,10 @@ func ExampleReader_SeekMedia() {
 // persist its position and pick up exactly where it stopped.
 func ExampleReader_Follow() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
-	writeTrack(ctx, bucket, "live/cam1/video", videoTimescale, 2*time.Second, 4)
+	store := memstore.New()
+	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
-	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
+	reader, err := ledger.NewTrack(store, "live/cam1/video", ledger.Config{}).Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -258,9 +258,9 @@ func ExampleReader_Follow() {
 // numbering survives for clients aligning replay against a live relay.
 func ExampleWriter_AppendGroup() {
 	ctx := context.Background()
-	bucket := &ledger.Bucket{Store: memstore.New()}
+	track := ledger.NewTrack(memstore.New(), "live/cam1/video", ledger.Config{})
 
-	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
+	writer, err := track.Create(ctx, ledger.TrackConfig{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	})
@@ -314,15 +314,15 @@ func ExampleWriter_AppendGroup() {
 // until one is absent — that gap is the true tip.
 //
 // Head is only a cache, so even losing it costs nothing but a few probes.
-func ExampleBucket_OpenWriter() {
+func ExampleTrack_Writer() {
 	ctx := context.Background()
 
 	// Kept separately here only so the example can delete the head pointer
-	// behind the ledger's back; Bucket.Store() reaches it too.
+	// behind the ledger's back.
 	objects := memstore.New()
-	bucket := &ledger.Bucket{Store: objects}
+	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
 
-	writer, err := bucket.CreateTrack(ctx, "live/cam1/video", ledger.TrackConfig{
+	writer, err := track.Create(ctx, ledger.TrackConfig{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	})
@@ -352,7 +352,7 @@ func ExampleBucket_OpenWriter() {
 		}
 	}
 
-	recovered, err := bucket.OpenWriter(ctx, "live/cam1/video")
+	recovered, err := track.Writer(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func ExampleBucket_OpenWriter() {
 		log.Fatal(err)
 	}
 
-	reader, err := bucket.OpenReader(ctx, "live/cam1/video")
+	reader, err := track.Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -386,8 +386,8 @@ func ExampleBucket_OpenWriter() {
 
 // writeTrack creates a track and appends count groups of the given wallclock
 // duration, with media time in the track's own timescale.
-func writeTrack(ctx context.Context, bucket *ledger.Bucket, track ledger.TrackPath, timescale uint32, every time.Duration, count uint64) {
-	writer, err := bucket.CreateTrack(ctx, track, ledger.TrackConfig{
+func writeTrack(ctx context.Context, store *memstore.Store, track ledger.TrackPath, timescale uint32, every time.Duration, count uint64) {
+	writer, err := ledger.NewTrack(store, track, ledger.Config{}).Create(ctx, ledger.TrackConfig{
 		Timescale:  timescale,
 		TimeSource: ledger.TimeSourceFrame,
 	})

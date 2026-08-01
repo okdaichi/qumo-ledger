@@ -177,13 +177,11 @@ func follow(ctx context.Context, args []string) error {
 	return nil
 }
 
-func openReader(ctx context.Context, root, track string) (*ledger.Reader, error) {
+func openReader(ctx context.Context, root, path string) (*ledger.Reader, error) {
 	objects, err := fsstore.New(root)
 	if err != nil {
 		return nil, err
 	}
 
-	bucket := &ledger.Bucket{Store: objects}
-
-	return bucket.OpenReader(ctx, ledger.TrackPath(track))
+	return ledger.NewTrack(objects, ledger.TrackPath(path), ledger.Config{}).Reader(ctx)
 }

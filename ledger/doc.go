@@ -1,10 +1,10 @@
 // Package ledger stores and replays temporal data — video, audio, logs, and
 // sensor readings — as immutable objects described by manifest objects.
 //
-// [Bucket] is the entry point: it binds an object store once, and every
-// [Writer] and [Reader] is opened from it.
+// [Track] is the entry point: it references one track in a store, and a
+// [Writer] or [Reader] is built from it.
 //
-//	bucket := &ledger.Bucket{Store: objects}
+//	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
 //
 // The design borrows the append-only ordered log from Kafka and the
 // independently-decodable segment from HLS, then keeps the two ideas separate:
