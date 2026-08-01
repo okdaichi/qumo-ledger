@@ -1,0 +1,95 @@
+# Companion stub for `go.yml`.
+#
+# `go.yml` is path-filtered to Go sources, so on a PR that touches no Go files
+# it never runs. But if the repository ruleset marks its jobs as *required*
+# status checks, GitHub does NOT auto-pass a required check whose workflow was
+# skipped by a path filter — so a docs-only PR sits permanently "BLOCKED" on
+# checks that can never report.
+#
+# This stub always runs and detects whether the PR touches Go sources:
+#   - no Go files  -> the stub jobs run and pass, satisfying the rule;
+#   - Go files     -> they are skipped, so the real `go.yml` jobs are the only
+#                     ones reporting those contexts and remain the gate.
+# Skipping (rather than `paths-ignore`, which would still run and report success
+# on a *mixed* Go+non-Go PR) means the stub never double-reports a passing check
+# alongside a failing real one. The job IDs MUST stay in sync with `go.yml` so
+# the reported check contexts match the ones the ruleset wants.
+name: Go (required stub)
+
+on:
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      lint: ${{ steps.filter.outputs.lint }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+
+          # go.yml's `paths`: **.go, go.mod, go.sum, magefiles/**,
+          # .github/workflows/go.yml.
+          if printf '%s\n' "$changed" \
+            | grep -qE '\.go$|^go\.(mod|sum)$|^magefiles/|^\.github/workflows/go\.yml$'; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # lint.yml's `paths` differ — no magefiles, plus the linter config —
+          # so the two are filtered separately. A PR touching only
+          # .github/.golangci.yml runs the real lint job but not go.yml.
+          if printf '%s\n' "$changed" \
+            | grep -qE '\.go$|^go\.(mod|sum)$|^\.github/\.golangci\.yml$|^\.github/workflows/lint\.yml$'; then
+            echo "lint=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lint=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.go == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'build' is not required here."
+
+  race:
+    needs: changes
+    if: needs.changes.outputs.go == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'race' is not required here."
+
+  windows:
+    needs: changes
+    if: needs.changes.outputs.go == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'windows' is not required here."
+
+  tidy:
+    needs: changes
+    if: needs.changes.outputs.go == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'tidy' is not required here."
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go files changed in this PR — 'lint' is not required here."

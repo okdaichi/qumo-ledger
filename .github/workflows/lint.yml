@@ -1,0 +1,40 @@
+name: Linter
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/.golangci.yml"
+      - ".github/workflows/lint.yml"
+  workflow_dispatch: {}
+
+jobs:
+  # Named `lint`, not `build`: go.yml already reports a check called `build`,
+  # and two workflows sharing one check context makes a required-status rule
+  # ambiguous about which of them it is waiting on.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Lint
+        uses: reviewdog/action-golangci-lint@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          level: warning
+          reporter: github-pr-review
+          go_version: ^1.26
+          golangci_lint_flags: "--config=.github/.golangci.yml"
