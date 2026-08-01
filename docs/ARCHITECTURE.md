@@ -249,6 +249,22 @@ every call.
 **Consequence.** The ontology is one layer: a `Store` holds tracks. There is no
 separate "bucket" type to explain alongside it.
 
+## 13. Manifests are an internal wire format, not a public type
+
+The manifest structs (`rootManifest`, `deltaManifest`, `sealedManifest`, `head`)
+are unexported. A Go consumer reads track metadata through `TrackMeta`, the
+projection returned by `Reader.Root` and `Writer.Root`; a reader in any language
+reads the JSON schema documented in the object layout above. There is no
+`Reader.Head` on the public API — the head pointer is a discovery cache (decision
+5), and `Reader.Tip` already serves a follower resuming near the end.
+
+**Why.** The on-disk format is the product, so it must be stable and is versioned
+through a `version` field; the Go API is free to evolve separately. Exporting the
+structs would lock the two together, and would expose storage structure — sealed
+runs, the open region, delta numbering — that a consumer has no reason to see.
+This is decision 12's opacity one layer down: the handle hides its fields, the
+package hides its format.
+
 ---
 
 ## Deferred
@@ -263,4 +279,4 @@ Named so they are choices rather than oversights.
 | **HLS / DASH / MSF renderers** | The manifest carries what they need — `epoch` maps to `EXT-X-DISCONTINUITY`, the wallclock index to `EXT-X-PROGRAM-DATE-TIME`. |
 | **MoQT adapter** | Belongs in a `moqtstore` package; the only place that parses frames. |
 | **S3 backend** | The interface is deliberately shaped around what S3 offers: conditional create and conditional overwrite. |
-| **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. `ManifestVersion` is what lets this be revisited. |
+| **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. A `version` field is what lets this be revisited. |

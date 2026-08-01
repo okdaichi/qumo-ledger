@@ -78,8 +78,8 @@ func TestTrack_Create(t *testing.T) {
 	w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
 	require.NoError(t, err)
 
-	root := w.Root()
-	assert.Equal(t, ManifestVersion, root.Version)
+	root := w.rootManifest()
+	assert.Equal(t, manifestVersion, root.Version)
 	assert.Equal(t, testTrack, root.Track)
 	assert.Equal(t, uint32(90000), root.Timescale)
 	assert.Equal(t, TimeSourceFrame, root.TimeSource)
@@ -164,7 +164,7 @@ func TestWriter_AppendGroup(t *testing.T) {
 	data, _, err := objects.Get(t.Context(), deltaKey(testTrack, 0))
 	require.NoError(t, err)
 
-	delta, err := decodeManifest(data, func(d DeltaManifest) int { return d.Version })
+	delta, err := decodeManifest(data, func(d deltaManifest) int { return d.Version })
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), delta.Seq)
 	require.Len(t, delta.Groups, 1)
@@ -347,7 +347,7 @@ func TestWriter_Seal(t *testing.T) {
 
 	require.NoError(t, w.Seal(t.Context()))
 
-	root := w.Root()
+	root := w.rootManifest()
 	require.Len(t, root.Sealed, 1)
 	assert.Equal(t, uint64(3), root.OpenFrom, "the open region restarts after the sealed run")
 
@@ -359,7 +359,7 @@ func TestWriter_Seal(t *testing.T) {
 	data, _, err := objects.Get(t.Context(), ref.Key)
 	require.NoError(t, err)
 
-	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	sealed, err := decodeManifest(data, func(m sealedManifest) int { return m.Version })
 	require.NoError(t, err)
 	assert.Len(t, sealed.Groups, 3)
 
@@ -394,12 +394,12 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Seal(t.Context()))
 
-	root := w.Root()
+	root := w.rootManifest()
 	require.Len(t, root.Sealed, 1)
 
 	data, _, err := objects.Get(t.Context(), root.Sealed[0].Key)
 	require.NoError(t, err)
-	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	sealed, err := decodeManifest(data, func(m sealedManifest) int { return m.Version })
 	require.NoError(t, err)
 
 	assert.Equal(t, root.Sealed[0].Groups, len(sealed.Groups),
@@ -421,7 +421,7 @@ func TestWriter_Seal_Empty(t *testing.T) {
 	w, _ := newTestWriter(t)
 
 	require.NoError(t, w.Seal(t.Context()))
-	assert.Empty(t, w.Root().Sealed, "sealing an empty open region must be a no-op")
+	assert.Empty(t, w.rootManifest().Sealed, "sealing an empty open region must be a no-op")
 }
 
 func TestWriter_AppendGroup_SealsAtThreshold(t *testing.T) {
@@ -431,8 +431,8 @@ func TestWriter_AppendGroup_SealsAtThreshold(t *testing.T) {
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	assert.Len(t, w.Root().Sealed, 1, "crossing the threshold rotates the open region")
-	assert.Equal(t, uint64(1), w.Root().OpenFrom)
+	assert.Len(t, w.rootManifest().Sealed, 1, "crossing the threshold rotates the open region")
+	assert.Equal(t, uint64(1), w.rootManifest().OpenFrom)
 }
 
 func TestTrack_Writer(t *testing.T) {
@@ -486,7 +486,7 @@ func TestTrack_Writer_StaleHead(t *testing.T) {
 	}
 
 	// Rewind head to point at the very first delta.
-	stale, err := encodeManifest(Head{Version: ManifestVersion, Delta: 0})
+	stale, err := encodeManifest(head{Version: manifestVersion, Delta: 0})
 	require.NoError(t, err)
 
 	_, currentVersion, err := objects.Get(t.Context(), headKey(testTrack))

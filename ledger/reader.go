@@ -45,7 +45,7 @@ type Reader struct {
 	track   TrackPath
 
 	mu          sync.RWMutex
-	root        RootManifest
+	root        rootManifest
 	rootVersion store.Version
 }
 
@@ -70,15 +70,24 @@ func (t *Track) Reader(ctx context.Context) (*Reader, error) {
 // Track returns the path being read.
 func (r *Reader) Track() TrackPath { return r.track }
 
-// Root returns a copy of the cached root manifest.
-func (r *Reader) Root() RootManifest {
+// rootManifest returns a defensive copy of the cached root. Internal callers
+// need the full root — its sealed index and open region — to seek and walk; the
+// projection [Reader.Root] returns hides all of that.
+func (r *Reader) rootManifest() rootManifest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	root := r.root
-	root.Sealed = append([]SealedRef(nil), r.root.Sealed...)
+	root.Sealed = append([]sealedRef(nil), r.root.Sealed...)
 
 	return root
+}
+
+// Root returns the track's read-side metadata. It is a projection of the cached
+// root, not the root itself: how the history is laid out on disk is not part of
+// the public API. See [TrackMeta].
+func (r *Reader) Root() TrackMeta {
+	return r.rootManifest().meta()
 }
 
 // Refresh re-reads the root manifest, picking up manifests sealed since the
@@ -97,51 +106,41 @@ func (r *Reader) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// Head returns the track's head pointer.
-//
-// Head is a discovery cache and may lag the true tip. Use it to start near the
-// end of a track, never to decide that a track has ended.
-func (r *Reader) Head(ctx context.Context) (Head, error) {
-	head, _, err := fetchHead(ctx, r.objects, r.track)
-
-	return head, err
-}
-
 // Delta returns the nth delta manifest, or ErrNotCommitted if it does not
 // exist yet. Absence is the normal signal that a reader has caught up with the
 // writer, not a failure.
-func (r *Reader) delta(ctx context.Context, n uint64) (DeltaManifest, error) {
+func (r *Reader) delta(ctx context.Context, n uint64) (deltaManifest, error) {
 	data, _, err := r.objects.Get(ctx, deltaKey(r.track, n))
 	if err != nil {
 		if errors.Is(err, store.ErrNotExist) {
-			return DeltaManifest{}, fmt.Errorf("%w: %s delta %d", ErrNotCommitted, r.track, n)
+			return deltaManifest{}, fmt.Errorf("%w: %s delta %d", ErrNotCommitted, r.track, n)
 		}
-		return DeltaManifest{}, fmt.Errorf("ledger: read delta %d: %w", n, err)
+		return deltaManifest{}, fmt.Errorf("ledger: read delta %d: %w", n, err)
 	}
 
-	return decodeManifest(data, func(d DeltaManifest) int { return d.Version })
+	return decodeManifest(data, func(d deltaManifest) int { return d.Version })
 }
 
 // Sealed returns a sealed manifest by its reference in the root.
-func (r *Reader) sealed(ctx context.Context, ref SealedRef) (SealedManifest, error) {
+func (r *Reader) sealed(ctx context.Context, ref sealedRef) (sealedManifest, error) {
 	data, _, err := r.objects.Get(ctx, ref.Key)
 	if err != nil {
-		return SealedManifest{}, fmt.Errorf("ledger: read sealed manifest %q: %w", ref.Key, err)
+		return sealedManifest{}, fmt.Errorf("ledger: read sealed manifest %q: %w", ref.Key, err)
 	}
 
-	sealed, err := decodeManifest(data, func(m SealedManifest) int { return m.Version })
+	sealed, err := decodeManifest(data, func(m sealedManifest) int { return m.Version })
 	if err != nil {
-		return SealedManifest{}, err
+		return sealedManifest{}, err
 	}
 
 	// The manifest names its own track and range, so disagreement with the
 	// reference means the object is not the one the root meant to point at.
 	switch {
 	case sealed.Track != r.track:
-		return SealedManifest{}, fmt.Errorf("%w: %q holds track %s, expected %s",
+		return sealedManifest{}, fmt.Errorf("%w: %q holds track %s, expected %s",
 			ErrManifestMismatch, ref.Key, sealed.Track, r.track)
 	case sealed.FirstDelta != ref.FirstDelta || sealed.LastDelta != ref.LastDelta:
-		return SealedManifest{}, fmt.Errorf("%w: %q covers deltas %d-%d, expected %d-%d",
+		return sealedManifest{}, fmt.Errorf("%w: %q covers deltas %d-%d, expected %d-%d",
 			ErrManifestMismatch, ref.Key, sealed.FirstDelta, sealed.LastDelta, ref.FirstDelta, ref.LastDelta)
 	}
 
@@ -175,7 +174,7 @@ func (r *Reader) Groups(ctx context.Context) iter.Seq2[GroupInfo, error] {
 func (r *Reader) GroupsFrom(ctx context.Context, from GroupRef) iter.Seq2[GroupInfo, error] {
 	return filterGroups(
 		// A sealed run whose last group precedes the mark holds nothing wanted.
-		r.walk(ctx, func(ref SealedRef) bool { return !ref.Last.Before(from) }),
+		r.walk(ctx, func(ref sealedRef) bool { return !ref.Last.Before(from) }),
 		func(group GroupInfo) bool { return !group.GroupRef.Before(from) },
 	)
 }
@@ -195,7 +194,7 @@ func (r *Reader) RangeMedia(ctx context.Context, from, to int64) iter.Seq2[Group
 	return filterGroups(
 		// MediaEnd is a true end, so a run finishing at or before the window cannot
 		// contribute and need not be fetched.
-		r.walk(ctx, func(ref SealedRef) bool { return ref.MediaStart < to && ref.MediaEnd > from }),
+		r.walk(ctx, func(ref sealedRef) bool { return ref.MediaStart < to && ref.MediaEnd > from }),
 		func(group GroupInfo) bool { return group.overlapsMedia(from, to) },
 	)
 }
@@ -211,11 +210,11 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 		return emptyGroups
 	}
 
-	timescale := r.Root().Timescale
+	timescale := r.rootManifest().Timescale
 
 	return filterGroups(
-		r.walk(ctx, func(ref SealedRef) bool {
-			// SealedRef.WallclockEnd is the last anchor rather than an end, so a group
+		r.walk(ctx, func(ref sealedRef) bool {
+			// sealedRef.WallclockEnd is the last anchor rather than an end, so a group
 			// sitting on it may still reach into the window. Only a run that
 			// begins after the window can be ruled out. A run with no anchors
 			// at all cannot be ruled out either.
@@ -233,7 +232,7 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 // least once by design; a consumer that must not act twice should be idempotent
 // or track [GroupRef] itself.
 func (r *Reader) Tip(ctx context.Context) (Cursor, error) {
-	head, _, err := fetchHead(ctx, r.objects, r.track)
+	h, _, err := fetchHead(ctx, r.objects, r.track)
 	if errors.Is(err, store.ErrNotExist) {
 		// No head yet means nothing has been committed, so the start of the
 		// track already is the tip.
@@ -243,7 +242,7 @@ func (r *Reader) Tip(ctx context.Context) (Cursor, error) {
 		return Cursor{}, err
 	}
 
-	return Cursor{delta: head.Delta + 1}, nil
+	return Cursor{delta: h.Delta + 1}, nil
 }
 
 // Follow yields groups from a cursor onward, polling for new ones until ctx is
@@ -378,13 +377,13 @@ func (r *Reader) resume(
 	misses int,
 	yield func(Update, error) bool,
 ) (position, resumeOutcome, error) {
-	root := r.Root()
+	root := r.rootManifest()
 
 	if at.delta >= root.OpenFrom && (misses == 0 || misses%rootRecheckEvery == 0) {
 		if err := r.Refresh(ctx); err != nil {
 			return at, resumeWaiting, err
 		}
-		root = r.Root()
+		root = r.rootManifest()
 	}
 
 	if at.delta >= root.OpenFrom {
@@ -415,21 +414,21 @@ func (r *Reader) resume(
 }
 
 // sealedCovering returns the sealed run holding a delta number, if any.
-func sealedCovering(root RootManifest, delta uint64) (SealedRef, bool) {
+func sealedCovering(root rootManifest, delta uint64) (sealedRef, bool) {
 	for _, ref := range root.Sealed {
 		if delta >= ref.FirstDelta && delta <= ref.LastDelta {
 			return ref, true
 		}
 	}
 
-	return SealedRef{}, false
+	return sealedRef{}, false
 }
 
 // walk iterates the track in commit order, fetching only the sealed runs that
 // include accepts. A nil include fetches every run.
-func (r *Reader) walk(ctx context.Context, include func(SealedRef) bool) iter.Seq2[GroupInfo, error] {
+func (r *Reader) walk(ctx context.Context, include func(sealedRef) bool) iter.Seq2[GroupInfo, error] {
 	return func(yield func(GroupInfo, error) bool) {
-		root := r.Root()
+		root := r.rootManifest()
 
 		for _, ref := range root.Sealed {
 			if include != nil && !include(ref) {
@@ -495,12 +494,12 @@ func emptyGroups(func(GroupInfo, error) bool) {}
 // with it — possible at all. For seeking within one track, use
 // [Reader.SeekMedia], which is exact and immune to clock skew.
 func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupInfo, error) {
-	timescale := r.Root().Timescale
+	timescale := r.rootManifest().Timescale
 
 	return r.seek(ctx, unixNano,
 		func(g GroupInfo) (int64, bool) { return g.Wallclock, g.hasWallclock() },
 		func(g GroupInfo) (int64, bool) { return g.wallclockEnd(timescale) },
-		func(ref SealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
+		func(ref sealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
 	)
 }
 
@@ -510,7 +509,7 @@ func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, err
 	return r.seek(ctx, mediaTime,
 		func(g GroupInfo) (int64, bool) { return g.MediaTime, true },
 		func(g GroupInfo) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
-		func(ref SealedRef) (int64, bool) { return ref.MediaStart, true },
+		func(ref sealedRef) (int64, bool) { return ref.MediaStart, true },
 	)
 }
 
@@ -536,9 +535,9 @@ func (r *Reader) seek(
 	target int64,
 	anchor func(GroupInfo) (int64, bool),
 	end func(GroupInfo) (int64, bool),
-	start func(SealedRef) (int64, bool),
+	start func(sealedRef) (int64, bool),
 ) (GroupInfo, error) {
-	root := r.Root()
+	root := r.rootManifest()
 
 	var (
 		best     GroupInfo
@@ -598,37 +597,37 @@ func (r *Reader) seek(
 	return best, nil
 }
 
-func fetchRoot(ctx context.Context, objects store.Store, track TrackPath) (RootManifest, store.Version, error) {
+func fetchRoot(ctx context.Context, objects store.Store, track TrackPath) (rootManifest, store.Version, error) {
 	data, version, err := objects.Get(ctx, rootKey(track))
 	if err != nil {
 		if errors.Is(err, store.ErrNotExist) {
-			return RootManifest{}, store.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
+			return rootManifest{}, store.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
 		}
-		return RootManifest{}, store.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
+		return rootManifest{}, store.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
 	}
 
-	root, err := decodeManifest(data, func(m RootManifest) int { return m.Version })
+	root, err := decodeManifest(data, func(m rootManifest) int { return m.Version })
 	if err != nil {
-		return RootManifest{}, store.NoVersion, err
+		return rootManifest{}, store.NoVersion, err
 	}
 	if root.Track != track {
-		return RootManifest{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
+		return rootManifest{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
 			ErrManifestMismatch, rootKey(track), root.Track, track)
 	}
 
 	return root, version, nil
 }
 
-func fetchHead(ctx context.Context, objects store.Store, track TrackPath) (Head, store.Version, error) {
+func fetchHead(ctx context.Context, objects store.Store, track TrackPath) (head, store.Version, error) {
 	data, version, err := objects.Get(ctx, headKey(track))
 	if err != nil {
-		return Head{}, store.NoVersion, err
+		return head{}, store.NoVersion, err
 	}
 
-	head, err := decodeManifest(data, func(h Head) int { return h.Version })
+	h, err := decodeManifest(data, func(v head) int { return v.Version })
 	if err != nil {
-		return Head{}, store.NoVersion, err
+		return head{}, store.NoVersion, err
 	}
 
-	return head, version, nil
+	return h, version, nil
 }

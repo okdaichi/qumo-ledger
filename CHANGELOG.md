@@ -109,4 +109,4 @@ once: the unit of independent decoding *and* the unit of storage.
   backend.
 - Manifests are JSON. They are small, read far less often than payloads, and
   inspecting a broken track in a text editor is worth more than the bytes saved.
-  `ManifestVersion` is what allows this to be revisited.
+  A `version` field is what allows this to be revisited.

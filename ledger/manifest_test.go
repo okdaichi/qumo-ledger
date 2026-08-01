@@ -56,7 +56,7 @@ func TestGroupKey(t *testing.T) {
 }
 
 func TestSealedManifest_summarize(t *testing.T) {
-	manifest := SealedManifest{
+	manifest := sealedManifest{
 		FirstDelta: 4,
 		LastDelta:  6,
 		Groups: []GroupInfo{
@@ -83,7 +83,7 @@ func TestSealedManifest_summarize(t *testing.T) {
 // Wallclock is optional, so the bounds must cover only the groups that have an
 // anchor — a missing one is not an anchor at the Unix epoch.
 func TestSealedManifest_summarize_PartialWallclock(t *testing.T) {
-	manifest := SealedManifest{
+	manifest := sealedManifest{
 		Groups: []GroupInfo{
 			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, MediaTime: 100, Duration: 100},
 			{GroupRef: GroupRef{Epoch: 1, Sequence: 11}, MediaTime: 200, Duration: 100, Wallclock: 5000},
@@ -98,7 +98,7 @@ func TestSealedManifest_summarize_PartialWallclock(t *testing.T) {
 }
 
 func TestSealedManifest_summarize_NoWallclock(t *testing.T) {
-	manifest := SealedManifest{
+	manifest := sealedManifest{
 		Groups: []GroupInfo{{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100, Duration: 100}},
 	}
 
@@ -113,7 +113,7 @@ func TestSealedManifest_summarize_NoWallclock(t *testing.T) {
 // an epoch resets media time outright. The summary must widen to cover every
 // group or a range search will step over data that is really there.
 func TestSealedManifest_summarize_AcrossEpochs(t *testing.T) {
-	manifest := SealedManifest{
+	manifest := sealedManifest{
 		Groups: []GroupInfo{
 			{GroupRef: GroupRef{Epoch: 1, Sequence: 10}, MediaTime: 500, Duration: 100, Wallclock: 5000},
 			{GroupRef: GroupRef{Epoch: 2, Sequence: 0}, MediaTime: 100, Duration: 100, Wallclock: 6000},
@@ -130,7 +130,7 @@ func TestSealedManifest_summarize_AcrossEpochs(t *testing.T) {
 }
 
 func TestSealedManifest_summarize_Empty(t *testing.T) {
-	ref := SealedManifest{FirstDelta: 1, LastDelta: 1}.summarize("k")
+	ref := sealedManifest{FirstDelta: 1, LastDelta: 1}.summarize("k")
 
 	assert.Equal(t, "k", ref.Key)
 	assert.Equal(t, 0, ref.Groups)
@@ -138,18 +138,18 @@ func TestSealedManifest_summarize_Empty(t *testing.T) {
 }
 
 func TestDecodeManifest_RejectsNewerVersion(t *testing.T) {
-	data, err := encodeManifest(RootManifest{Version: ManifestVersion + 1, Track: "live/cam1"})
+	data, err := encodeManifest(rootManifest{Version: manifestVersion + 1, Track: "live/cam1"})
 	require.NoError(t, err)
 
-	_, err = decodeManifest(data, func(m RootManifest) int { return m.Version })
+	_, err = decodeManifest(data, func(m rootManifest) int { return m.Version })
 
 	assert.ErrorIs(t, err, ErrUnsupportedVersion,
 		"an old binary must refuse a newer track rather than misread it")
 }
 
 func TestDecodeManifest_RoundTrip(t *testing.T) {
-	root := RootManifest{
-		Version:    ManifestVersion,
+	root := rootManifest{
+		Version:    manifestVersion,
 		Track:      "live/cam1/video",
 		Timescale:  90000,
 		TimeSource: TimeSourceFrame,
@@ -157,13 +157,13 @@ func TestDecodeManifest_RoundTrip(t *testing.T) {
 		Encoding:   "fmp4",
 		Epoch:      3,
 		OpenFrom:   7,
-		Sealed:     []SealedRef{{Key: "k", Groups: 2}},
+		Sealed:     []sealedRef{{Key: "k", Groups: 2}},
 	}
 
 	data, err := encodeManifest(root)
 	require.NoError(t, err)
 
-	got, err := decodeManifest(data, func(m RootManifest) int { return m.Version })
+	got, err := decodeManifest(data, func(m rootManifest) int { return m.Version })
 	require.NoError(t, err)
 
 	assert.Equal(t, root, got)

@@ -178,7 +178,7 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 // Seeking into the distant past must cost one sealed fetch, not one per sealed
 // run — otherwise a seek gets steadily more expensive for the whole life of a
 // recording, which is exactly what the summaries in the root exist to prevent.
-func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
+func TestReader_SeekMedia_FetchesOnesealedManifest(t *testing.T) {
 	objects := &FakeStore{}
 
 	w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
@@ -195,7 +195,7 @@ func TestReader_SeekMedia_FetchesOneSealedManifest(t *testing.T) {
 
 	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
 	require.NoError(t, err)
-	require.Len(t, r.Root().Sealed, 6)
+	require.Len(t, r.rootManifest().Sealed, 6)
 
 	objects.ResetCalls()
 
@@ -329,7 +329,7 @@ func TestReader_GroupsFrom(t *testing.T) {
 
 // A range must skip the sealed runs that cannot contribute, or a narrow query
 // over a long recording costs as much as reading the whole thing.
-func TestReader_RangeMedia_SkipsIrrelevantSealedManifests(t *testing.T) {
+func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
 	objects := &FakeStore{}
 
 	w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
@@ -343,7 +343,7 @@ func TestReader_RangeMedia_SkipsIrrelevantSealedManifests(t *testing.T) {
 
 	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
 	require.NoError(t, err)
-	require.Len(t, r.Root().Sealed, 6)
+	require.Len(t, r.rootManifest().Sealed, 6)
 
 	objects.ResetCalls()
 
@@ -360,9 +360,9 @@ func TestReader_RangeMedia_SkipsIrrelevantSealedManifests(t *testing.T) {
 // Manifests name their own track and range, so an object that does not match
 // the key it was fetched from must be refused rather than trusted.
 func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
-	tests := map[string]func(*SealedManifest){
-		"wrong track": func(m *SealedManifest) { m.Track = "live/cam2/video" },
-		"wrong range": func(m *SealedManifest) { m.LastDelta += 7 },
+	tests := map[string]func(*sealedManifest){
+		"wrong track": func(m *sealedManifest) { m.Track = "live/cam2/video" },
+		"wrong range": func(m *sealedManifest) { m.LastDelta += 7 },
 	}
 
 	for name, corrupt := range tests {
@@ -377,7 +377,7 @@ func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 
 			r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
 			require.NoError(t, err)
-			ref := r.Root().Sealed[0]
+			ref := r.rootManifest().Sealed[0]
 
 			sealed, err := r.sealed(t.Context(), ref)
 			require.NoError(t, err)
@@ -432,27 +432,14 @@ func TestReader_Refresh(t *testing.T) {
 
 	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
 	require.NoError(t, err)
-	require.Empty(t, r.Root().Sealed)
+	require.Empty(t, r.rootManifest().Sealed)
 
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 	require.NoError(t, w.Seal(t.Context()))
 
 	require.NoError(t, r.Refresh(t.Context()))
-	assert.Len(t, r.Root().Sealed, 1)
-}
-
-func TestReader_Head(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 2, 2)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	head, err := r.Head(t.Context())
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(1), head.Delta)
-	assert.Equal(t, GroupRef{Epoch: 1, Sequence: 1}, head.Latest)
+	assert.Len(t, r.rootManifest().Sealed, 1)
 }
 
 // The zero Cursor starts at the beginning, so a follower drains history before

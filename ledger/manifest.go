@@ -5,10 +5,10 @@ import (
 	"fmt"
 )
 
-// ManifestVersion is the format version written into every manifest. Readers
+// manifestVersion is the format version written into every manifest. Readers
 // refuse anything higher, so an old binary fails loudly instead of
 // misinterpreting a newer track.
-const ManifestVersion = 1
+const manifestVersion = 1
 
 // Manifests are encoded as JSON. Manifests are small, are read far less often
 // than payloads, and being able to inspect a broken track with a text editor is
@@ -70,9 +70,14 @@ func groupKey(track TrackPath, ref GroupRef) string {
 	return string(track) + "/" + groupPrefix + ref.String()
 }
 
-// RootManifest describes a track. It changes only when a manifest is sealed or
+// rootManifest describes a track. It changes only when a manifest is sealed or
 // the producer's epoch advances, so it is cheap to cache.
-type RootManifest struct {
+//
+// It is the on-disk wire format and stays unexported: a Go consumer reads track
+// metadata through [TrackMeta], and a reader in any language reads the JSON
+// schema documented in docs/ARCHITECTURE.md. The layout is not part of the
+// public Go API.
+type rootManifest struct {
 	Version int       `json:"version"`
 	Track   TrackPath `json:"track"`
 
@@ -89,7 +94,7 @@ type RootManifest struct {
 	// commit order. Each entry summarizes its run, so a seek walking backwards
 	// can identify the one run that may hold its answer and fetch only that —
 	// rather than one request per run for the length of the recording.
-	Sealed []SealedRef `json:"sealed"`
+	Sealed []sealedRef `json:"sealed"`
 
 	// OpenFrom is the first delta number in the open region, that is, the
 	// first delta not yet covered by a sealed manifest.
@@ -98,11 +103,25 @@ type RootManifest struct {
 	CreatedAt int64 `json:"createdAt"`
 }
 
-// SealedRef summarizes a sealed manifest so the root can be searched without
+// meta projects the root onto the public [TrackMeta]: the track's content
+// schema and current epoch, with nothing about how the history is laid out on
+// disk. Storage structure is not part of the public API.
+func (m rootManifest) meta() TrackMeta {
+	return TrackMeta{
+		Track:      m.Track,
+		Timescale:  m.Timescale,
+		TimeSource: m.TimeSource,
+		MIME:       m.MIME,
+		Encoding:   m.Encoding,
+		Epoch:      m.Epoch,
+	}
+}
+
+// sealedRef summarizes a sealed manifest so the root can be searched without
 // fetching its contents.
 //
 // Every field is derived at seal time; nothing here is supplied by a caller.
-type SealedRef struct {
+type sealedRef struct {
 	Key        string `json:"key"`
 	FirstDelta uint64 `json:"firstDelta"`
 	LastDelta  uint64 `json:"lastDelta"`
@@ -123,14 +142,14 @@ type SealedRef struct {
 	Last  GroupRef `json:"last"`
 }
 
-// DeltaManifest commits one or more groups. Writing it *is* the commit: it is
+// deltaManifest commits one or more groups. Writing it *is* the commit: it is
 // immutable and written atomically, so a reader that finds one is reading
 // committed state even if the head pointer has not caught up.
 //
 // Groups normally holds a single entry — one commit per sealed group keeps
 // visibility latency at its floor. It is a slice so that bulk backfill can
 // commit a batch without paying one round trip per group.
-type DeltaManifest struct {
+type deltaManifest struct {
 	Version int         `json:"version"`
 	Seq     uint64      `json:"seq"`
 	Groups  []GroupInfo `json:"groups"`
@@ -138,10 +157,10 @@ type DeltaManifest struct {
 	CommittedAt int64 `json:"committedAt"`
 }
 
-// SealedManifest is a rotated run of delta manifests folded into one immutable
+// sealedManifest is a rotated run of delta manifests folded into one immutable
 // object, so that reading history costs one request per sealed manifest rather
 // than one per group.
-type SealedManifest struct {
+type sealedManifest struct {
 	Version    int         `json:"version"`
 	Track      TrackPath   `json:"track"`
 	Seq        uint64      `json:"seq"`
@@ -152,13 +171,13 @@ type SealedManifest struct {
 	SealedAt int64 `json:"sealedAt"`
 }
 
-// Head points at the newest committed delta.
+// head points at the newest committed delta.
 //
 // It is a discovery cache, not a transaction boundary. A reader joining a track
 // uses it to avoid probing from zero; a reader already tailing ignores it
 // entirely. Because it may lag its deltas — or be lost outright — nothing may
 // depend on it for correctness.
-type Head struct {
+type head struct {
 	Version int    `json:"version"`
 	Delta   uint64 `json:"delta"`
 
@@ -173,9 +192,9 @@ type Head struct {
 // It returns the zero value when the manifest has no groups.
 //
 // Only the writer folds sealed manifests, so this stays unexported; readers
-// consume the resulting [SealedRef] values from [RootManifest.Sealed].
-func (m SealedManifest) summarize(key string) SealedRef {
-	ref := SealedRef{
+// consume the resulting [sealedRef] values from [rootManifest.Sealed].
+func (m sealedManifest) summarize(key string) sealedRef {
+	ref := sealedRef{
 		Key:        key,
 		FirstDelta: m.FirstDelta,
 		LastDelta:  m.LastDelta,
@@ -224,8 +243,8 @@ func decodeManifest[T any](data []byte, version func(T) int) (T, error) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return out, fmt.Errorf("ledger: decode manifest: %w", err)
 	}
-	if v := version(out); v > ManifestVersion {
-		return out, fmt.Errorf("%w: found %d, understand up to %d", ErrUnsupportedVersion, v, ManifestVersion)
+	if v := version(out); v > manifestVersion {
+		return out, fmt.Errorf("%w: found %d, understand up to %d", ErrUnsupportedVersion, v, manifestVersion)
 	}
 
 	return out, nil

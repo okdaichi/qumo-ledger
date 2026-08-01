@@ -85,19 +85,11 @@ func inspect(ctx context.Context, args []string) error {
 		return err
 	}
 
-	manifest := reader.Root()
-	fmt.Printf("track       %s\n", manifest.Track)
-	fmt.Printf("timescale   %d units/sec (%s)\n", manifest.Timescale, manifest.TimeSource)
-	fmt.Printf("encoding    %s %s\n", manifest.Encoding, manifest.MIME)
-	fmt.Printf("epoch       %d\n", manifest.Epoch)
-	fmt.Printf("sealed      %d manifest(s), open region starts at delta %d\n", len(manifest.Sealed), manifest.OpenFrom)
-
-	if head, err := reader.Head(ctx); err == nil {
-		fmt.Printf("head        delta %d, latest group %s\n", head.Delta, head.Latest)
-	} else {
-		// A missing head is survivable by design, so say so rather than failing.
-		fmt.Printf("head        unavailable (%v)\n", err)
-	}
+	meta := reader.Root()
+	fmt.Printf("track       %s\n", meta.Track)
+	fmt.Printf("timescale   %d units/sec (%s)\n", meta.Timescale, meta.TimeSource)
+	fmt.Printf("encoding    %s %s\n", meta.Encoding, meta.MIME)
+	fmt.Printf("epoch       %d\n", meta.Epoch)
 
 	if !*groups {
 		return nil

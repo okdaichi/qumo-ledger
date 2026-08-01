@@ -105,6 +105,27 @@ func (c TrackConfig) validate() error {
 	return nil
 }
 
+// TrackMeta is a track's read-side metadata: the schema fixed at creation and
+// the producer epoch currently being written. It is the public projection of the
+// root, so [Reader.Root] and [Writer.Root] return one of these rather than the
+// on-disk manifest. How the history is laid out into sealed and open regions is
+// deliberately not part of it — that is storage structure, not track metadata.
+type TrackMeta struct {
+	// Track is the path identifying the track.
+	Track TrackPath
+
+	// Timescale, TimeSource, MIME and Encoding mirror the [TrackConfig] the
+	// track was created with.
+	Timescale  uint32
+	TimeSource TimeSource
+	MIME       string
+	Encoding   string
+
+	// Epoch is the producer lifetime currently being written. It advances when
+	// a producer restarts its numbering; see [GroupRef.Epoch].
+	Epoch uint64
+}
+
 // Config carries the deployment-level settings for a [Track]. The zero value is
 // usable: every field means a documented default when left zero, so the common
 // case is [NewTrack] with an empty [Config].

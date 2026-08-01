@@ -41,7 +41,7 @@ type Writer struct {
 	logger        *slog.Logger
 
 	mu          sync.Mutex
-	root        RootManifest
+	root        rootManifest
 	rootVersion store.Version
 	headVersion store.Version
 
@@ -79,8 +79,8 @@ func (t *Track) Create(ctx context.Context, cfg TrackConfig) (*Writer, error) {
 
 	w := t.newWriter()
 
-	w.root = RootManifest{
-		Version:    ManifestVersion,
+	w.root = rootManifest{
+		Version:    manifestVersion,
 		Track:      t.path,
 		Timescale:  cfg.Timescale,
 		TimeSource: cfg.TimeSource,
@@ -159,7 +159,7 @@ func (t *Track) Writer(ctx context.Context) (*Writer, error) {
 			return nil, fmt.Errorf("ledger: track %s: read delta %d: %w", t.path, n, err)
 		}
 
-		delta, err := decodeManifest(data, func(d DeltaManifest) int { return d.Version })
+		delta, err := decodeManifest(data, func(d deltaManifest) int { return d.Version })
 		if err != nil {
 			return nil, err
 		}
@@ -197,15 +197,24 @@ func (t *Track) newWriter() *Writer {
 // Track returns the path being written.
 func (w *Writer) Track() TrackPath { return w.track }
 
-// Root returns a copy of the current root manifest.
-func (w *Writer) Root() RootManifest {
+// rootManifest returns a defensive copy of the current root. Internal callers
+// and tests need the full root — its sealed index and open region — which the
+// projection [Writer.Root] hides.
+func (w *Writer) rootManifest() rootManifest {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	root := w.root
-	root.Sealed = append([]SealedRef(nil), w.root.Sealed...)
+	root.Sealed = append([]sealedRef(nil), w.root.Sealed...)
 
 	return root
+}
+
+// Root returns the track's read-side metadata. It is a projection of the
+// current root, not the root itself: how the history is laid out on disk is not
+// part of the public API. See [TrackMeta].
+func (w *Writer) Root() TrackMeta {
+	return w.rootManifest().meta()
 }
 
 // AppendGroup stores a sealed group and commits it.
@@ -257,8 +266,8 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 		return GroupInfo{}, fmt.Errorf("ledger: write group %s: %w", meta.GroupRef, err)
 	}
 
-	delta := DeltaManifest{
-		Version:     ManifestVersion,
+	delta := deltaManifest{
+		Version:     manifestVersion,
 		Seq:         w.nextDelta,
 		Groups:      []GroupInfo{meta},
 		CommittedAt: w.now().UnixNano(),
@@ -285,7 +294,7 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 	w.last, w.hasLast = meta, true
 
 	if meta.Epoch > w.root.Epoch {
-		if err := w.updateRoot(ctx, func(root *RootManifest) { root.Epoch = meta.Epoch }); err != nil {
+		if err := w.updateRoot(ctx, func(root *rootManifest) { root.Epoch = meta.Epoch }); err != nil {
 			return meta, err
 		}
 	}
@@ -362,8 +371,8 @@ func (w *Writer) seal(ctx context.Context) error {
 	seq := uint64(len(w.root.Sealed)) + 1
 	key := sealedKey(w.track, firstDelta, lastDelta)
 
-	sealed := SealedManifest{
-		Version:    ManifestVersion,
+	sealed := sealedManifest{
+		Version:    manifestVersion,
 		Track:      w.track,
 		Seq:        seq,
 		FirstDelta: firstDelta,
@@ -385,7 +394,7 @@ func (w *Writer) seal(ctx context.Context) error {
 		return fmt.Errorf("ledger: write sealed manifest %d-%d: %w", firstDelta, lastDelta, err)
 	}
 
-	if err := w.updateRoot(ctx, func(root *RootManifest) {
+	if err := w.updateRoot(ctx, func(root *rootManifest) {
 		root.Sealed = append(root.Sealed, sealed.summarize(key))
 		root.OpenFrom = lastDelta + 1
 	}); err != nil {
@@ -409,9 +418,9 @@ func (w *Writer) seal(ctx context.Context) error {
 
 // updateRoot applies mutate to the root manifest and swaps it in.
 // Requires w.mu.
-func (w *Writer) updateRoot(ctx context.Context, mutate func(*RootManifest)) error {
+func (w *Writer) updateRoot(ctx context.Context, mutate func(*rootManifest)) error {
 	next := w.root
-	next.Sealed = append([]SealedRef(nil), w.root.Sealed...)
+	next.Sealed = append([]sealedRef(nil), w.root.Sealed...)
 	mutate(&next)
 
 	data, err := encodeManifest(next)
@@ -439,14 +448,14 @@ func (w *Writer) updateRoot(ctx context.Context, mutate func(*RootManifest)) err
 // caller — which lets the swallow be explicit and keeps the failure visible to
 // tests.
 func (w *Writer) publishHead(ctx context.Context, latest GroupRef) error {
-	head := Head{
-		Version:   ManifestVersion,
+	h := head{
+		Version:   manifestVersion,
 		Delta:     w.nextDelta - 1,
 		Latest:    latest,
 		UpdatedAt: w.now().UnixNano(),
 	}
 
-	data, err := encodeManifest(head)
+	data, err := encodeManifest(h)
 	if err != nil {
 		return err
 	}
