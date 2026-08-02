@@ -61,53 +61,6 @@ type Writer struct {
 	hasLast bool
 }
 
-// Create establishes a new track, like CREATE TABLE: it writes the root
-// manifest and returns a Writer at the start of the track. It is the only way
-// to set a track's schema — Timescale, MIME, Encoding — which is then
-// immutable, and it returns ErrTrackExists if the track already has a root
-// manifest.
-func (t *Track) Create(ctx context.Context, cfg TrackConfig) (*Writer, error) {
-	if err := t.check(); err != nil {
-		return nil, err
-	}
-	if err := t.path.validate(); err != nil {
-		return nil, err
-	}
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
-	w := t.newWriter()
-
-	w.root = rootManifest{
-		Version:    manifestVersion,
-		Track:      t.path,
-		Timescale:  cfg.Timescale,
-		TimeSource: cfg.TimeSource,
-		MIME:       cfg.MIME,
-		Encoding:   cfg.Encoding,
-		Epoch:      1,
-		OpenFrom:   0,
-		CreatedAt:  w.now().UnixNano(),
-	}
-
-	data, err := encodeManifest(w.root)
-	if err != nil {
-		return nil, err
-	}
-
-	version, err := t.store.Create(ctx, rootKey(t.path), data)
-	if err != nil {
-		if errors.Is(err, store.ErrExist) {
-			return nil, fmt.Errorf("%w: %s", ErrTrackExists, t.path)
-		}
-		return nil, fmt.Errorf("ledger: create track %s: %w", t.path, err)
-	}
-	w.rootVersion = version
-
-	return w, nil
-}
-
 // Writer opens the track for appending and recovers its position.
 //
 // Recovery reads the head pointer for a starting guess and then probes forward
@@ -116,23 +69,11 @@ func (t *Track) Create(ctx context.Context, cfg TrackConfig) (*Writer, error) {
 // or not head knows about it. A writer that crashed mid-append therefore
 // resumes without losing committed groups and without a repair pass.
 func (t *Track) Writer(ctx context.Context) (*Writer, error) {
-	if err := t.check(); err != nil {
-		return nil, err
-	}
-	if err := t.path.validate(); err != nil {
-		return nil, err
-	}
-
 	w := t.newWriter()
-
-	root, version, err := fetchRoot(ctx, t.store, t.path)
-	if err != nil {
-		return nil, err
-	}
-	w.root, w.rootVersion = root, version
+	w.root, w.rootVersion = t.root, t.rootVersion
 
 	// head is only a hint. Trust it to skip ahead, never to stop early.
-	from := root.OpenFrom
+	from := w.root.OpenFrom
 	if head, headVersion, err := fetchHead(ctx, t.store, t.path); err == nil {
 		w.headVersion = headVersion
 		if head.Delta >= from {
@@ -143,7 +84,7 @@ func (t *Track) Writer(ctx context.Context) (*Writer, error) {
 	}
 
 	// Replay the open region so the seal threshold and group rows are accurate.
-	for n := root.OpenFrom; ; n++ {
+	for n := w.root.OpenFrom; ; n++ {
 		data, _, err := t.store.Get(ctx, deltaKey(t.path, n))
 		if errors.Is(err, store.ErrNotExist) {
 			if n < from {
@@ -174,8 +115,8 @@ func (t *Track) Writer(ctx context.Context) (*Writer, error) {
 	// A writer reopened after a seal has no open groups to recover the last
 	// committed one from, so fall back to the newest sealed run's summary.
 	// Only the epoch and end matter for ordering the next append.
-	if !w.hasLast && len(root.Sealed) > 0 {
-		newest := root.Sealed[len(root.Sealed)-1]
+	if !w.hasLast && len(w.root.Sealed) > 0 {
+		newest := w.root.Sealed[len(w.root.Sealed)-1]
 		w.last = GroupInfo{GroupRef: newest.Last, MediaTime: newest.MediaEnd}
 		w.hasLast = true
 	}
@@ -215,6 +156,38 @@ func (w *Writer) rootManifest() rootManifest {
 // part of the public API. See [TrackMeta].
 func (w *Writer) Root() TrackMeta {
 	return w.rootManifest().meta()
+}
+
+// Append stores payload as the next group in sequence, deriving the values a
+// sequential producer does not track by hand: sequence increments by one, media
+// time advances by the previous group's duration, and wallclock is stamped from
+// the writer's clock.
+//
+// duration is this group's media extent — the one value, besides the payload,
+// that the ledger cannot supply, because the core parses no payload format.
+//
+// Append is the common case: groups committed back to back. Use [Writer.AppendGroup]
+// when a group is dropped (a gap is real data), when the producer's own sequence
+// numbers must be preserved for live-replay alignment, or when the media anchor
+// is not simply the previous group's end.
+func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (GroupInfo, error) {
+	w.mu.Lock()
+	var ref GroupRef
+	var mediaStart int64
+	if w.hasLast {
+		ref = GroupRef{Epoch: w.last.Epoch, Sequence: w.last.Sequence + 1}
+		mediaStart = w.last.mediaEnd()
+	} else {
+		ref = GroupRef{Epoch: w.root.Epoch, Sequence: 0}
+	}
+	w.mu.Unlock()
+
+	return w.AppendGroup(ctx, GroupInfo{
+		GroupRef:  ref,
+		MediaTime: mediaStart,
+		Duration:  duration,
+		Wallclock: w.now().UnixNano(),
+	}, payload)
 }
 
 // AppendGroup stores a sealed group and commits it.

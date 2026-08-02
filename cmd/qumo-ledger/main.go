@@ -7,8 +7,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -60,7 +62,7 @@ func usage() {
 Usage:
   qumo-ledger inspect -root <dir> -track <path>   summarize a track
   qumo-ledger follow  -root <dir> -track <path>   tail groups as they land
-                      [-tip] [-cursor <c>]       start at the tip, or resume
+                      [-tip] [-group <ref>]      start at the tip, or resume
   qumo-ledger version
 
 Only the local filesystem backend is wired up so far. Object-store backends
@@ -99,7 +101,16 @@ func inspect(ctx context.Context, args []string) error {
 	out := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(out, "GROUP\tMEDIA\tWALLCLOCK\tOBJECTS\tSIZE")
 
-	for group, err := range reader.Groups(ctx) {
+	sc, err := reader.NewScanner(ctx)
+	if err != nil {
+		return err
+	}
+	sc.SeekStart()
+	for {
+		group, err := sc.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
 			out.Flush()
 			return err
@@ -128,7 +139,7 @@ func follow(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("follow", flag.ExitOnError)
 	root := flags.String("root", ".", "storage root directory")
 	track := flags.String("track", "", "track path, for example live/cam1/video")
-	cursor := flags.String("cursor", "", "resume from a cursor printed by an earlier run")
+	group := flags.String("group", "", "resume after a group ref printed by an earlier run, e.g. e000001-g00000003")
 	tip := flags.Bool("tip", false, "start after everything already committed")
 	interval := flags.Duration("interval", ledger.DefaultPollInterval, "poll interval")
 	if err := flags.Parse(args); err != nil {
@@ -143,30 +154,50 @@ func follow(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// The zero cursor is the start of the track, so an unflagged run replays
-	// everything and then tails.
-	var start ledger.Cursor
+	sc, err := reader.NewScanner(ctx)
+	if err != nil {
+		return err
+	}
+
+	// With no position flag an unflagged run replays everything and then tails.
 	switch {
-	case *cursor != "":
-		if err := start.UnmarshalText([]byte(*cursor)); err != nil {
+	case *group != "":
+		from, err := ledger.ParseGroupRef(*group)
+		if err != nil {
+			return err
+		}
+		if err := sc.SeekGroup(ctx, from); err != nil {
 			return err
 		}
 	case *tip:
-		if start, err = reader.Tip(ctx); err != nil {
+		if err := sc.SeekTip(ctx); err != nil {
 			return err
 		}
+	default:
+		sc.SeekStart()
 	}
 
-	for update, err := range reader.Follow(ctx, start, *interval) {
+	// Following is polling, because object stores do not push. The Scanner is
+	// non-blocking — Next returns io.EOF at the tip — so the wait lives here.
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for {
+		group, err := sc.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				continue
+			}
+		}
 		if err != nil {
 			return err
 		}
 		fmt.Printf("%s  group %s  media %d+%d  %d objects  %d bytes\n",
-			update.Cursor, update.GroupRef, update.MediaTime, update.Duration,
-			update.ObjectCount, update.Size)
+			sc.Position(), group.GroupRef, group.MediaTime, group.Duration,
+			group.ObjectCount, group.Size)
 	}
-
-	return nil
 }
 
 func openReader(ctx context.Context, root, path string) (*ledger.Reader, error) {
@@ -175,5 +206,9 @@ func openReader(ctx context.Context, root, path string) (*ledger.Reader, error) 
 		return nil, err
 	}
 
-	return ledger.NewTrack(objects, ledger.TrackPath(path), ledger.Config{}).Reader(ctx)
+	track, err := ledger.Open(ctx, objects, ledger.TrackPath(path), ledger.Config{})
+	if err != nil {
+		return nil, err
+	}
+	return track.Reader(ctx)
 }

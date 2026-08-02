@@ -6,18 +6,9 @@ import (
 	"fmt"
 	"iter"
 	"sync"
-	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
-
-// DefaultPollInterval is how often [Reader.Follow] probes for the next delta.
-//
-// Object stores do not push, so following a track means polling. The interval
-// is the visibility latency floor for a reader, which is why the ledger is not
-// a live path: even at zero polling delay, a group cannot be committed until it
-// is sealed.
-const DefaultPollInterval = 500 * time.Millisecond
 
 // Reader reads a track. It needs nothing but object-store access — no ledger
 // process has to be running for a Reader to seek or replay.
@@ -39,6 +30,10 @@ const DefaultPollInterval = 500 * time.Millisecond
 //		// ...
 //	}
 //
+// Reader is stateless and safe for concurrent use. The range methods answer a
+// bounded query as a snapshot; for open-ended streaming — seek and play
+// forward, or tail new groups — take a [Scanner] with [Reader.NewScanner].
+//
 // Reader is safe for concurrent use.
 type Reader struct {
 	objects store.Store
@@ -52,13 +47,6 @@ type Reader struct {
 // Reader opens the track for reading. It loads the root manifest and nothing
 // else: reading needs no recovery, so a reader joins cheaply.
 func (t *Track) Reader(ctx context.Context) (*Reader, error) {
-	if err := t.check(); err != nil {
-		return nil, err
-	}
-	if err := t.path.validate(); err != nil {
-		return nil, err
-	}
-
 	root, version, err := fetchRoot(ctx, t.store, t.path)
 	if err != nil {
 		return nil, err
@@ -160,25 +148,6 @@ func (r *Reader) ReadGroup(ctx context.Context, meta GroupInfo) ([]byte, error) 
 	return data, nil
 }
 
-// Groups iterates every group in the track in commit order. Iteration stops at
-// the first error, and at the tip of the track.
-//
-// This reads the whole recording. Prefer [Reader.RangeWallclock],
-// [Reader.RangeMedia] or [Reader.GroupsFrom] for anything narrower.
-func (r *Reader) Groups(ctx context.Context) iter.Seq2[GroupInfo, error] {
-	return r.walk(ctx, nil)
-}
-
-// GroupsFrom iterates from a group onward, in commit order, including the group
-// itself. It is the resumption path for a consumer that recorded how far it got.
-func (r *Reader) GroupsFrom(ctx context.Context, from GroupRef) iter.Seq2[GroupInfo, error] {
-	return filterGroups(
-		// A sealed run whose last group precedes the mark holds nothing wanted.
-		r.walk(ctx, func(ref sealedRef) bool { return !ref.Last.Before(from) }),
-		func(group GroupInfo) bool { return !group.GroupRef.Before(from) },
-	)
-}
-
 // RangeMedia iterates the groups overlapping the half-open media-time window
 // [from, to), in the track's timescale units.
 //
@@ -224,193 +193,17 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 	)
 }
 
-// Tip returns a cursor positioned after everything currently committed, for a
-// follower that wants new groups only.
+// NewScanner returns a positioned cursor over the track's groups, in commit
+// order, for seek-and-stream and tailing. See [Scanner].
 //
-// It is derived from the head pointer, which may lag the true tip, so following
-// from it can replay a few groups that were already committed. Delivery is at
-// least once by design; a consumer that must not act twice should be idempotent
-// or track [GroupRef] itself.
-func (r *Reader) Tip(ctx context.Context) (Cursor, error) {
-	h, _, err := fetchHead(ctx, r.objects, r.track)
-	if errors.Is(err, store.ErrNotExist) {
-		// No head yet means nothing has been committed, so the start of the
-		// track already is the tip.
-		return Cursor{}, nil
-	}
+// A Scanner holds its own root snapshot and is not safe for concurrent use;
+// concurrent consumers each take their own.
+func (r *Reader) NewScanner(ctx context.Context) (*Scanner, error) {
+	root, _, err := fetchRoot(ctx, r.objects, r.track)
 	if err != nil {
-		return Cursor{}, err
+		return nil, err
 	}
-
-	return Cursor{delta: h.Delta + 1}, nil
-}
-
-// Follow yields groups from a cursor onward, polling for new ones until ctx is
-// cancelled. The zero Cursor starts at the beginning of the track, so Follow
-// drains history first and then tails.
-//
-// This is the notification mechanism. Object stores have no push, so a follower
-// probes forward by deterministic key and treats absence as "not yet" — no
-// listing, and no ledger process in the loop. A deployment wanting lower latency
-// layers a real notification channel on top; nothing here depends on one.
-//
-// Each [Update] carries the cursor that resumes immediately after it, so a
-// consumer can persist its position at group granularity.
-func (r *Reader) Follow(ctx context.Context, from Cursor, interval time.Duration) iter.Seq2[Update, error] {
-	if interval <= 0 {
-		interval = DefaultPollInterval
-	}
-
-	return func(yield func(Update, error) bool) {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		at := position{delta: from.delta, index: from.index}
-		// misses counts consecutive empty polls, so the root is re-read when a
-		// follower first stalls and only occasionally after that.
-		misses := 0
-
-		for {
-			manifest, err := r.delta(ctx, at.delta)
-			switch {
-			case err == nil:
-				for i, group := range manifest.Groups {
-					if i < at.index {
-						continue
-					}
-					update := Update{
-						GroupInfo: group,
-						Cursor:    Cursor{delta: at.delta, index: i + 1},
-					}
-					if !yield(update, nil) {
-						return
-					}
-				}
-				at, misses = position{delta: at.delta + 1}, 0
-				// Do not wait before trying the next one: a backlog should
-				// drain at full speed, and only a genuine miss should poll.
-				continue
-
-			case errors.Is(err, ErrNotCommitted):
-				// A missing delta means one of two very different things: it
-				// has not been committed yet, or it was sealed and reclaimed
-				// while this follower was away. Waiting is right for the first
-				// and hangs forever on the second.
-				next, outcome, err := r.resume(ctx, at, misses, yield)
-				if err != nil {
-					yield(Update{}, err)
-					return
-				}
-				switch outcome {
-				case resumeStopped:
-					return
-				case resumeAdvanced:
-					at, misses = next, 0
-					continue
-				}
-				misses++
-
-			default:
-				yield(Update{}, err)
-				return
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}
-}
-
-// rootRecheckEvery is how many consecutive empty polls pass between re-reads of
-// the root manifest while a follower is stalled.
-//
-// A stalled follower needs the root only to notice a seal that happened since
-// it last read one, and a seal cannot happen before the delta it is waiting for
-// is even committed. Re-reading on every tick therefore doubles the request
-// count of an idle follower to learn nothing.
-const rootRecheckEvery = 8
-
-// position is where a follower has reached: a delta, and how many of that
-// delta's groups it has already consumed.
-type position struct {
-	delta uint64
-	index int
-}
-
-// resumeOutcome says what resume decided about a delta it could not read.
-type resumeOutcome int
-
-const (
-	// resumeWaiting means the delta is genuinely not committed yet, so the
-	// follower should poll.
-	resumeWaiting resumeOutcome = iota
-	// resumeAdvanced means the delta had been sealed away; its groups were
-	// served from the sealed run and the position moved past it.
-	resumeAdvanced
-	// resumeStopped means the consumer broke out of the loop.
-	resumeStopped
-)
-
-// resume reports where a follower should continue when a delta is absent.
-//
-// Sealing deletes the deltas it folds up, so a cursor taken before a seal names
-// an object that no longer exists — and a follower resuming from a persisted
-// cursor would otherwise wait for it forever. The groups are not lost, only
-// moved, so they are served from the sealed run instead and the position jumps
-// past it.
-//
-// The cached root usually settles this without a request: a Reader opens with
-// the root already loaded, so a delta below OpenFrom is known sealed. Only a
-// seal that happened since needs a re-read, which is why that is rationed by
-// rootRecheckEvery rather than done on every tick.
-//
-// The cursor handed out during a replay points after the whole run rather than
-// after each group: a sealed manifest does not record which delta each of its
-// groups came from. A consumer that stops mid-run and resumes will see the run
-// again, which is within the at-least-once contract Follow already carries.
-func (r *Reader) resume(
-	ctx context.Context,
-	at position,
-	misses int,
-	yield func(Update, error) bool,
-) (position, resumeOutcome, error) {
-	root := r.rootManifest()
-
-	if at.delta >= root.OpenFrom && (misses == 0 || misses%rootRecheckEvery == 0) {
-		if err := r.Refresh(ctx); err != nil {
-			return at, resumeWaiting, err
-		}
-		root = r.rootManifest()
-	}
-
-	if at.delta >= root.OpenFrom {
-		// Still in the open region, so it really has not been committed yet.
-		return at, resumeWaiting, nil
-	}
-
-	ref, ok := sealedCovering(root, at.delta)
-	if !ok {
-		// Below the open region but in no sealed run — nothing can serve it,
-		// so resume at the first delta that still exists.
-		return position{delta: root.OpenFrom}, resumeAdvanced, nil
-	}
-
-	sealed, err := r.sealed(ctx, ref)
-	if err != nil {
-		return at, resumeWaiting, err
-	}
-
-	cursor := Cursor{delta: ref.LastDelta + 1}
-	for _, group := range sealed.Groups {
-		if !yield(Update{GroupInfo: group, Cursor: cursor}, nil) {
-			return at, resumeStopped, nil
-		}
-	}
-
-	return position{delta: ref.LastDelta + 1}, resumeAdvanced, nil
+	return &Scanner{r: r, root: root}, nil
 }
 
 // sealedCovering returns the sealed run holding a delta number, if any.
@@ -493,27 +286,37 @@ func emptyGroups(func(GroupInfo, error) bool) {}
 // what makes correlated replay — video alongside the sensor readings recorded
 // with it — possible at all. For seeking within one track, use
 // [Reader.SeekMedia], which is exact and immune to clock skew.
+//
+// For streaming forward from the result, use a [Scanner] instead.
 func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupInfo, error) {
 	timescale := r.rootManifest().Timescale
 
-	return r.seek(ctx, unixNano,
+	g, _, _, _, err := r.seek(ctx, r.rootManifest(), unixNano,
 		func(g GroupInfo) (int64, bool) { return g.Wallclock, g.hasWallclock() },
 		func(g GroupInfo) (int64, bool) { return g.wallclockEnd(timescale) },
 		func(ref sealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
 	)
+	return g, err
 }
 
 // SeekMedia returns the group anchored at or before a media timestamp, in the
 // track's timescale units.
+//
+// For streaming forward from the result, use a [Scanner] instead.
 func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, error) {
-	return r.seek(ctx, mediaTime,
+	g, _, _, _, err := r.seek(ctx, r.rootManifest(), mediaTime,
 		func(g GroupInfo) (int64, bool) { return g.MediaTime, true },
 		func(g GroupInfo) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
 		func(ref sealedRef) (int64, bool) { return ref.MediaStart, true },
 	)
+	return g, err
 }
 
-// seek returns the last group anchored at or before target.
+// seek returns the last group anchored at or before target, and where it lives:
+// the segment slice it came from, its index within that segment, and the delta
+// number to resume at once the segment is drained. A [Scanner] uses the
+// location to position itself without a second fetch; [Reader.SeekMedia] and
+// [Reader.SeekWallclock] discard it.
 //
 // It resolves against anchors rather than testing containment, which is both
 // what a player wants — land on or before the target and decode forward — and
@@ -529,27 +332,31 @@ func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, err
 // recent one wins.
 //
 // The open region is bounded by the seal threshold, so scanning it is bounded
-// too.
+// too. seek runs against the root it is given, so a [Scanner] passes its own
+// snapshot and avoids a resolve-versus-position race.
 func (r *Reader) seek(
 	ctx context.Context,
+	root rootManifest,
 	target int64,
 	anchor func(GroupInfo) (int64, bool),
 	end func(GroupInfo) (int64, bool),
 	start func(sealedRef) (int64, bool),
-) (GroupInfo, error) {
-	root := r.rootManifest()
-
+) (GroupInfo, []GroupInfo, int, uint64, error) {
 	var (
 		best     GroupInfo
 		bestAt   int64
+		bestSeg  []GroupInfo
+		bestIdx  int
+		bestNext uint64
 		found    bool
-		consider = func(group GroupInfo) {
+		consider = func(seg []GroupInfo, i int, after uint64) {
+			group := seg[i]
 			at, ok := anchor(group)
 			if !ok || at > target {
 				return
 			}
 			if !found || at >= bestAt {
-				best, bestAt, found = group, at, true
+				best, bestAt, bestSeg, bestIdx, bestNext, found = group, at, seg, i, after, true
 			}
 		}
 	)
@@ -560,10 +367,10 @@ func (r *Reader) seek(
 			break
 		}
 		if err != nil {
-			return GroupInfo{}, err
+			return GroupInfo{}, nil, 0, 0, err
 		}
-		for _, group := range delta.Groups {
-			consider(group)
+		for i := range delta.Groups {
+			consider(delta.Groups, i, n+1)
 		}
 	}
 
@@ -580,21 +387,60 @@ func (r *Reader) seek(
 
 		sealed, err := r.sealed(ctx, ref)
 		if err != nil {
-			return GroupInfo{}, err
+			return GroupInfo{}, nil, 0, 0, err
 		}
-		for _, group := range sealed.Groups {
-			consider(group)
+		for j := range sealed.Groups {
+			consider(sealed.Groups, j, ref.LastDelta+1)
 		}
 	}
 
 	if !found {
-		return GroupInfo{}, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrGroupNotFound, r.track, target)
+		return GroupInfo{}, nil, 0, 0, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrGroupNotFound, r.track, target)
 	}
 	if at, ok := end(best); ok && target >= at {
-		return GroupInfo{}, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrGroupNotFound, target, best.GroupRef, r.track)
+		return GroupInfo{}, nil, 0, 0, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrGroupNotFound, target, best.GroupRef, r.track)
 	}
 
-	return best, nil
+	return best, bestSeg, bestIdx, bestNext, nil
+}
+
+// locateAfter finds the first committed group strictly after ref — the resume
+// point for a [Scanner] positioned past a recorded [GroupRef]. It returns the
+// segment the group lives in, its index within it, and the delta number to
+// resume at once that segment is drained. When nothing follows ref it returns a
+// nil segment with next set to the tip, so the caller parks at the end.
+func (r *Reader) locateAfter(ctx context.Context, root rootManifest, ref GroupRef) (seg []GroupInfo, idx int, next uint64, err error) {
+	for _, sref := range root.Sealed {
+		// A run whose last group does not exceed ref holds nothing after it.
+		if !ref.Before(sref.Last) {
+			continue
+		}
+		sealed, err := r.sealed(ctx, sref)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		for i, g := range sealed.Groups {
+			if ref.Before(g.GroupRef) {
+				return sealed.Groups, i, sref.LastDelta + 1, nil
+			}
+		}
+	}
+
+	for n := root.OpenFrom; ; n++ {
+		delta, err := r.delta(ctx, n)
+		if errors.Is(err, ErrNotCommitted) {
+			// Nothing follows ref; park at the tip.
+			return nil, 0, n, nil
+		}
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		for i, g := range delta.Groups {
+			if ref.Before(g.GroupRef) {
+				return delta.Groups, i, n + 1, nil
+			}
+		}
+	}
 }
 
 func fetchRoot(ctx context.Context, objects store.Store, track TrackPath) (rootManifest, store.Version, error) {

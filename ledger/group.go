@@ -3,6 +3,8 @@ package ledger
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // GroupRef identifies a group within a track.
@@ -35,6 +37,41 @@ func (r GroupRef) Before(other GroupRef) bool {
 	}
 
 	return r.Sequence < other.Sequence
+}
+
+// ParseGroupRef parses the "e<epoch>-g<sequence>" form produced by
+// [GroupRef.String], so a consumer can persist a position with String and resume
+// with ParseGroupRef. Both the zero-padded form ("e000001-g00000042") and an
+// unpadded one ("e1-g42") are accepted; the empty string is the zero GroupRef.
+//
+// It is a free function rather than an encoding.TextUnmarshaler method on
+// purpose: GroupInfo embeds GroupRef, and a TextMarshaler/TextUnmarshaler there
+// would make encoding/json serialize every manifest row as a string and corrupt
+// the wire format.
+func ParseGroupRef(s string) (GroupRef, error) {
+	if s == "" {
+		return GroupRef{}, nil
+	}
+
+	epochText, ok := strings.CutPrefix(s, "e")
+	if !ok {
+		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: missing epoch", s)
+	}
+	epochText, seqText, ok := strings.Cut(epochText, "-g")
+	if !ok {
+		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: missing sequence", s)
+	}
+
+	epoch, err := strconv.ParseUint(epochText, 10, 64)
+	if err != nil {
+		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: %w", s, err)
+	}
+	sequence, err := strconv.ParseUint(seqText, 10, 64)
+	if err != nil {
+		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: %w", s, err)
+	}
+
+	return GroupRef{Epoch: epoch, Sequence: sequence}, nil
 }
 
 // GroupInfo is a group's manifest row: everything a reader needs to decide

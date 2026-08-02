@@ -1,10 +1,13 @@
 // Package ledger stores and replays temporal data — video, audio, logs, and
 // sensor readings — as immutable objects described by manifest objects.
 //
-// [Track] is the entry point: it references one track in a store, and a
-// [Writer] or [Reader] is built from it.
+// A track is opened with [Create] for a new track or [Open] for an existing
+// one, after the fashion of [os.Create] and [os.Open]. Both return a [Track],
+// from which a [Writer] or [Reader] is built.
 //
-//	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
+//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+//		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+//	}, ledger.Config{})
 //
 // The design borrows the append-only ordered log from Kafka and the
 // independently-decodable segment from HLS, then keeps the two ideas separate:
@@ -90,8 +93,38 @@
 //
 // This package does not compute media time. Extracting it means parsing a
 // transport's wire format, and the core deliberately depends on no transport.
-// Callers supply a fully populated [GroupInfo]; adapters such as a Media over
-// QUIC ingest are where frame parsing belongs.
+// [Writer.Append] derives the values a sequential producer does not track by
+// hand — sequence, media time, wallclock — from a duration, while
+// [Writer.AppendGroup] takes a fully populated [GroupInfo] for the cases that
+// need the producer's own numbering or a non-contiguous timeline. Adapters such
+// as a Media over QUIC ingest are where frame parsing belongs.
+//
+// # Reading a track
+//
+// A [Reader] is stateless and safe for concurrent use. Its range methods answer
+// a bounded query as a snapshot: [Reader.RangeMedia] and [Reader.RangeWallclock]
+// iterate the groups overlapping a window, and [Reader.SeekMedia] and
+// [Reader.SeekWallclock] resolve a single instant to the group anchored at or
+// before it. Each fetches only the sealed runs that can contribute.
+//
+// Open-ended streaming — seek and play forward, or tail new groups — is a
+// positioned [Scanner], in the shape of [bufio.Scanner] and [database/sql.Rows]:
+//
+//	sc, _ := reader.NewScanner(ctx)
+//	sc.SeekStart()
+//	for {
+//		group, err := sc.Next(ctx)
+//		if errors.Is(err, io.EOF) {
+//			// caught up for now; wait, then call Next again
+//		}
+//		// handle group
+//	}
+//
+// [Scanner.Next] is non-blocking and returns [io.EOF] at the current tip, so
+// tailing is a poll loop the caller owns — object stores do not push, and the
+// latency strategy (interval, signal, hybrid) is a deployment decision.
+// [Scanner.Position] returns the [GroupRef] to resume from, and [ParseGroupRef]
+// round-trips its text form across a restart.
 //
 // # Reading without the ledger
 //

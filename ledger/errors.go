@@ -3,10 +3,6 @@ package ledger
 import "errors"
 
 var (
-	// ErrNoStore reports a Track whose store was not set — the one argument
-	// [NewTrack] cannot default and every operation needs.
-	ErrNoStore = errors.New("ledger: track has no store")
-
 	// ErrTrackExists reports that a track already has a root manifest.
 	ErrTrackExists = errors.New("ledger: track already exists")
 

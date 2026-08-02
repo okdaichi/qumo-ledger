@@ -1,6 +1,8 @@
 package ledger
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -126,14 +128,13 @@ type TrackMeta struct {
 	Epoch uint64
 }
 
-// Config carries the deployment-level settings for a [Track]. The zero value is
+// Config carries the deployment-level settings for a track. The zero value is
 // usable: every field means a documented default when left zero, so the common
-// case is [NewTrack] with an empty [Config].
+// case is [Create] or [Open] with an empty [Config].
 //
 // These belong to a deployment rather than to one track — a logger or a clock
 // is the same for every track a process holds — which is why they live on the
-// handle rather than on each [Track.Create], [Track.Writer] or [Track.Reader]
-// call.
+// handle rather than on each [Track.Writer] or [Track.Reader] call.
 type Config struct {
 	// SealThreshold is how many bytes of open manifest accumulate before the
 	// open region is rotated into a sealed manifest. Zero means
@@ -150,21 +151,18 @@ type Config struct {
 }
 
 // Track is a reference to one track in a store — the handle a [Writer] or
-// [Reader] is built from. A track, like a table in a database, is a persistent
-// named thing whose schema is fixed at creation: you do not open one to use it,
-// you hold a reference and call its methods.
+// [Reader] is built from. A track is a persistent, named thing whose schema is
+// fixed at creation; you do not open one to use it, you hold a reference and
+// call its methods.
 //
-// Build one with [NewTrack]:
+// Obtain one with [Create] for a new track (which fixes its schema, like
+// [os.Create]) or [Open] for an existing one (like [os.Open]):
 //
-//	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
+//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+//		Timescale: 90000, TimeSource: ledger.TimeSourceFrame, MIME: "video/mp4",
+//	}, ledger.Config{})
 //	writer, _ := track.Writer(ctx)
 //	reader, _ := track.Reader(ctx)
-//
-// [Track.Create] is the one-time act of establishing a new track — the
-// equivalent of CREATE TABLE, which sets the track's schema — and returns a
-// [Writer] at its start. To append to or read an existing track, hold a Track
-// from [NewTrack] and call [Track.Writer] or [Track.Reader]; there is no
-// separate open step.
 //
 // A Track holds no resources and needs no closing. It is safe for concurrent
 // use, but must not be modified once a Writer or Reader has been built from it.
@@ -175,22 +173,19 @@ type Track struct {
 	sealThreshold int64
 	clock         func() time.Time
 	logger        *slog.Logger
+
+	// root is the manifest loaded by Create or Open. A Writer starts from it
+	// (and advances it as it seals); a Reader loads a fresh copy of its own so
+	// it sees the current state.
+	root        rootManifest
+	rootVersion store.Version
 }
 
-// NewTrack returns a reference to path within store, configured by cfg.
-//
-// It does no I/O and never fails: a Track is a reference, not an open. A track
-// that does not yet exist is discovered when [Track.Create], [Track.Writer], or
-// [Track.Reader] reaches the store, so constructing a Track for a track that may
-// or may not exist costs nothing.
-//
-// The zero-value fields of cfg are resolved to their defaults here, so a Track
-// always carries usable settings.
-func NewTrack(store store.Store, path TrackPath, cfg Config) *Track {
-	t := &Track{
-		store: store,
-		path:  path,
-	}
+// resolveConfig builds a Track carrying store, path, and the deployment settings
+// from cfg with zero values resolved to their defaults. The root is loaded
+// separately by [Create] and [Open].
+func resolveConfig(s store.Store, path TrackPath, cfg Config) *Track {
+	t := &Track{store: s, path: path}
 
 	t.sealThreshold = cfg.SealThreshold
 	if t.sealThreshold <= 0 {
@@ -210,12 +205,71 @@ func NewTrack(store store.Store, path TrackPath, cfg Config) *Track {
 	return t
 }
 
-// check reports whether the track is usable. Returning an error rather than
-// letting a nil store panic keeps the common mistake legible.
-func (t *Track) check() error {
-	if t.store == nil {
-		return ErrNoStore
+// Create establishes a new track, like [os.Create]: it writes the root manifest
+// that fixes the track's schema — Timescale, TimeSource, MIME, Encoding — and
+// returns a reference to it. The schema is then immutable.
+//
+// A track is an immutable, append-only log rather than a writable file, so
+// where os.Create truncates an existing file, Create refuses one: it returns
+// [ErrTrackExists] if the track already has a root manifest.
+func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackConfig, cfg Config) (*Track, error) {
+	if err := path.validate(); err != nil {
+		return nil, err
+	}
+	if err := schema.validate(); err != nil {
+		return nil, err
 	}
 
-	return nil
+	t := resolveConfig(s, path, cfg)
+
+	root := rootManifest{
+		Version:    manifestVersion,
+		Track:      path,
+		Timescale:  schema.Timescale,
+		TimeSource: schema.TimeSource,
+		MIME:       schema.MIME,
+		Encoding:   schema.Encoding,
+		Epoch:      1,
+		OpenFrom:   0,
+		CreatedAt:  t.clock().UnixNano(),
+	}
+
+	data, err := encodeManifest(root)
+	if err != nil {
+		return nil, err
+	}
+
+	version, err := s.Create(ctx, rootKey(path), data)
+	if err != nil {
+		if errors.Is(err, store.ErrExist) {
+			return nil, fmt.Errorf("%w: %s", ErrTrackExists, path)
+		}
+		return nil, fmt.Errorf("ledger: create track %s: %w", path, err)
+	}
+
+	t.root, t.rootVersion = root, version
+	return t, nil
+}
+
+// Open references an existing track, like [os.Open]: it reads the root manifest
+// and returns a reference, failing with [ErrTrackNotFound] if the track does not
+// exist.
+//
+// Unlike [os.Open], the returned [Track] is both read- and write-capable: a
+// writer that crashed mid-append resumes through Open(...).Writer(), and any
+// Track reads through [Track.Reader].
+func Open(ctx context.Context, s store.Store, path TrackPath, cfg Config) (*Track, error) {
+	if err := path.validate(); err != nil {
+		return nil, err
+	}
+
+	t := resolveConfig(s, path, cfg)
+
+	root, version, err := fetchRoot(ctx, s, path)
+	if err != nil {
+		return nil, err
+	}
+
+	t.root, t.rootVersion = root, version
+	return t, nil
 }
