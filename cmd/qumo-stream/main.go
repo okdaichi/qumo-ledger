@@ -62,12 +62,12 @@ func run(args []string) error {
 		opts.InitSegment = stream.InitSegment{Bytes: bytes}
 	}
 
-	server, err := stream.NewServer(opened, opts)
+	handler, err := stream.NewHandler(opened, opts)
 	if err != nil {
 		return err
 	}
 
-	httpServer := &http.Server{Addr: *addr, Handler: server}
+	httpServer := &http.Server{Addr: *addr, Handler: handler}
 	go func() {
 		<-ctx.Done()
 		// not actionable: Shutdown's error only reports a closed listener, and

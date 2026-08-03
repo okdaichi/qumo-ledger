@@ -39,7 +39,7 @@ func (ProxyResolver) ResolveSegment(context.Context, ledger.GroupInfo) (string, 
 // [ledger.GroupInfo.ObjectKey] — the object key — with no cloud SDK imported
 // here and no method added to the store:
 //
-//	server, _ := stream.NewServer(track, stream.Options{
+//	h, _ := stream.NewHandler(track, stream.Options{
 //	    Resolver: stream.RedirectResolver(func(g ledger.GroupInfo) string {
 //	        return presigner.GetSignedURL(g.ObjectKey)
 //	    }),

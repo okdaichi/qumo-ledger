@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
   `@d`; a new producer epoch is an HLS `EXT-X-DISCONTINUITY` and a DASH timeline
   reset; a wallclock anchor is `EXT-X-PROGRAM-DATE-TIME` and the MPD
-  `availabilityStartTime`. A `Server` is an `http.Handler` over one `*Track` that
+  `availabilityStartTime`. A `Handler` is an `http.Handler` over one `*Track` that
   serves an EVENT playlist (`.m3u8`) and a dynamic MPD (`.mpd`), both reflecting
   the whole track and growing as groups land. Segments are addressed by their
   `GroupID`, so a single segment handler serves both formats.
