@@ -1,0 +1,86 @@
+name: "Format & Design Discussion"
+description: "Discuss the storage format, API, and design decisions"
+title: "[DESIGN] "
+labels: ["type:discussion", "status:triage", "area:format"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Welcome to format and design discussions.
+
+  - type: textarea
+    id: topic
+    attributes:
+      label: "Discussion Topic"
+      description: "What format or design topic do you want to discuss?"
+      placeholder: |
+        Example) How should a future manifest version migrate existing tracks?
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: "Current Spec/Implementation"
+      description: "Describe the current specification or implementation"
+      placeholder: |
+        Example) The relevant section of docs/ARCHITECTURE.md, or the current code path
+    validations:
+      required: true
+
+  - type: textarea
+    id: question_proposal
+    attributes:
+      label: "Question/Proposal"
+      description: "Your question or improvement proposal"
+      placeholder: |
+        Example) Is this approach feasible while keeping existing tracks readable?
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: "References"
+      description: "Links to the architecture doc, CHANGELOG, specs, or prior art"
+      placeholder: |
+        - [ARCHITECTURE.md](https://github.com/okdaichi/qumo-ledger/blob/main/docs/ARCHITECTURE.md)
+        - [CHANGELOG.md](https://github.com/okdaichi/qumo-ledger/blob/main/CHANGELOG.md)
+    validations:
+      required: false
+
+  - type: textarea
+    id: implications
+    attributes:
+      label: "Implementation Implications"
+      description: "How this affects implementation or compatibility"
+      placeholder: |
+        - Compatibility impact (on-disk format, public API)
+        - Performance implications
+        - Impact on other components
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: tags
+    attributes:
+      label: "Related Areas"
+      options:
+        - label: "Storage Format"
+        - label: "Readers / Writers"
+        - label: "HLS / DASH Rendering"
+        - label: "Store Backends"
+        - label: "Concurrency / Recovery"
+        - label: "Time (media / wallclock)"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist"
+      options:
+        - label: "I have read the relevant docs"
+          required: true
+        - label: "I checked existing discussions"
+          required: false

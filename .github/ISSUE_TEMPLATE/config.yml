@@ -1,0 +1,12 @@
+contact_links:
+  - name: "💬 Questions"
+    url: https://github.com/okdaichi/qumo-ledger/discussions
+    about: "Use Discussions for implementation and usage questions"
+
+  - name: "📚 Documentation"
+    url: https://github.com/okdaichi/qumo-ledger/blob/main/docs/ARCHITECTURE.md
+    about: "Project documentation"
+
+  - name: "🔐 Security Report"
+    url: https://github.com/okdaichi/qumo-ledger/security/advisories
+    about: "Report security vulnerabilities directly"
