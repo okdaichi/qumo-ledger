@@ -1,8 +1,7 @@
-// Command qumo-stream serves a ledger track over HTTP as HLS and DASH.
-//
-// It is a convenience, like qumo-ledger: it wires the public stream package to a
-// local filesystem store and the standard library's HTTP server, and nothing in
-// the storage or serving format depends on it existing.
+// Example stream-server serves a ledger track over HTTP as HLS and DASH, wiring
+// the public stream package to a local filesystem store and the standard
+// library's HTTP server. It is a development example — no auth, no TLS, proxy
+// delivery only — not a production server.
 package main
 
 import (
@@ -21,13 +20,13 @@ import (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "qumo-stream:", err)
+		fmt.Fprintln(os.Stderr, "stream-server:", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("qumo-stream", flag.ExitOnError)
+	flags := flag.NewFlagSet("stream-server", flag.ExitOnError)
 	root := flags.String("root", ".", "storage root directory")
 	track := flags.String("track", "", "track path, for example live/cam1/video")
 	addr := flags.String("addr", ":8080", "listen address")

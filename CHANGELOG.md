@@ -32,8 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point-lookup a serving layer needs — to proxy a segment and to sign its URL —
   and it does not advance the streaming cursor.
 
-- **cmd/qumo-stream:** serves a track over HTTP as HLS and DASH from a local
-  filesystem store.
+### Changed
+
+- The `cmd/qumo-ledger` and `cmd/qumo-stream` binaries were demoted to runnable
+  examples under `examples/` (`inspect-follow`, `stream-server`): reference code,
+  not supported entrypoints. The repository no longer builds or ships binaries
+  (`mage build` now compiles every package), and a client CLI for accessing a
+  ledger will live in a separate repository.
 
 ## [0.1.0] - unreleased
 

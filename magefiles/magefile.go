@@ -8,16 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
-	"time"
 
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
 )
-
-const versionPkg = "github.com/okdaichi/qumo-ledger/internal/version"
 
 // Default is the target run when none is given.
 var Default = Help
@@ -26,7 +20,7 @@ var Default = Help
 func Help() {
 	fmt.Print(`qumo-ledger targets
 
-  build     build bin/qumo-ledger
+  build     compile every package (the repo ships no binaries)
   test      run the test suite with the race detector
   cover     run tests and write coverage.out
   lint      run go vet and, if installed, golangci-lint
@@ -36,14 +30,11 @@ func Help() {
 `)
 }
 
-// Build compiles the CLI into bin/.
+// Build compiles every package as a smoke check. qumo-ledger is a library: it
+// ships no binaries, so there is nothing to link into bin/. Runnable examples
+// live under examples/ and are run with `go run ./examples/<name>`.
 func Build() error {
-	name := "qumo-ledger"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-
-	return sh.RunV("go", "build", "-ldflags", versionLDFlags(), "-o", filepath.Join("bin", name), "./cmd/qumo-ledger")
+	return sh.RunV("go", "build", "./...")
 }
 
 // Test runs the suite under the race detector.
@@ -90,37 +81,5 @@ func Check() {
 
 // Clean removes build artifacts.
 func Clean() error {
-	for _, path := range []string{"bin", "coverage.out"} {
-		if err := os.RemoveAll(path); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func versionLDFlags() string {
-	return strings.Join([]string{
-		"-s", "-w",
-		"-X", versionPkg + ".version=" + gitDescribe(),
-		"-X", versionPkg + ".commit=" + gitCommit(),
-		"-X", versionPkg + ".date=" + time.Now().UTC().Format(time.RFC3339),
-	}, " ")
-}
-
-func gitDescribe() string {
-	return gitOutput("dev", "describe", "--tags", "--always", "--dirty")
-}
-
-func gitCommit() string {
-	return gitOutput("none", "rev-parse", "--short", "HEAD")
-}
-
-func gitOutput(fallback string, args ...string) string {
-	out, err := exec.Command("git", args...).Output()
-	if err != nil {
-		return fallback
-	}
-
-	return strings.TrimSpace(string(out))
+	return os.RemoveAll("coverage.out")
 }

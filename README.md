@@ -130,18 +130,17 @@ Writing a delta manifest *is* the commit. `head` is a discovery cache that may
 lag or vanish without affecting correctness — a reader that finds it stale
 probes forward and catches up.
 
-## CLI
+## Examples
+
+This repository is a library and ships no binaries. Two runnable examples live
+under `examples/` — reference code, not supported tools:
 
 ```bash
-mage build
-
-./bin/qumo-ledger inspect -root /var/lib/qumo-ledger -track live/cam1/video -groups
-./bin/qumo-ledger follow  -root /var/lib/qumo-ledger -track live/cam1/video
-./bin/qumo-stream    -root /var/lib/qumo-ledger -track live/cam1/video   # HLS (.m3u8) + DASH (.mpd)
+go run ./examples/inspect-follow inspect -root /var/lib/qumo-ledger -track live/cam1/video -groups
+go run ./examples/stream-server    -root /var/lib/qumo-ledger -track live/cam1/video   # HLS (.m3u8) + DASH (.mpd)
 ```
 
-The CLI is a convenience, not a component: it uses the same public API any
-reader would.
+A supported client CLI for accessing a ledger lives in a separate repository.
 
 ## Packages
 
@@ -153,6 +152,7 @@ reader would.
 | `ledger/store/fsstore` | Local filesystem backend. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
 | `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
+| `examples/` | Runnable examples (a reference reader; a dev HLS/DASH server). Not supported entrypoints. |
 
 ## Development
 
