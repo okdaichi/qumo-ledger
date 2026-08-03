@@ -1,10 +1,13 @@
 // Package ledger stores and replays temporal data — video, audio, logs, and
 // sensor readings — as immutable objects described by manifest objects.
 //
-// [Track] is the entry point: it references one track in a store, and a
-// [Writer] or [Reader] is built from it.
+// A track is opened with [Create] for a new track or [Open] for an existing
+// one, after the fashion of [os.Create] and [os.Open]. Both return a [Track],
+// from which a [Writer] or [Reader] is built.
 //
-//	track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{})
+//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
+//		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+//	}, ledger.Config{})
 //
 // The design borrows the append-only ordered log from Kafka and the
 // independently-decodable segment from HLS, then keeps the two ideas separate:
@@ -24,11 +27,12 @@
 //
 // There is no embedded database. Everything durable is an object:
 //
-//	<track>/root.manifest              track metadata: timescale, encoding, epoch
-//	<track>/delta/head                 pointer to the newest committed delta
-//	<track>/delta/open/00000042.manifest
-//	<track>/delta/sealed-00000001.manifest
-//	<track>/groups/e000001-g00000042   payload
+//	<track>/root.manifest              track root: schema, latest epoch
+//	<track>/e000001/log.manifest       an epoch's log root: sealed index, open region
+//	<track>/e000001/delta/head         pointer to the newest committed delta
+//	<track>/e000001/delta/open/00000042.manifest
+//	<track>/e000001/delta/sealed-00000001.manifest
+//	<track>/e000001/groups/g00000042   payload
 //
 // Every object above is immutable except head. Writes are therefore conditional
 // creates, which makes a duplicate append fail cleanly instead of corrupting,
@@ -50,17 +54,19 @@
 //
 // # Two addressing regimes
 //
-// Delta manifests are numbered by the ledger and are contiguous, so a reader
-// tails them arithmetically: hold N, request N+1, treat absence as "not yet".
-// No listing is required, which matters because listing is the most expensive
-// and least consistent operation object stores offer.
+// Delta manifests are numbered by the ledger and are contiguous within an epoch,
+// so a reader tails them arithmetically: hold N, request N+1, treat absence as
+// "not yet". No listing is required, which matters because listing is the most
+// expensive and least consistent operation object stores offer.
 //
 // Group sequences are assigned by the producer and are *not* contiguous. Groups
 // are legitimately dropped under congestion, so gaps are real data rather than
-// corruption, and a producer restart resets the sequence — which is what Epoch
-// disambiguates. Preserving the producer's numbering is deliberate: a relay
-// serving the same track live uses those sequence numbers, and a client can
-// only align live playback with replay if both agree on what group 42 is.
+// corruption, and a producer restart resets the sequence. The epoch that
+// disambiguates restarts is packed with the sequence into a single [GroupID],
+// so identity is one number — and numeric order is commit order across the whole
+// track. Preserving the producer's numbering is deliberate: a relay serving the
+// same track live uses those sequence numbers, and a client can only align live
+// playback with replay if both agree on what group 42 is.
 //
 // So: probe forward through manifests, but never derive a Group key. Read it
 // from the manifest.
@@ -90,8 +96,40 @@
 //
 // This package does not compute media time. Extracting it means parsing a
 // transport's wire format, and the core deliberately depends on no transport.
-// Callers supply a fully populated [GroupInfo]; adapters such as a Media over
-// QUIC ingest are where frame parsing belongs.
+// [Writer.Append] derives the values a sequential producer does not track by
+// hand — sequence, media time, wallclock — from a duration, while
+// [Writer.AppendGroup] takes a fully populated [GroupInfo] for the cases that
+// need the producer's own numbering or a non-contiguous timeline. Adapters such
+// as a Media over QUIC ingest are where frame parsing belongs.
+//
+// # Reading a track
+//
+// A [Reader] is one single-consumer handle that reads a track two ways.
+//
+// Bounded queries answer a snapshot: [Reader.RangeMedia] and
+// [Reader.RangeWallclock] iterate the groups overlapping a window, and
+// [Reader.SeekMedia] and [Reader.SeekWallclock] resolve a single instant to the
+// group anchored at or before it. Each fetches only the sealed runs that can
+// contribute.
+//
+// Open-ended streaming — seek and play forward, or tail new groups — uses the
+// Reader's cursor, in the shape of [bufio.Scanner] and [database/sql.Rows]:
+//
+//	reader.SeekStart()
+//	for {
+//		group, err := reader.Next(ctx)
+//		if errors.Is(err, io.EOF) {
+//			// caught up for now; wait, then call Next again
+//		}
+//		// handle group
+//	}
+//
+// [Reader.Next] is non-blocking and returns [io.EOF] at the current tip, so
+// tailing is a poll loop the caller owns — object stores do not push, and the
+// latency strategy (interval, signal, hybrid) is a deployment decision.
+// [Reader.Position] returns the [GroupID] to resume from, and [ParseGroupID]
+// round-trips its text form across a restart. Concurrent consumers each open
+// their own Reader, which costs one root fetch.
 //
 // # Reading without the ledger
 //

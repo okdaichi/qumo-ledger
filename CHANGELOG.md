@@ -22,14 +22,22 @@ once: the unit of independent decoding *and* the unit of storage.
 
 ### Added
 
-- **ledger:** `Track` is the entry point. `ledger.NewTrack(store, path, cfg)`
-  returns an opaque handle to one track in a store — like a table in a database,
-  a persistent named thing you reference rather than open — and `Writer` and
-  `Reader` are built from it. `Track.Create` is the one-time act of establishing
-  a track (the schema: timescale, MIME, encoding); `Track.Writer` and
-  `Track.Reader` use an existing track with no separate open step. Settings that
-  belong to a deployment rather than a track — a logger, a clock, the seal
-  threshold — are passed in `Config`, whose zero value is usable.
+- **ledger:** `Create` and `Open` are the entry points, after `os.Create` and
+  `os.Open`. `Create` establishes a new track by writing the root manifest that
+  fixes its `TrackSchema` (timescale, time source, MIME, encoding) and returns an
+  opaque `*Track`; `Open` references an existing one. `Writer` and `Reader` are
+  built from that handle. Where `os.Create` truncates an existing file, `Create`
+  refuses one (`ErrTrackExists`) — a track is an immutable, append-only log — and
+  unlike `os.Open` the handle is both read- and write-capable, so a writer that
+  crashed mid-append resumes through `Open(...).Writer()`. Settings that belong
+  to a deployment rather than a track — a logger, a clock, the seal threshold —
+  are passed in `Config`, whose zero value is usable.
+
+- **ledger:** `TrackInfo` — what `Reader.Root` and `Writer.Root` return — embeds
+  the `TrackSchema` the track was created with and adds the track path and the
+  current epoch. Its fields promote, so `info.Timescale` reads directly, and the
+  schema is a value: `Create(ctx, objects, other, src.Root().TrackSchema, cfg)`
+  makes a second track with the first one's schema instead of restating it.
 
 - **ledger:** A group is *anchored* on two timelines rather than described as a
   closed interval, because groups are serial within an epoch — the start of one
@@ -53,31 +61,47 @@ once: the unit of independent decoding *and* the unit of storage.
   to the true tip. Consequently nothing at the manifest layer can be orphaned;
   only a group object can, which gives garbage collection exactly one job.
 
+- **ledger:** `Writer.Append(ctx, duration, payload)` is the common case —
+  groups committed back to back — deriving sequence, media time, and wallclock
+  from the duration alone. `Writer.AppendGroup` remains for a producer's own
+  numbering, a dropped group, or a media anchor that is not simply the previous
+  group's end, and takes a fully populated `GroupInfo`.
+
 - **ledger:** `AppendGroup` refuses a group that contradicts its predecessor —
-  one starting before the previous ended, or carrying an epoch behind the
-  track's (`ErrGroupOutOfOrder`). Gaps remain legal, since a dropped group is
-  real information rather than corruption.
+  one starting before the previous ended (`ErrGroupOutOfOrder`). Gaps remain
+  legal, since a dropped group is real information rather than corruption.
 
-- **ledger:** Group identity is `(Epoch, Sequence)`. Producers reset numbering
-  on restart, and because group objects are immutable a reused sequence would
-  collide rather than overwrite. The producer's own numbering is preserved
-  rather than renumbered, so clients can align replay against a relay serving
-  the same track live.
+- **ledger:** Group identity is a single `GroupID`, packing the producer epoch
+  and the producer's own sequence into one number, so numeric order is commit
+  order across the whole track. Producers reset numbering on restart, and
+  because group objects are immutable a reused sequence would collide rather
+  than overwrite; each producer lifetime is its own append-only log under
+  `<track>/e%06d/`, giving it a fresh keyspace. The producer's own numbering is
+  preserved rather than renumbered, so clients can align replay against a relay
+  serving the same track live. A writer opens at the track's latest epoch and
+  stamps it onto every append; a producer restart begins the next one through
+  `Writer.NewEpoch`. Epoch is never a number a caller passes.
 
-- **ledger:** `Reader` answers windows, not just instants: `RangeMedia`,
-  `RangeWallclock` and `GroupsFrom` iterate the groups overlapping a range,
-  fetching only the sealed runs that can contribute. `SeekMedia` and
-  `SeekWallclock` resolve to the group anchored at or before a target, so a seek
-  keeps working when a producer supplies no duration and reports honestly when
-  the target falls in a gap. Reads need object-store access and nothing else —
-  no ledger process has to be running anywhere. Manifests are verified against
-  the key they were fetched from, so a misfiled or swapped object is caught
-  rather than trusted.
+- **ledger:** `Reader` answers windows, not just instants: `RangeMedia` and
+  `RangeWallclock` iterate the groups overlapping a range, fetching only the
+  sealed runs that can contribute. `SeekMedia` and `SeekWallclock` resolve to
+  the group anchored at or before a target, so a seek keeps working when a
+  producer supplies no duration and reports honestly when the target falls in a
+  gap. Reads need object-store access and nothing else — no ledger process has
+  to be running anywhere. Manifests are verified against the key they were
+  fetched from, so a misfiled or swapped object is caught rather than trusted.
 
-- **ledger:** `Follow` tails a track by polling, since object stores do not
-  push, and yields each group with an opaque `Cursor` that resumes immediately
-  after it. The cursor marshals as text, so a follower survives a restart, and
-  it stays valid across a seal that reclaims the deltas it named.
+- **ledger:** The same `Reader` also streams a track's groups in commit order,
+  spanning every epoch as one ascending run of `GroupID`s, in the shape of
+  `bufio.Scanner` and `database/sql.Rows`: `SeekStart`, `SeekTip`, `SeekAfter`,
+  `SeekMedia`, and `SeekWallclock` position its cursor, and `Next` returns each
+  group and `io.EOF` at the current tip — stepping into a new epoch on its own
+  when the current one is drained. Tailing is a poll loop the caller owns
+  (object stores do not push), and `Position` returns the `GroupID` to resume
+  from — `ParseGroupID` round-trips its text form, so a follower survives a
+  restart and stays valid across a seal that reclaims the deltas it was reading.
+  A Reader is single-consumer; concurrent consumers each open their own, which
+  costs one root fetch.
 
 - **ledger/store:** The storage contract — conditional create (`ErrExist`) as
   the primitive everything rests on, compare-and-swap for the single mutable

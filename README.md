@@ -36,32 +36,38 @@ go get github.com/okdaichi/qumo-ledger
 ```go
 objects, _ := fsstore.New("/var/lib/qumo-ledger")
 
-// A Track references one track in a store. NewTrack binds the store and path,
-// and the empty Config is the common case — every setting has a documented
-// default. Settings belong to a deployment rather than a track, so they live
-// on the handle in one place rather than at every call.
-track := ledger.NewTrack(objects, "live/cam1/video", ledger.Config{Logger: log})
-
-// Create is the one-time act of establishing a track, like CREATE TABLE: it
-// fixes the schema and returns a Writer at the start.
-writer, _ := track.Create(ctx, ledger.TrackConfig{
+// Create establishes a new track, like os.Create: it fixes the schema once and
+// returns a handle. Re-creating an existing track fails rather than truncating
+// it — a track is an immutable, append-only log. The empty Config is the common
+// case: every setting has a documented default and belongs to a deployment, not
+// a track.
+track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
     Timescale:  90000,                  // 90 kHz, the usual video timescale
     TimeSource: ledger.TimeSourceFrame, // timestamps came from the data itself
     MIME:       "video/mp4",
     Encoding:   "fmp4",
-})
+}, ledger.Config{Logger: log})
 
-// A sealed group. Only MediaTime is required — Duration and Wallclock are optional.
+writer, _ := track.Writer(ctx)
+
+// Append is the common case: hand the ledger a duration and it derives
+// sequence, media time, and wallclock for you.
+writer.Append(ctx, 180000, payload) // two seconds at 90 kHz
+
+// AppendGroup is the escape hatch — a producer's own numbering, a dropped
+// group, or a media anchor that is not simply the previous group's end. The
+// writer stamps the epoch; advance it with Writer.NewEpoch on a restart.
 writer.AppendGroup(ctx, ledger.GroupInfo{
-    GroupRef:    ledger.GroupRef{Epoch: 1, Sequence: 42},
-    MediaTime:   7560000, // media anchor, in timescale units
-    Duration:    180000,  // optional: two seconds at 90 kHz
-    Wallclock:   w0,      // optional: wallclock anchor, Unix nanoseconds
-    ObjectCount: 60,
+    ID:        ledger.NewGroupID(0, 42), // sequence; the epoch is stamped by the writer
+    MediaTime: 7560000, // media anchor, in timescale units
+    Duration:  180000,  // optional: two seconds at 90 kHz
+    Wallclock: w0,      // optional: wallclock anchor, Unix nanoseconds
 }, payload)
 
-// Readers and further writers come from the same handle; there is no open step.
-reader, _ := track.Reader(ctx)
+// Open references an existing track, like os.Open. Unlike os.Open the handle is
+// both read- and write-capable, so a writer that crashed mid-append resumes here.
+opened, _ := ledger.Open(ctx, objects, "live/cam1/video", ledger.Config{Logger: log})
+reader, _ := opened.Reader(ctx)
 
 // A window, not a point. Run the same window over a video track and a sensor
 // track and the two recordings line up.
@@ -73,14 +79,26 @@ for group, err := range reader.RangeWallclock(ctx, from, to) {
     _ = frames
 }
 
-// Following is polling: object stores do not push. Each update carries the
-// cursor that resumes after it, so a follower can persist its position.
-tip, _ := reader.Tip(ctx)
-for update, err := range reader.Follow(ctx, tip, ledger.DefaultPollInterval) {
+// Following is polling, because object stores do not push — but the poll loop
+// is the caller's. The Reader streams the track in commit order and reports its
+// position, so a follower can persist it and resume.
+reader.SeekTip(ctx)
+ticker := time.NewTicker(ledger.DefaultPollInterval)
+defer ticker.Stop()
+for {
+    group, err := reader.Next(ctx)
+    if errors.Is(err, io.EOF) {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-ticker.C:
+            continue
+        }
+    }
     if err != nil {
         return err
     }
-    save(update.Cursor) // survives a restart: it marshals as text
+    save(reader.Position()) // survives a restart: it is the GroupID text
 }
 ```
 

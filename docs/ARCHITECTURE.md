@@ -17,14 +17,16 @@ This document records the decisions and, more importantly, why they were made.
 
 ```
 <track-path>/
-  root.manifest                 track metadata; changes only on seal or epoch change
-  delta/
-    head                        {delta, latest}  ← the only mutable object
-    open/00000042.manifest      immutable, one per commit
-    open/00000043.manifest
-    sealed-000001.manifest      immutable, rotated by size
-  groups/
-    e000001-g00000042           immutable payload
+  root.manifest                 track root: schema + latest epoch (near-immutable)
+  e000001/                      one producer lifetime
+    log.manifest                epoch's log root: sealed index, open region
+    delta/
+      head                      {delta, latest}  ← the only mutable object, per epoch
+      open/00000042.manifest    immutable, one per commit
+      sealed-00000001.manifest  immutable, rotated by size
+    groups/
+      g00000042                 immutable payload (sequence in the key)
+  e000002/                      the next producer lifetime, its own log
 ```
 
 ---
@@ -125,17 +127,33 @@ only by garbage collection.
 dropped under congestion, so a gap is real information rather than corruption.
 Readers must take a Group's key from `GroupInfo.ObjectKey` and never derive it.
 
-## 8. Group identity is `(Epoch, Sequence)`
+## 8. Group identity is a single `GroupID`
 
 **Why.** Sequence alone is not an identity: a producer that restarts resets its
 numbering, and because group objects are immutable a reused sequence would
-*collide* rather than overwrite — leaving the track wedged. `Epoch` gives each
-producer lifetime its own keyspace.
+*collide* rather than overwrite — leaving the track wedged. Epoch gives each
+producer lifetime its own keyspace, so it must be part of identity.
+
+But epoch is carried *inside one number*, not handled as a separate dimension. A
+`GroupID` packs the epoch into the high bits and the sequence into the low, so
+numeric order is commit order across the whole track: a reader streams one
+ascending run of IDs and epoch boundaries are invisible to it. Callers handle a
+single value; `GroupID.String` is the portable form for logs and persisted
+positions, and `ParseGroupID` recovers it.
 
 The producer's own sequence numbers are preserved rather than renumbered, and
 that is the whole point: a relay serving the same track live uses those numbers,
 and a client can only align live playback against replay if both agree on what
 group 42 is. Renumbering would break decision 2's contract with clients.
+
+**How an epoch advances.** Each producer lifetime is its own append-only log
+under `<track>/e%06d/`, so a reused sequence under a new epoch lands in a fresh
+keyspace rather than colliding. A writer opens at the track's latest epoch, and
+a producer restart is an explicit verb — `Writer.NewEpoch` — which creates the
+next log and switches the writer to it. Epoch is never a number a caller passes;
+it is the writer's lifetime, stamped onto every appended group. The track root
+is near-immutable as a result: it changes only when an epoch is created, never
+on a seal.
 
 ## 9. A group is anchored on two timelines, not described as an interval
 
@@ -172,8 +190,8 @@ no duration. `Duration` is consulted only to reject a target past a known end.
 
 **Why contradictions are rejected at append.** Values that can disagree with each
 other are the real cost of redundancy. Since groups are serial, `AppendGroup`
-refuses a group starting before its predecessor ended, or carrying an epoch
-behind the track's. Gaps stay legal — they are real data.
+refuses a group starting before its predecessor ended. Gaps stay legal — they
+are real data.
 
 **Note on provenance.** moq-lite draft-05 added a `Timestamp Delta` to `FRAME`,
 zigzag-encoded in the track's negotiated `Timescale`, with the first frame of a
@@ -216,47 +234,71 @@ them: a thousand tracks holding one 2 MB video group each is 2 GB of avoidable
 resident memory. A known length also means a single PUT and a freely retryable
 write.
 
-**Consequence.** Adapters layer the ergonomic API. A MoQT adapter accumulates
-frames, derives `MediaTime`/`Duration` from their timestamp deltas, and calls through.
+**Consequence.** The common case — groups committed back to back — is handled in
+core by `Append`, which derives sequence, media time, and wallclock from a
+duration alone. `AppendGroup` remains for a producer's own numbering, a gap, or a
+non-contiguous timeline, and it is what an adapter calls once it has parsed a
+transport: a MoQT adapter accumulates frames, derives `MediaTime`/`Duration` from
+their timestamp deltas, and passes the bytes through unchanged.
 
-## 12. The API entry point is a track, not a container
+## 12. The entry points are Create and Open, after os.Create and os.Open
 
-A `Track` is an opaque reference to one track in a store — built with
-`NewTrack(store, path, Config)` — and a `Writer` or `Reader` is derived from it.
-There is no container above it and no `Open` step.
+A track is reached through two free functions, mirroring `os.Create` and
+`os.Open`: `Create` establishes a new track by writing the root manifest that
+fixes its schema, and `Open` references an existing one. Both return an opaque
+`*Track`, from which a `Writer` or `Reader` is derived. There is no container
+type above a track.
+
+**Why os-style, not a single handle constructor.** Creation and use are different
+acts with different inputs. `Create` takes a `TrackSchema` — the schema, written
+once into the root and then immutable — while `Open` takes none, because a reader
+or a resuming writer needs only the schema the track already has. Folding them
+into one constructor would mean either inventing a schema for reads or carrying
+an "is this a create?" flag; the os split lets each path take exactly the
+arguments it needs.
+
+**Why the schema is its own type.** `TrackSchema` describes content and is fixed
+at creation; `Config` carries deployment settings — a logger, a clock, the seal
+threshold — that belong to a process. Two names rather than two "Config"s in one
+call. `TrackInfo` embeds the schema rather than restating it, so the read side
+has one definition of what a track *is*, and a schema can be handed straight back
+to `Create` to make a second track like the first. What `TrackInfo` adds beyond
+the schema is deliberately *not* creation input: `Track` comes from the path
+argument and `Epoch` is writer-assigned (decision 8), so neither belongs on a
+struct a caller fills in.
 
 **Why a reference, not a container.** A track is a persistent, named thing whose
-schema is fixed at creation — a database table, not a file you open. You do not
+schema is fixed at creation — a database table, not a file you own. You do not
 `OPEN` a table to query it; you hold a reference and act on it. Binding the path
 into the handle, rather than passing it to every call, also removes a class of
 mistake: you cannot wire a reader and a writer to different tracks by typo.
 
-**Why no open step.** Object stores have no open. The one piece of recovery a
-writer needs — probing forward to the true tip — is bounded by the seal
-threshold and cheap, so it folds into `Writer` rather than appearing as a
-separate verb. What looked like a create/open split collapses to: `Create`
-establishes a track once (its schema, like `CREATE TABLE`) and returns a writer
-at the start; `Writer` and `Reader` use an existing track. Constructing a `Track`
-does no I/O and never fails — a track that does not yet exist is discovered when
-`Create`, `Writer`, or `Reader` reaches the store.
+**Why Open is read- and write-capable.** Object stores have no open, but a writer
+that crashed mid-append still needs to reach the store to recover — probing
+forward to the true tip, which is bounded by the seal threshold and cheap. That
+recovery folds into `Writer` on an `Open`ed track, so one entry point serves both
+a fresh reader and a resuming writer. `Create` diverges from `os.Create` in one
+way: where os.Create truncates an existing file, `Create` refuses one
+(`ErrTrackExists`), because a track is an immutable, append-only log.
 
-**Why the handle is opaque.** Its fields are unexported and set through `NewTrack`
-and `Config`, so the internal layout can change without breaking callers.
-Deployment-level settings — a logger, a clock, the seal threshold — belong to a
-process, not a track, so they ride on the handle in one place instead of on
-every call.
+**Why the handle is opaque.** Its fields are unexported and set through `Create`
+or `Open` and `Config`, so the internal layout can change without breaking
+callers. Deployment-level settings — a logger, a clock, the seal threshold —
+belong to a process, not a track, so they ride on the handle in one place instead
+of on every call.
 
 **Consequence.** The ontology is one layer: a `Store` holds tracks. There is no
 separate "bucket" type to explain alongside it.
 
 ## 13. Manifests are an internal wire format, not a public type
 
-The manifest structs (`rootManifest`, `deltaManifest`, `sealedManifest`, `head`)
-are unexported. A Go consumer reads track metadata through `TrackMeta`, the
-projection returned by `Reader.Root` and `Writer.Root`; a reader in any language
-reads the JSON schema documented in the object layout above. There is no
-`Reader.Head` on the public API — the head pointer is a discovery cache (decision
-5), and `Reader.Tip` already serves a follower resuming near the end.
+The manifest structs (`trackRoot`, `epochLogRoot`, `deltaManifest`,
+`sealedManifest`, `head`) are unexported. A Go consumer reads track metadata
+through `TrackInfo`, the projection returned by `Reader.Root` and `Writer.Root`;
+a reader in any language reads the JSON schema documented in the object layout
+above. There is no `Reader.Head` on the public API — the head pointer is a
+discovery cache (decision 5), and `Reader.SeekTip` already serves a follower
+resuming near the end.
 
 **Why.** The on-disk format is the product, so it must be stable and is versioned
 through a `version` field; the Go API is free to evolve separately. Exporting the

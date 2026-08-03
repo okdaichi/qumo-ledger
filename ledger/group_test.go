@@ -7,37 +7,36 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGroupRef_String(t *testing.T) {
+func TestGroupID_String(t *testing.T) {
 	tests := map[string]struct {
-		ref      GroupRef
+		id       GroupID
 		expected string
 	}{
-		"zero":            {ref: GroupRef{}, expected: "e000000-g00000000"},
-		"first group":     {ref: GroupRef{Epoch: 1, Sequence: 1}, expected: "e000001-g00000001"},
-		"after a restart": {ref: GroupRef{Epoch: 2, Sequence: 1}, expected: "e000002-g00000001"},
-		"wide sequence":   {ref: GroupRef{Epoch: 1, Sequence: 123456789}, expected: "e000001-g123456789"},
+		"zero":            {id: 0, expected: "e000000-g00000000"},
+		"first group":     {id: NewGroupID(1, 1), expected: "e000001-g00000001"},
+		"after a restart": {id: NewGroupID(2, 1), expected: "e000002-g00000001"},
+		"wide sequence":   {id: NewGroupID(1, 123456789), expected: "e000001-g123456789"},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.ref.String())
+			assert.Equal(t, tt.expected, tt.id.String())
 		})
 	}
 }
 
-func TestGroupRef_Before(t *testing.T) {
+func TestGroupID_Before(t *testing.T) {
 	tests := map[string]struct {
-		left     GroupRef
-		right    GroupRef
-		expected bool
+		left, right GroupID
+		expected    bool
 	}{
-		"same epoch, ascending":  {left: GroupRef{1, 1}, right: GroupRef{1, 2}, expected: true},
-		"same epoch, descending": {left: GroupRef{1, 2}, right: GroupRef{1, 1}, expected: false},
-		"identical":              {left: GroupRef{1, 1}, right: GroupRef{1, 1}, expected: false},
+		"same epoch, ascending":  {left: NewGroupID(1, 1), right: NewGroupID(1, 2), expected: true},
+		"same epoch, descending": {left: NewGroupID(1, 2), right: NewGroupID(1, 1), expected: false},
+		"identical":              {left: NewGroupID(1, 1), right: NewGroupID(1, 1), expected: false},
 		// A restart resets the producer's numbering, so a later epoch is later
 		// in time even though its sequence is lower.
-		"later epoch with a lower sequence":    {left: GroupRef{2, 1}, right: GroupRef{1, 900}, expected: false},
-		"earlier epoch with a higher sequence": {left: GroupRef{1, 900}, right: GroupRef{2, 1}, expected: true},
+		"later epoch with a lower sequence":    {left: NewGroupID(2, 1), right: NewGroupID(1, 900), expected: false},
+		"earlier epoch with a higher sequence": {left: NewGroupID(1, 900), right: NewGroupID(2, 1), expected: true},
 	}
 
 	for name, tt := range tests {
@@ -125,37 +124,37 @@ func TestGroupInfo_validate(t *testing.T) {
 		wantErr bool
 	}{
 		"well formed": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 0, Duration: 100, Wallclock: 1},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), MediaTime: 0, Duration: 100, Wallclock: 1},
 			wantErr: false,
 		},
 		"duration and wallclock are both optional": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), MediaTime: 100},
 			wantErr: false,
 		},
 		"sequence zero is legal because producers may start there": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 0}, MediaTime: 0, Duration: 1},
+			meta:    GroupInfo{ID: NewGroupID(1, 0), MediaTime: 0, Duration: 1},
 			wantErr: false,
 		},
 		"epoch zero is reserved": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 0, Sequence: 1}},
+			meta:    GroupInfo{ID: NewGroupID(0, 1)},
 			wantErr: true,
 		},
 		"negative duration": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: 100, Duration: -1},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), MediaTime: 100, Duration: -1},
 			wantErr: true,
 		},
 		"negative wallclock": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, Wallclock: -1},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), Wallclock: -1},
 			wantErr: true,
 		},
 		// A wrapped media end reads as before its own start, which would let
 		// the ordering check wave through everything after it.
 		"media range overflows": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, MediaTime: math.MaxInt64 - 1, Duration: 2},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), MediaTime: math.MaxInt64 - 1, Duration: 2},
 			wantErr: true,
 		},
 		"negative size": {
-			meta:    GroupInfo{GroupRef: GroupRef{Epoch: 1, Sequence: 1}, Size: -1},
+			meta:    GroupInfo{ID: NewGroupID(1, 1), Size: -1},
 			wantErr: true,
 		},
 	}

@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"context"
+	"errors"
+	"io"
 	"iter"
 	"strings"
 	"testing"
@@ -31,52 +33,42 @@ func newPopulatedTrack(tb testing.TB, count, sealAt uint64) (*memstore.Store, *W
 	return objects, w
 }
 
+// openReader opens the standard test track for reading. It stands in for the
+// Open + Reader pair that every read-side test starts with.
+func openReader(tb testing.TB, objects store.Store) *Reader {
+	tb.Helper()
+
+	track, err := Open(tb.Context(), objects, testTrack, Config{})
+	require.NoError(tb, err)
+	r, err := track.Reader(tb.Context())
+	require.NoError(tb, err)
+	return r
+}
+
+// drain reads every currently-committed group from a Reader in order, stopping
+// at io.EOF, and returns the sequence numbers.
+func drain(tb testing.TB, sc *Reader) []uint64 {
+	tb.Helper()
+
+	var seqs []uint64
+	for {
+		g, err := sc.Next(tb.Context())
+		if errors.Is(err, io.EOF) {
+			return seqs
+		}
+		require.NoError(tb, err)
+		seqs = append(seqs, g.ID.Sequence())
+	}
+}
+
 func TestTrack_Reader(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 2, 2)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 
 	assert.Equal(t, testTrack, r.Track())
 	assert.Equal(t, uint32(90000), r.Root().Timescale)
 	assert.Equal(t, TimeSourceFrame, r.Root().TimeSource)
-}
-
-func TestTrack_Reader_TrackNotFound(t *testing.T) {
-	_, err := NewTrack(memstore.New(), testTrack, Config{}).Reader(t.Context())
-
-	assert.ErrorIs(t, err, ErrTrackNotFound)
-}
-
-func TestReader_Groups(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 5, 3)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	var sequences []uint64
-	for group, err := range r.Groups(t.Context()) {
-		require.NoError(t, err)
-		sequences = append(sequences, group.Sequence)
-	}
-
-	assert.Equal(t, []uint64{0, 1, 2, 3, 4}, sequences,
-		"iteration must span the sealed history and the open region as one timeline")
-}
-
-func TestReader_Groups_EmptyTrack(t *testing.T) {
-	_, objects := newTestWriter(t)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	var groups []GroupInfo
-	for group, err := range r.Groups(t.Context()) {
-		require.NoError(t, err)
-		groups = append(groups, group)
-	}
-
-	assert.Empty(t, groups)
 }
 
 func TestReader_ReadGroup(t *testing.T) {
@@ -86,8 +78,7 @@ func TestReader_ReadGroup(t *testing.T) {
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), payload)
 	require.NoError(t, err)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 
 	got, err := r.ReadGroup(t.Context(), meta)
 	require.NoError(t, err)
@@ -97,10 +88,9 @@ func TestReader_ReadGroup(t *testing.T) {
 func TestReader_delta_NotCommitted(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 1, 1)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 
-	_, err = r.delta(t.Context(), 99)
+	_, err := r.delta(t.Context(), 1, 99)
 
 	assert.ErrorIs(t, err, ErrNotCommitted,
 		"absence is how a reader learns it has caught up, not a failure")
@@ -109,8 +99,7 @@ func TestReader_delta_NotCommitted(t *testing.T) {
 func TestReader_SeekWallclock(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 	require.NoError(t, r.Refresh(t.Context()))
 
 	tests := map[string]struct {
@@ -128,7 +117,7 @@ func TestReader_SeekWallclock(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			group, err := r.SeekWallclock(t.Context(), wallclockBase+tt.offset)
 			require.NoError(t, err)
-			assert.Equal(t, tt.expected, group.Sequence)
+			assert.Equal(t, tt.expected, group.ID.Sequence())
 		})
 	}
 }
@@ -136,8 +125,7 @@ func TestReader_SeekWallclock(t *testing.T) {
 func TestReader_SeekWallclock_OutOfRange(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 3, 3)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 	require.NoError(t, r.Refresh(t.Context()))
 
 	tests := map[string]int64{
@@ -167,12 +155,11 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 	_, err = w.AppendGroup(t.Context(), unanchored, []byte("payload"))
 	require.NoError(t, err)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 
 	group, err := r.SeekWallclock(t.Context(), wallclockBase+500_000_000)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), group.Sequence)
+	assert.Equal(t, uint64(0), group.ID.Sequence())
 }
 
 // Seeking into the distant past must cost one sealed fetch, not one per sealed
@@ -181,8 +168,7 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 func TestReader_SeekMedia_FetchesOnesealedManifest(t *testing.T) {
 	objects := &FakeStore{}
 
-	w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
-	require.NoError(t, err)
+	w := newWriter(t, objects, Config{})
 
 	// Six sealed runs of one group each, plus a group left in the open region.
 	for sequence := range uint64(6) {
@@ -190,19 +176,18 @@ func TestReader_SeekMedia_FetchesOnesealedManifest(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, w.Seal(t.Context()))
 	}
-	_, err = w.AppendGroup(t.Context(), testGroup(t, 6), []byte("payload"))
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 6), []byte("payload"))
 	require.NoError(t, err)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-	require.Len(t, r.rootManifest().Sealed, 6)
+	r := openReader(t, objects)
+	require.Len(t, r.logRootCopy().Sealed, 6)
 
 	objects.ResetCalls()
 
 	// Target the very first group, the worst case for a newest-first walk.
 	group, err := r.SeekMedia(t.Context(), 1)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), group.Sequence)
+	assert.Equal(t, uint64(0), group.ID.Sequence())
 
 	fetched := objects.GetCount(func(key string) bool {
 		return strings.Contains(key, "/delta/sealed-")
@@ -217,7 +202,7 @@ func collect(tb testing.TB, seq iter.Seq2[GroupInfo, error]) []uint64 {
 	var sequences []uint64
 	for group, err := range seq {
 		require.NoError(tb, err)
-		sequences = append(sequences, group.Sequence)
+		sequences = append(sequences, group.ID.Sequence())
 	}
 
 	return sequences
@@ -226,8 +211,7 @@ func collect(tb testing.TB, seq iter.Seq2[GroupInfo, error]) []uint64 {
 func TestReader_RangeMedia(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 	require.NoError(t, r.Refresh(t.Context()))
 
 	tests := map[string]struct {
@@ -258,8 +242,7 @@ func TestReader_RangeMedia(t *testing.T) {
 func TestReader_RangeWallclock(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 	require.NoError(t, r.Refresh(t.Context()))
 
 	tests := map[string]struct {
@@ -294,37 +277,10 @@ func TestReader_RangeWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	r := openReader(t, objects)
 
 	got := collect(t, r.RangeWallclock(t.Context(), wallclockBase, wallclockBase+10*nanosPerGroup))
 	assert.Equal(t, []uint64{0, 2}, got)
-}
-
-func TestReader_GroupsFrom(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 5, 3)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, r.Refresh(t.Context()))
-
-	tests := map[string]struct {
-		from     GroupRef
-		expected []uint64
-	}{
-		"from the start":                {from: GroupRef{Epoch: 1, Sequence: 0}, expected: []uint64{0, 1, 2, 3, 4}},
-		"mid sealed history":            {from: GroupRef{Epoch: 1, Sequence: 2}, expected: []uint64{2, 3, 4}},
-		"into the open region":          {from: GroupRef{Epoch: 1, Sequence: 4}, expected: []uint64{4}},
-		"past the end":                  {from: GroupRef{Epoch: 1, Sequence: 99}, expected: nil},
-		"a later epoch wins":            {from: GroupRef{Epoch: 2, Sequence: 0}, expected: nil},
-		"a gap lands on the next group": {from: GroupRef{Epoch: 1, Sequence: 3}, expected: []uint64{3, 4}},
-	}
-
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, collect(t, r.GroupsFrom(t.Context(), tt.from)))
-		})
-	}
 }
 
 // A range must skip the sealed runs that cannot contribute, or a narrow query
@@ -332,8 +288,7 @@ func TestReader_GroupsFrom(t *testing.T) {
 func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
 	objects := &FakeStore{}
 
-	w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
-	require.NoError(t, err)
+	w := newWriter(t, objects, Config{})
 
 	for sequence := range uint64(6) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
@@ -341,9 +296,8 @@ func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
 		require.NoError(t, w.Seal(t.Context()))
 	}
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-	require.Len(t, r.rootManifest().Sealed, 6)
+	r := openReader(t, objects)
+	require.Len(t, r.logRootCopy().Sealed, 6)
 
 	objects.ResetCalls()
 
@@ -357,11 +311,12 @@ func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
 	assert.Equal(t, 1, fetched, "only the run overlapping the window should be fetched")
 }
 
-// Manifests name their own track and range, so an object that does not match
-// the key it was fetched from must be refused rather than trusted.
+// Manifests name their own track, epoch, and range, so an object that does not
+// match the key it was fetched from must be refused rather than trusted.
 func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 	tests := map[string]func(*sealedManifest){
 		"wrong track": func(m *sealedManifest) { m.Track = "live/cam2/video" },
+		"wrong epoch": func(m *sealedManifest) { m.Epoch = 7 },
 		"wrong range": func(m *sealedManifest) { m.LastDelta += 7 },
 	}
 
@@ -375,11 +330,10 @@ func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 			}
 			require.NoError(t, w.Seal(t.Context()))
 
-			r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-			require.NoError(t, err)
-			ref := r.rootManifest().Sealed[0]
+			r := openReader(t, objects)
+			ref := r.logRootCopy().Sealed[0]
 
-			sealed, err := r.sealed(t.Context(), ref)
+			sealed, err := r.sealed(t.Context(), 1, ref)
 			require.NoError(t, err)
 			corrupt(&sealed)
 
@@ -389,16 +343,16 @@ func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 			_, err = objects.Create(t.Context(), ref.Key, data)
 			require.NoError(t, err)
 
-			_, err = r.sealed(t.Context(), ref)
+			_, err = r.sealed(t.Context(), 1, ref)
 			assert.ErrorIs(t, err, ErrManifestMismatch)
 		})
 	}
 }
 
-func TestTrack_Reader_RejectsManifestForAnotherTrack(t *testing.T) {
+func TestOpen_RejectsManifestForAnotherTrack(t *testing.T) {
 	objects := memstore.New()
 
-	_, err := NewTrack(objects, "live/cam1/video", Config{}).Create(t.Context(), testConfig(t))
+	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})
 	require.NoError(t, err)
 
 	// Copy cam1's root manifest under cam2's key, as a misfiled object would be.
@@ -407,268 +361,350 @@ func TestTrack_Reader_RejectsManifestForAnotherTrack(t *testing.T) {
 	_, err = objects.Create(t.Context(), rootKey("live/cam2/video"), data)
 	require.NoError(t, err)
 
-	_, err = NewTrack(objects, "live/cam2/video", Config{}).Reader(t.Context())
+	// Open verifies the manifest against the key it was fetched from, so a
+	// misfiled root is caught at first contact rather than trusted.
+	_, err = Open(t.Context(), objects, "live/cam2/video", Config{})
 
 	assert.ErrorIs(t, err, ErrManifestMismatch)
 }
 
-func TestReader_SeekMedia(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 5, 3)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, r.Refresh(t.Context()))
-
-	// 180000 ticks is two seconds at the 90 kHz video timescale.
-	group, err := r.SeekMedia(t.Context(), 450000)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), group.Sequence)
-}
-
-// A reader opened before a seal keeps a stale root. Refresh is what lets it see
-// history that has been rotated since.
+// A reader opened before a seal keeps a stale log root. Refresh is what lets it
+// see history that has been rotated since.
 func TestReader_Refresh(t *testing.T) {
 	w, objects := newTestWriter(t)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-	require.Empty(t, r.rootManifest().Sealed)
+	r := openReader(t, objects)
+	require.Empty(t, r.logRootCopy().Sealed)
 
-	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 	require.NoError(t, w.Seal(t.Context()))
 
 	require.NoError(t, r.Refresh(t.Context()))
-	assert.Len(t, r.rootManifest().Sealed, 1)
+	assert.Len(t, r.logRootCopy().Sealed, 1)
 }
 
-// The zero Cursor starts at the beginning, so a follower drains history before
-// it tails.
-func TestReader_Follow(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 3, 3)
+// --- Positioned streaming (cursor) ---------------------------------------
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+func TestReader_SeekStart_Drain(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	var seen []uint64
-	for update, err := range r.Follow(t.Context(), Cursor{}, 10*time.Millisecond) {
-		require.NoError(t, err)
-		seen = append(seen, update.Sequence)
-		if len(seen) == 3 {
-			break
-		}
-	}
+	sc := openReader(t, objects)
+	sc.SeekStart()
 
-	assert.Equal(t, []uint64{0, 1, 2}, seen, "a backlog must drain without polling between groups")
+	assert.Equal(t, []uint64{0, 1, 2, 3, 4}, drain(t, sc),
+		"a SeekStart drain spans sealed history and the open region as one timeline")
 }
 
-// A cursor names the position *after* the group it came with, so resuming from
-// one yields the next group and never repeats the last.
-func TestReader_Follow_ResumesFromCursor(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 4, 4)
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	var resume Cursor
-	for update, err := range r.Follow(t.Context(), Cursor{}, 10*time.Millisecond) {
-		require.NoError(t, err)
-		if update.Sequence == 1 {
-			resume = update.Cursor
-			break
-		}
-	}
-
-	// A restart in between: the cursor survives as text.
-	encoded, err := resume.MarshalText()
-	require.NoError(t, err)
-
-	var restored Cursor
-	require.NoError(t, restored.UnmarshalText(encoded))
-	assert.Equal(t, resume, restored)
-
-	var seen []uint64
-	for update, err := range r.Follow(t.Context(), restored, 10*time.Millisecond) {
-		require.NoError(t, err)
-		seen = append(seen, update.Sequence)
-		if len(seen) == 2 {
-			break
-		}
-	}
-
-	assert.Equal(t, []uint64{2, 3}, seen, "resuming must continue after the recorded group")
-}
-
-// Sealing deletes the deltas it folds up, so a cursor persisted before a seal
-// names an object that no longer exists. The follower must serve those groups
-// from the sealed run instead of waiting forever for a reclaimed delta.
-func TestReader_Follow_ResumesAcrossASeal(t *testing.T) {
-	w, objects := newTestWriter(t)
-
-	for sequence := range uint64(3) {
-		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
-		require.NoError(t, err)
-	}
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	// Take a cursor pointing at the second group, as a follower would persist.
-	var resume Cursor
-	for update, err := range r.Follow(t.Context(), Cursor{}, 10*time.Millisecond) {
-		require.NoError(t, err)
-		if update.Sequence == 0 {
-			resume = update.Cursor
-			break
-		}
-	}
-
-	// While the follower is away the open region is sealed and reclaimed.
-	require.NoError(t, w.Seal(t.Context()))
-	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, resume.delta))
-	require.ErrorIs(t, err, store.ErrNotExist, "the cursor must now point at a reclaimed delta")
-
-	_, err = w.AppendGroup(t.Context(), testGroup(t, 3), []byte("payload"))
-	require.NoError(t, err)
-
-	var seen []uint64
-	for update, err := range r.Follow(t.Context(), resume, 10*time.Millisecond) {
-		require.NoError(t, err)
-		seen = append(seen, update.Sequence)
-		if update.Sequence == 3 {
-			break
-		}
-	}
-
-	// Replay from the start of the sealed run is within the at-least-once
-	// contract; blocking, or skipping group 3, would not be.
-	assert.Contains(t, seen, uint64(3), "the follower must reach groups committed after the seal")
-	assert.Subset(t, []uint64{0, 1, 2, 3}, seen, "no group outside the track may appear")
-}
-
-// Tip skips history so a follower sees only what arrives next.
-func TestReader_Tip(t *testing.T) {
-	w, objects := newTestWriter(t)
-	for sequence := range uint64(3) {
-		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
-		require.NoError(t, err)
-	}
-
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
-
-	tip, err := r.Tip(t.Context())
-	require.NoError(t, err)
-
-	_, err = w.AppendGroup(t.Context(), testGroup(t, 3), []byte("payload"))
-	require.NoError(t, err)
-
-	for update, err := range r.Follow(t.Context(), tip, 10*time.Millisecond) {
-		require.NoError(t, err)
-		assert.Equal(t, uint64(3), update.Sequence, "only the group committed after Tip should arrive")
-		break
-	}
-}
-
-func TestReader_Tip_EmptyTrack(t *testing.T) {
+func TestReader_SeekStart_EmptyTrack(t *testing.T) {
 	_, objects := newTestWriter(t)
 
-	r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
-	require.NoError(t, err)
+	sc := openReader(t, objects)
+	sc.SeekStart()
 
-	tip, err := r.Tip(t.Context())
-	require.NoError(t, err)
-
-	assert.Equal(t, Cursor{}, tip, "with nothing committed the start of the track is already the tip")
+	_, err := sc.Next(t.Context())
+	assert.ErrorIs(t, err, io.EOF)
 }
 
-// A follower parked at the tip should cost one request per poll. Re-reading the
-// root every tick doubles the request rate of every idle follower to learn
-// nothing: a seal cannot happen before the delta being waited on is committed.
-func TestReader_Follow_IdlePollCost(t *testing.T) {
+// SeekAfter is exclusive: it positions strictly after the named group, so a
+// resume never re-yields it.
+func TestReader_SeekAfter(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 5, 3) // sealed: 0,1,2  open: 3,4
+
+	tests := map[string]struct {
+		from     GroupID
+		expected []uint64
+	}{
+		"from the start":            {from: 0, expected: []uint64{0, 1, 2, 3, 4}},
+		"mid sealed history":        {from: NewGroupID(1, 1), expected: []uint64{2, 3, 4}},
+		"into the open region":      {from: NewGroupID(1, 3), expected: []uint64{4}},
+		"exclusive skips the named": {from: NewGroupID(1, 2), expected: []uint64{3, 4}},
+		"past the end":              {from: NewGroupID(1, 99), expected: nil},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			sc := openReader(t, objects)
+			require.NoError(t, sc.SeekAfter(t.Context(), tt.from))
+			assert.Equal(t, tt.expected, drain(t, sc))
+		})
+	}
+}
+
+// The zero id precedes every group, so SeekAfter with one is SeekStart — and
+// must cost nothing. Locating "the group after nothing" the general way would
+// fetch a sealed manifest to find the first group.
+func TestReader_SeekAfter_ZeroIDCostsNoRequest(t *testing.T) {
+	objects := &FakeStore{}
+
+	w := newWriter(t, objects, Config{})
+	for sequence := range uint64(2) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Seal(t.Context()))
+
+	r := openReader(t, objects)
+	objects.ResetCalls()
+
+	require.NoError(t, r.SeekAfter(t.Context(), 0))
+
+	assert.Equal(t, 0, objects.GetCount(func(string) bool { return true }),
+		"seeking after the zero id must rewind the cursor rather than fetch")
+	assert.Equal(t, []uint64{0, 1}, drain(t, r), "and it must still read from the start")
+}
+
+// SeekMedia resolves the target group and positions the cursor there, so Next
+// plays forward from it.
+func TestReader_SeekMedia_Positions(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 5, 3)
+
+	r := openReader(t, objects)
+
+	// 450000 lands inside group 2 (360000..540000 at 90 kHz).
+	g, err := r.SeekMedia(t.Context(), 450000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), g.ID.Sequence())
+	assert.Equal(t, []uint64{2, 3, 4}, drain(t, r), "Next plays forward from the seek target")
+}
+
+func TestReader_SeekWallclock_Positions(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 5, 3)
+
+	r := openReader(t, objects)
+
+	// 5s after the first anchor lands in group 2.
+	g, err := r.SeekWallclock(t.Context(), wallclockBase+5_000_000_000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), g.ID.Sequence())
+	assert.Equal(t, []uint64{2, 3, 4}, drain(t, r))
+}
+
+func TestReader_SeekTip(t *testing.T) {
+	objects, w := newPopulatedTrack(t, 3, 3)
+
+	sc := openReader(t, objects)
+	require.NoError(t, sc.SeekTip(t.Context()))
+
+	// At the tip there is nothing new yet.
+	_, err := sc.Next(t.Context())
+	assert.ErrorIs(t, err, io.EOF)
+
+	// A group committed after SeekTip arrives.
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 3), []byte("payload"))
+	require.NoError(t, err)
+
+	g, err := sc.Next(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), g.ID.Sequence(), "only the group committed after SeekTip should arrive")
+}
+
+func TestReader_SeekTip_EmptyTrack(t *testing.T) {
+	_, objects := newTestWriter(t)
+
+	sc := openReader(t, objects)
+	require.NoError(t, sc.SeekTip(t.Context()))
+
+	_, err := sc.Next(t.Context())
+	assert.ErrorIs(t, err, io.EOF, "with nothing committed the start is already the tip")
+}
+
+// Position survives a restart as text: String it, ParseGroupID it back, and
+// SeekAfter resumes strictly after the recorded group.
+func TestReader_Position_RoundTrip(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 4, 4)
+
+	sc := openReader(t, objects)
+	sc.SeekStart()
+
+	// Process two groups, then record the position.
+	require.NoError(t, drainN(t, sc, 2))
+	pos := sc.Position()
+	assert.Equal(t, NewGroupID(1, 1), pos)
+
+	// Persist and restore, as a restart would.
+	resumed, err := ParseGroupID(pos.String())
+	require.NoError(t, err)
+
+	// A fresh reader resumes strictly after the recorded group.
+	sc2 := openReader(t, objects)
+	require.NoError(t, sc2.SeekAfter(t.Context(), resumed))
+	assert.Equal(t, []uint64{2, 3}, drain(t, sc2), "resuming must continue after the recorded group")
+}
+
+// drainN advances the reader n groups, failing if it hits io.EOF early.
+func drainN(tb testing.TB, sc *Reader, n int) error {
+	tb.Helper()
+	for range n {
+		if _, err := sc.Next(tb.Context()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Sealing deletes the deltas it folds up, so a Reader parked at a delta that
+// is later reclaimed must still reach those groups — from the sealed run — and
+// groups committed afterwards. This is the at-least-once path.
+func TestReader_Next_SealReclaimRace(t *testing.T) {
+	w, objects := newTestWriter(t)
+	for sequence := range uint64(3) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+		require.NoError(t, err)
+	}
+
+	sc := openReader(t, objects)
+	sc.SeekStart()
+
+	// Consume group 0, parking the reader at delta 1.
+	_, err := sc.Next(t.Context())
+	require.NoError(t, err)
+
+	// Seal reclaims deltas 0-2 (groups 0,1,2), deleting delta 1 the reader
+	// is about to read.
+	require.NoError(t, w.Seal(t.Context()))
+	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, 1, 1))
+	require.ErrorIs(t, err, store.ErrNotExist, "delta 1 must be reclaimed by the seal")
+
+	// A new group lands in the open region.
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 3), []byte("payload"))
+	require.NoError(t, err)
+
+	// The first Next after the seal refreshes and may report io.EOF once; the
+	// next serves the reclaimed run (replayed from its start) and the new group.
+	var seen []uint64
+	for range 10 {
+		g, err := sc.Next(t.Context())
+		if errors.Is(err, io.EOF) {
+			continue
+		}
+		require.NoError(t, err)
+		seen = append(seen, g.ID.Sequence())
+		if g.ID.Sequence() == 3 {
+			break
+		}
+	}
+
+	assert.Contains(t, seen, uint64(1), "the reclaimed group must arrive from the sealed run")
+	assert.Contains(t, seen, uint64(3), "the group committed after the seal must arrive")
+}
+
+// Next at the tip is non-blocking: it returns io.EOF, not a hang.
+func TestReader_Next_ReturnsEOFAtTip(t *testing.T) {
+	objects, w := newPopulatedTrack(t, 1, 1)
+
+	sc := openReader(t, objects)
+	sc.SeekStart()
+
+	g, err := sc.Next(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), g.ID.Sequence())
+
+	_, err = sc.Next(t.Context())
+	assert.ErrorIs(t, err, io.EOF, "Next at the tip returns io.EOF rather than blocking")
+
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 1), []byte("payload"))
+	require.NoError(t, err)
+
+	g, err = sc.Next(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), g.ID.Sequence(), "a group committed after io.EOF still arrives")
+}
+
+// A stalled Reader should cost one probe per poll, and re-read the roots only
+// on the first stall and periodically after — not every tick.
+func TestReader_Next_IdlePollCost(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		objects := &FakeStore{}
 
-		w, err := NewTrack(objects, testTrack, Config{}).Create(t.Context(), testConfig(t))
-		require.NoError(t, err)
-		_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
-		require.NoError(t, err)
-
-		r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
+		w := newWriter(t, objects, Config{})
+		_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 		require.NoError(t, err)
 
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
+		sc := openReader(t, objects)
+		sc.SeekStart()
+		_, err = sc.Next(t.Context()) // drain the one group
+		require.NoError(t, err)
 
-		drained := make(chan struct{})
-		go func() {
-			defer close(drained)
-			for _, err := range r.Follow(ctx, Cursor{}, 100*time.Millisecond) {
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		// Let the follower drain the one group and settle into polling.
+		// Settle, then start counting.
 		synctest.Wait()
 		objects.ResetCalls()
 
-		// Ten idle poll intervals.
-		time.Sleep(1050 * time.Millisecond)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for range 10 {
+			_, err := sc.Next(ctx)
+			assert.ErrorIs(t, err, io.EOF)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
 		synctest.Wait()
 
 		probes := objects.GetCount(func(key string) bool { return strings.Contains(key, "/delta/open/") })
-		roots := objects.GetCount(func(key string) bool { return strings.HasSuffix(key, "/root.manifest") })
+		refreshes := objects.GetCount(func(key string) bool {
+			return strings.HasSuffix(key, "/log.manifest") || strings.HasSuffix(key, "/root.manifest")
+		})
 
 		assert.Equal(t, 10, probes, "one probe per poll")
-		assert.LessOrEqual(t, roots, 3,
-			"the root is re-read only when the follower first stalls and periodically after")
-
-		cancel()
-		synctest.Wait()
-		<-drained
+		assert.LessOrEqual(t, refreshes, 6, "the roots are re-read only on the first stall and periodically after")
 	})
 }
 
-// Following past the tip must block rather than spin or error, and must stop
-// when the caller's context is cancelled. synctest makes the polling delay
-// deterministic instead of a real wait.
-func TestReader_Follow_BlocksAtTip(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		objects, w := newPopulatedTrack(t, 1, 1)
+// Readers are independent: each holds its own root and cursor, so a concurrent
+// consumer opens its own rather than sharing one.
+func TestReader_MultipleReadersIndependent(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 3, 3)
 
-		r, err := NewTrack(objects, testTrack, Config{}).Reader(t.Context())
+	first := openReader(t, objects)
+	second := openReader(t, objects)
+	first.SeekStart()
+	second.SeekStart()
+
+	assert.Equal(t, []uint64{0, 1, 2}, drain(t, first))
+	assert.Equal(t, []uint64{0, 1, 2}, drain(t, second),
+		"draining one reader must not consume the other's groups")
+}
+
+// A reader spans epochs: draining after a NewEpoch yields the first lifetime's
+// groups then the second's, as one ascending run of IDs.
+func TestReader_Next_SpansEpochs(t *testing.T) {
+	objects := memstore.New()
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
+	require.NoError(t, err)
+
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+	for sequence := range uint64(2) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("epoch 1"))
 		require.NoError(t, err)
-
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-
-		received := make(chan uint64, 4)
-		go func() {
-			defer close(received)
-			for update, err := range r.Follow(ctx, Cursor{}, 100*time.Millisecond) {
-				if err != nil {
-					return
-				}
-				received <- update.Sequence
-			}
-		}()
-
-		assert.Equal(t, uint64(0), <-received)
-
-		// The follower is now past the tip and waiting on its ticker.
-		synctest.Wait()
-
-		_, err = w.AppendGroup(t.Context(), testGroup(t, 1), []byte("payload"))
+	}
+	require.NoError(t, w.NewEpoch(t.Context()))
+	for sequence := range uint64(2) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("epoch 2"))
 		require.NoError(t, err)
+	}
 
-		assert.Equal(t, uint64(1), <-received, "a group committed after the follower caught up must still arrive")
+	r := openReader(t, objects)
+	r.SeekStart()
 
-		cancel()
-		synctest.Wait()
+	var ids []GroupID
+	for {
+		g, err := r.Next(t.Context())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		ids = append(ids, g.ID)
+	}
 
-		_, open := <-received
-		assert.False(t, open, "cancelling the context must end the iteration")
-	})
+	assert.Equal(t, []GroupID{
+		NewGroupID(1, 0), NewGroupID(1, 1),
+		NewGroupID(2, 0), NewGroupID(2, 1),
+	}, ids, "a reader crosses the epoch boundary in ID order")
 }
