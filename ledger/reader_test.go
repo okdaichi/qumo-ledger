@@ -85,6 +85,37 @@ func TestReader_ReadGroup(t *testing.T) {
 	assert.Equal(t, payload, got)
 }
 
+func TestReader_Lookup(t *testing.T) {
+	objects, _ := newPopulatedTrack(t, 5, 3) // sealed: 0,1,2  open: 3,4
+
+	r := openReader(t, objects)
+
+	tests := map[string]struct {
+		id      GroupID
+		wantErr error
+	}{
+		"sealed history":   {id: NewGroupID(1, 1)},
+		"open region":      {id: NewGroupID(1, 4)},
+		"missing sequence": {id: NewGroupID(1, 99), wantErr: ErrGroupNotFound},
+		"epoch zero":       {id: NewGroupID(0, 1), wantErr: ErrGroupNotFound},
+		"epoch beyond tip": {id: NewGroupID(5, 0), wantErr: ErrGroupNotFound},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			group, err := r.Lookup(t.Context(), tt.id)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.id, group.ID)
+			assert.NotEmpty(t, group.ObjectKey,
+				"Lookup must read ObjectKey from the manifest, not leave the caller to derive it")
+		})
+	}
+}
+
 func TestReader_delta_NotCommitted(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 1, 1)
 

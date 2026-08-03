@@ -253,6 +253,60 @@ func (r *Reader) ReadGroup(ctx context.Context, meta GroupInfo) ([]byte, error) 
 	return data, nil
 }
 
+// Lookup returns the committed [GroupInfo] for id, reading its ObjectKey from
+// the manifest rather than deriving it. It is the point-lookup counterpart to
+// the streaming and range reads: a serving layer that addresses a segment by
+// its [GroupID] needs the row — both to fetch the payload through
+// [Reader.ReadGroup] and to mint a signed URL from [GroupInfo.ObjectKey] — and
+// the ledger forbids deriving a group key, because producer sequences are gappy.
+//
+// It searches only the lifetime id names, so the cost is bounded by that one
+// epoch. It does not advance the streaming cursor: [Reader.Position],
+// [Reader.Next], and the seeks are unaffected. A Reader remains single-consumer,
+// so a caller streaming with Next opens a second Reader for concurrent lookups.
+func (r *Reader) Lookup(ctx context.Context, id GroupID) (GroupInfo, error) {
+	epoch := id.Epoch()
+	if epoch == 0 || epoch > r.latest {
+		return GroupInfo{}, fmt.Errorf("%w: %s", ErrGroupNotFound, id)
+	}
+
+	logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
+	if err != nil {
+		return GroupInfo{}, err
+	}
+
+	// The open region holds the newest groups; sealed history holds the rest. A
+	// group lives in exactly one of the two, so either order finds it.
+	for n := logRoot.OpenFrom; ; n++ {
+		delta, err := r.delta(ctx, epoch, n)
+		if errors.Is(err, ErrNotCommitted) {
+			break
+		}
+		if err != nil {
+			return GroupInfo{}, err
+		}
+		for _, g := range delta.Groups {
+			if g.ID == id {
+				return g, nil
+			}
+		}
+	}
+
+	for _, ref := range logRoot.Sealed {
+		sealed, err := r.sealed(ctx, epoch, ref)
+		if err != nil {
+			return GroupInfo{}, err
+		}
+		for _, g := range sealed.Groups {
+			if g.ID == id {
+				return g, nil
+			}
+		}
+	}
+
+	return GroupInfo{}, fmt.Errorf("%w: %s", ErrGroupNotFound, id)
+}
+
 // RangeMedia iterates the groups overlapping the half-open media-time window
 // [from, to), in the track's timescale units, across every epoch.
 //
