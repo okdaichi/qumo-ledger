@@ -192,10 +192,12 @@ func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (Gr
 
 // AppendGroup stores a sealed group and commits it.
 //
-// The caller supplies a fully populated GroupInfo because the core parses no
-// wire format: media timestamps live inside the payload, and only an adapter
-// that understands the encoding can extract them. Object and Size are filled in
-// here and any caller-supplied values are ignored.
+// The caller supplies the group's content because the core parses no wire
+// format: media timestamps live inside the payload, and only an adapter that
+// understands the encoding can extract them. Epoch, ObjectKey, and Size are
+// filled in here and any caller-supplied values are ignored — the writer owns
+// the epoch. Call [Writer.AdvanceEpoch] to begin a new producer lifetime; until
+// then the group is written under the current epoch.
 //
 // Ordering is payload first, manifest second. A crash between the two leaves an
 // orphaned payload that no manifest references — invisible to readers and
@@ -204,6 +206,7 @@ func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (Gr
 //
 // AppendGroup returns the committed row.
 func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte) (GroupInfo, error) {
+	meta.Epoch = w.root.Epoch
 	if err := meta.validate(); err != nil {
 		return GroupInfo{}, err
 	}
@@ -266,12 +269,6 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 	w.openBytes += int64(len(data))
 	w.last, w.hasLast = meta, true
 
-	if meta.Epoch > w.root.Epoch {
-		if err := w.updateRoot(ctx, func(root *rootManifest) { root.Epoch = meta.Epoch }); err != nil {
-			return meta, err
-		}
-	}
-
 	if err := w.publishHead(ctx, meta.GroupRef); err != nil {
 		// not actionable: head is a discovery cache. A reader that finds it
 		// stale probes forward and catches up, and one that finds it missing
@@ -300,13 +297,10 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 // endpoint — a contradiction becomes a failed append instead of a seek that
 // quietly returns the wrong group months later.
 //
-// A new epoch restarts the timeline, so no ordering is implied across one.
+// The first group after an [Writer.AdvanceEpoch] has no predecessor — a new
+// epoch restarts the timeline — so there is nothing to contradict.
 func (w *Writer) checkOrder(meta GroupInfo) error {
-	if meta.Epoch < w.root.Epoch {
-		return fmt.Errorf("%w: group %s is in epoch %d, behind the track's epoch %d",
-			ErrGroupOutOfOrder, meta.GroupRef, meta.Epoch, w.root.Epoch)
-	}
-	if !w.hasLast || w.last.Epoch != meta.Epoch {
+	if !w.hasLast {
 		return nil
 	}
 
@@ -315,6 +309,31 @@ func (w *Writer) checkOrder(meta GroupInfo) error {
 			ErrGroupOutOfOrder, meta.GroupRef, meta.MediaTime, w.last.GroupRef, end)
 	}
 
+	return nil
+}
+
+// AdvanceEpoch begins a new producer epoch, advancing the track's epoch by one
+// and persisting it.
+//
+// Producers reset their sequence numbering on restart, and because group objects
+// are immutable a reused sequence would collide rather than overwrite. The epoch
+// gives each producer lifetime its own keyspace, so a restart continues cleanly
+// under a new epoch. Call AdvanceEpoch once when a producer restarts; subsequent
+// appends are written under the new epoch.
+//
+// A new epoch also restarts the timeline: the first group after AdvanceEpoch has
+// no predecessor, so its media anchor is unconstrained.
+func (w *Writer) AdvanceEpoch(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.updateRoot(ctx, func(root *rootManifest) { root.Epoch++ }); err != nil {
+		return fmt.Errorf("ledger: advance epoch of %s: %w", w.track, err)
+	}
+
+	// The new epoch has no committed group yet, so the next append is its first
+	// and is unconstrained by the previous epoch's last group.
+	w.last, w.hasLast = GroupInfo{}, false
 	return nil
 }
 

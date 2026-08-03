@@ -101,13 +101,9 @@ func inspect(ctx context.Context, args []string) error {
 	out := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(out, "GROUP\tMEDIA\tWALLCLOCK\tOBJECTS\tSIZE")
 
-	sc, err := reader.NewScanner(ctx)
-	if err != nil {
-		return err
-	}
-	sc.SeekStart()
+	reader.SeekStart()
 	for {
-		group, err := sc.Next(ctx)
+		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -154,11 +150,6 @@ func follow(ctx context.Context, args []string) error {
 		return err
 	}
 
-	sc, err := reader.NewScanner(ctx)
-	if err != nil {
-		return err
-	}
-
 	// With no position flag an unflagged run replays everything and then tails.
 	switch {
 	case *group != "":
@@ -166,23 +157,23 @@ func follow(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := sc.SeekGroup(ctx, from); err != nil {
+		if err := reader.SeekGroup(ctx, from); err != nil {
 			return err
 		}
 	case *tip:
-		if err := sc.SeekTip(ctx); err != nil {
+		if err := reader.SeekTip(ctx); err != nil {
 			return err
 		}
 	default:
-		sc.SeekStart()
+		reader.SeekStart()
 	}
 
-	// Following is polling, because object stores do not push. The Scanner is
-	// non-blocking — Next returns io.EOF at the tip — so the wait lives here.
+	// Following is polling, because object stores do not push. Next is
+	// non-blocking — it returns io.EOF at the tip — so the wait lives here.
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for {
-		group, err := sc.Next(ctx)
+		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
 			select {
 			case <-ctx.Done():
@@ -195,7 +186,7 @@ func follow(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Printf("%s  group %s  media %d+%d  %d objects  %d bytes\n",
-			sc.Position(), group.GroupRef, group.MediaTime, group.Duration,
+			reader.Position(), group.GroupRef, group.MediaTime, group.Duration,
 			group.ObjectCount, group.Size)
 	}
 }

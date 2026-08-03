@@ -137,6 +137,16 @@ that is the whole point: a relay serving the same track live uses those numbers,
 and a client can only align live playback against replay if both agree on what
 group 42 is. Renumbering would break decision 2's contract with clients.
 
+**How an epoch advances.** The writer owns the current epoch: `Append` and
+`AppendGroup` stamp it from the writer's root, ignoring any caller-supplied
+value (as they already do for `ObjectKey` and `Size`). A producer restart is an
+explicit verb — `Writer.AdvanceEpoch` — rather than something inferred from the
+appended metadata. That keeps a caller from fabricating inconsistent epochs, and
+makes a restart a durable, visible event (a root update) rather than a side
+effect of the next append. Epoch stays observable on read: it appears in every
+read-side `GroupInfo` and in the resume `GroupRef`, where it disambiguates
+sequences across producer lifetimes.
+
 ## 9. A group is anchored on two timelines, not described as an interval
 
 Groups are serial within an epoch — the start of one is the end of the last — so
@@ -172,8 +182,8 @@ no duration. `Duration` is consulted only to reject a target past a known end.
 
 **Why contradictions are rejected at append.** Values that can disagree with each
 other are the real cost of redundancy. Since groups are serial, `AppendGroup`
-refuses a group starting before its predecessor ended, or carrying an epoch
-behind the track's. Gaps stay legal — they are real data.
+refuses a group starting before its predecessor ended. Gaps stay legal — they
+are real data.
 
 **Note on provenance.** moq-lite draft-05 added a `Timestamp Delta` to `FRAME`,
 zigzag-encoded in the track's negotiated `Timescale`, with the first frame of a
@@ -269,7 +279,7 @@ are unexported. A Go consumer reads track metadata through `TrackMeta`, the
 projection returned by `Reader.Root` and `Writer.Root`; a reader in any language
 reads the JSON schema documented in the object layout above. There is no
 `Reader.Head` on the public API — the head pointer is a discovery cache (decision
-5), and `Scanner.SeekTip` already serves a follower resuming near the end.
+5), and `Reader.SeekTip` already serves a follower resuming near the end.
 
 **Why.** The on-disk format is the product, so it must be stable and is versioned
 through a `version` field; the Go API is free to evolve separately. Exporting the

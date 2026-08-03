@@ -59,15 +59,11 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	// A Scanner streams the track in commit order. SeekStart drains from the
+	// A Reader streams the track in commit order. SeekStart positions at the
 	// beginning; Next returns io.EOF at the tip.
-	sc, err := reader.NewScanner(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-	sc.SeekStart()
+	reader.SeekStart()
 	for {
-		group, err := sc.Next(ctx)
+		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -184,7 +180,7 @@ func ExampleReader_SeekMedia() {
 	// back-to-back ones Append assumes.
 	for _, sequence := range []uint64{0, 1, 3} {
 		_, err := writer.AppendGroup(ctx, ledger.GroupInfo{
-			GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: sequence},
+			GroupRef:  ledger.GroupRef{Sequence: sequence},
 			MediaTime: int64(sequence) * ticksPerGroup,
 			Duration:  ticksPerGroup,
 		}, []byte("...frames..."))
@@ -219,11 +215,11 @@ func ExampleReader_SeekMedia() {
 	//  999999 -> nothing covers this instant
 }
 
-// A Scanner streams a track in commit order and reports its position, so a
+// A Reader streams a track in commit order and reports its position, so a
 // consumer can persist that position and resume exactly where it stopped.
-// Following is polling — object stores do not push — but the poll loop now
-// belongs to the caller.
-func ExampleReader_NewScanner() {
+// Following is polling — object stores do not push — but the poll loop belongs
+// to the caller.
+func ExampleReader_Next() {
 	ctx := context.Background()
 	store := memstore.New()
 	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
@@ -237,22 +233,18 @@ func ExampleReader_NewScanner() {
 		log.Fatal(err)
 	}
 
-	sc, err := reader.NewScanner(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-	sc.SeekStart()
+	reader.SeekStart()
 
 	// A consumer that processes two groups and then stops, recording where it
 	// got to.
 	var saved ledger.GroupRef
 	for {
-		group, err := sc.Next(ctx)
+		group, err := reader.Next(ctx)
 		if err != nil {
 			log.Fatal(err)
 		}
 		fmt.Printf("processed %s\n", group.GroupRef)
-		saved = sc.Position()
+		saved = reader.Position()
 		if group.Sequence == 1 {
 			break
 		}
@@ -268,15 +260,15 @@ func ExampleReader_NewScanner() {
 		log.Fatal(err)
 	}
 
-	// A fresh scanner resumes strictly after the recorded group.
-	sc, err = reader.NewScanner(ctx)
+	// A fresh reader resumes strictly after the recorded group.
+	restarted, err := opened.Reader(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := sc.SeekGroup(ctx, resumed); err != nil {
+	if err := restarted.SeekGroup(ctx, resumed); err != nil {
 		log.Fatal(err)
 	}
-	group, err := sc.Next(ctx)
+	group, err := restarted.Next(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -313,7 +305,7 @@ func ExampleWriter_AppendGroup() {
 	}
 
 	first := ledger.GroupInfo{
-		GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: 7},
+		GroupRef:  ledger.GroupRef{Sequence: 7},
 		MediaTime: 7 * ticksPerGroup,
 		Duration:  ticksPerGroup,
 	}
@@ -328,16 +320,19 @@ func ExampleWriter_AppendGroup() {
 	// A group that would start before its predecessor ended contradicts a
 	// serial timeline, and is refused too. A gap would be fine.
 	_, err = writer.AppendGroup(ctx, ledger.GroupInfo{
-		GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: 8},
+		GroupRef:  ledger.GroupRef{Sequence: 8},
 		MediaTime: first.MediaTime + 1,
 		Duration:  ticksPerGroup,
 	}, []byte("overlapping"))
 	fmt.Println("overlap:  ", errors.Is(err, ledger.ErrGroupOutOfOrder))
 
-	// After a restart the producer starts over at sequence 1. The new epoch
-	// keeps that from colliding with anything already stored.
+	// After a restart the producer starts over at sequence 1 under a new epoch,
+	// which keeps that from colliding with anything already stored.
+	if err := writer.AdvanceEpoch(ctx); err != nil {
+		log.Fatal(err)
+	}
 	restarted, err := writer.AppendGroup(ctx, ledger.GroupInfo{
-		GroupRef:  ledger.GroupRef{Epoch: 2, Sequence: 1},
+		GroupRef:  ledger.GroupRef{Sequence: 1},
 		MediaTime: 0,
 		Duration:  ticksPerGroup,
 	}, []byte("after restart"))
@@ -379,7 +374,7 @@ func ExampleTrack_Writer() {
 
 	for sequence := range uint64(2) {
 		_, err := writer.AppendGroup(ctx, ledger.GroupInfo{
-			GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: sequence},
+			GroupRef:  ledger.GroupRef{Sequence: sequence},
 			MediaTime: int64(sequence) * ticksPerGroup,
 			Duration:  ticksPerGroup,
 		}, []byte("...frames..."))
@@ -406,7 +401,7 @@ func ExampleTrack_Writer() {
 
 	// The track continues rather than restarting: nothing committed was lost.
 	if _, err := recovered.AppendGroup(ctx, ledger.GroupInfo{
-		GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: 2},
+		GroupRef:  ledger.GroupRef{Sequence: 2},
 		MediaTime: 2 * ticksPerGroup,
 		Duration:  ticksPerGroup,
 	}, []byte("...frames...")); err != nil {
@@ -418,13 +413,9 @@ func ExampleTrack_Writer() {
 		log.Fatal(err)
 	}
 
-	sc, err := reader.NewScanner(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-	sc.SeekStart()
+	reader.SeekStart()
 	for {
-		group, err := sc.Next(ctx)
+		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -458,7 +449,7 @@ func writeTrack(ctx context.Context, store *memstore.Store, track ledger.TrackPa
 	ticks := int64(every.Seconds() * float64(timescale))
 	for sequence := range count {
 		_, err := writer.AppendGroup(ctx, ledger.GroupInfo{
-			GroupRef:    ledger.GroupRef{Epoch: 1, Sequence: sequence},
+			GroupRef:    ledger.GroupRef{Sequence: sequence},
 			MediaTime:   int64(sequence) * ticks,
 			Duration:    ticks,
 			Wallclock:   exampleStart.Add(time.Duration(sequence) * every).UnixNano(),

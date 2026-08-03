@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
-	"sync"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
@@ -13,15 +13,52 @@ import (
 // Reader reads a track. It needs nothing but object-store access — no ledger
 // process has to be running for a Reader to seek or replay.
 //
+// A Reader is single-consumer: it holds a cursor for streaming and is not safe
+// for concurrent use. Concurrent consumers each open their own Reader, which is
+// cheap (one root fetch).
+//
+// # Two read modes
+//
+// Bounded queries answer a snapshot and never touch the cursor:
+// [Reader.RangeMedia] and [Reader.RangeWallclock] iterate the groups overlapping
+// a window, [Reader.SeekMedia] and [Reader.SeekWallclock] resolve one instant to
+// the group anchored at or before it, and [Reader.ReadGroup] fetches a payload.
+//
+// Positioned streaming drives the cursor: a Seek method positions it, then
+// [Reader.Next] returns each following group and [io.EOF] at the current tip.
+// SeekMedia and SeekWallclock do double duty — they resolve the target group
+// and position the cursor there, so the group they return is the first a
+// following Next yields. [Reader.Position] returns the [GroupRef] to resume
+// from; [ParseGroupRef] round-trips its text form across a restart.
+//
+// Tailing is a poll loop the caller owns, because object stores do not push:
+//
+//	reader.SeekTip(ctx)
+//	ticker := time.NewTicker(ledger.DefaultPollInterval)
+//	defer ticker.Stop()
+//	for {
+//		group, err := reader.Next(ctx)
+//		if errors.Is(err, io.EOF) {
+//			select {
+//			case <-ctx.Done():
+//				return ctx.Err()
+//			case <-ticker.C:
+//				continue
+//			}
+//		}
+//		if err != nil {
+//			return err
+//		}
+//		// handle group
+//	}
+//
 // # Iteration and errors
 //
-// The iterating methods yield an error alongside each value because every step
-// is a request to the object store, so a failure part-way through is expected
-// rather than exceptional.
-//
-// That error is terminal and yielded at most once: iteration stops immediately
-// after it, and no further value follows. A loop may therefore return or break
-// on a non-nil error without needing to drain the rest.
+// The range methods yield an error alongside each value because every step is a
+// request to the object store, so a failure part-way through is expected rather
+// than exceptional. That error is terminal and yielded at most once: iteration
+// stops immediately after it. A loop may return or break on a non-nil error
+// without draining the rest.
 //
 //	for group, err := range reader.RangeWallclock(ctx, from, to) {
 //		if err != nil {
@@ -29,30 +66,32 @@ import (
 //		}
 //		// ...
 //	}
-//
-// Reader is stateless and safe for concurrent use. The range methods answer a
-// bounded query as a snapshot; for open-ended streaming — seek and play
-// forward, or tail new groups — take a [Scanner] with [Reader.NewScanner].
-//
-// Reader is safe for concurrent use.
 type Reader struct {
 	objects store.Store
 	track   TrackPath
 
-	mu          sync.RWMutex
-	root        rootManifest
-	rootVersion store.Version
+	root rootManifest
+
+	// Cursor state for streaming (SeekStart/SeekTip/SeekGroup + Next). Not
+	// safe for concurrent use.
+	next   uint64
+	idx    int
+	batch  []GroupInfo
+	misses int
+	last   GroupRef
 }
 
 // Reader opens the track for reading. It loads the root manifest and nothing
 // else: reading needs no recovery, so a reader joins cheaply.
 func (t *Track) Reader(ctx context.Context) (*Reader, error) {
-	root, version, err := fetchRoot(ctx, t.store, t.path)
+	root, _, err := fetchRoot(ctx, t.store, t.path)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Reader{objects: t.store, track: t.path, root: root, rootVersion: version}, nil
+	// A fresh Reader is positioned at the start, so Next drains the whole track
+	// before tailing. Use SeekTip to skip history.
+	return &Reader{objects: t.store, track: t.path, root: root}, nil
 }
 
 // Track returns the path being read.
@@ -62,9 +101,6 @@ func (r *Reader) Track() TrackPath { return r.track }
 // need the full root — its sealed index and open region — to seek and walk; the
 // projection [Reader.Root] returns hides all of that.
 func (r *Reader) rootManifest() rootManifest {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	root := r.root
 	root.Sealed = append([]sealedRef(nil), r.root.Sealed...)
 
@@ -78,19 +114,16 @@ func (r *Reader) Root() TrackMeta {
 	return r.rootManifest().meta()
 }
 
-// Refresh re-reads the root manifest, picking up manifests sealed since the
-// Reader was opened. Tailing does not require it — the open region is
-// discovered by probing — but seeking into history does.
+// Refresh re-reads the root manifest, picking up history sealed since the
+// Reader was opened. Bounded seeks into rotated history need it; the open
+// region is discovered by probing, so tailing does not — Next re-reads the root
+// on its own schedule.
 func (r *Reader) Refresh(ctx context.Context) error {
-	root, version, err := fetchRoot(ctx, r.objects, r.track)
+	root, _, err := fetchRoot(ctx, r.objects, r.track)
 	if err != nil {
 		return err
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.root, r.rootVersion = root, version
-
+	r.root = root
 	return nil
 }
 
@@ -193,18 +226,146 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 	)
 }
 
-// NewScanner returns a positioned cursor over the track's groups, in commit
-// order, for seek-and-stream and tailing. See [Scanner].
+// DefaultPollInterval is a suggested interval for a tailing poll loop over
+// [Reader.Next].
 //
-// A Scanner holds its own root snapshot and is not safe for concurrent use;
-// concurrent consumers each take their own.
-func (r *Reader) NewScanner(ctx context.Context) (*Scanner, error) {
-	root, _, err := fetchRoot(ctx, r.objects, r.track)
-	if err != nil {
-		return nil, err
-	}
-	return &Scanner{r: r, root: root}, nil
+// Object stores do not push, so following a track means polling, and the
+// interval is the visibility latency floor for a tailing reader — one reason
+// the ledger is not a live path. Next is non-blocking and returns [io.EOF] at
+// the tip, leaving the wait to the caller; this constant is the value the cmd
+// and most callers use.
+const DefaultPollInterval = 500_000_000 // 500ms, as a count of nanoseconds
+
+// rootRecheckEvery is how many consecutive empty polls pass between re-reads of
+// the root manifest while a Reader is stalled at the tip.
+//
+// A stalled Reader needs the root only to notice a seal that happened since it
+// last read one, and a seal cannot happen before the delta it is waiting for is
+// even committed. Re-reading on every poll therefore learns nothing and wastes
+// a request, so it is rationed.
+const rootRecheckEvery = 8
+
+// SeekStart positions the Reader at the first group, so a following [Reader.Next]
+// loop drains the whole recording before tailing.
+func (r *Reader) SeekStart() {
+	r.next, r.idx, r.batch = 0, 0, nil
+	r.last, r.misses = GroupRef{}, 0
 }
+
+// SeekTip positions the Reader after everything currently committed, so only
+// groups committed after the call arrive. The position is derived from the head
+// pointer, which may lag the true tip, so a tail from it can replay a few
+// groups that were already committed — delivery is at least once by design.
+func (r *Reader) SeekTip(ctx context.Context) error {
+	switch h, _, err := fetchHead(ctx, r.objects, r.track); {
+	case errors.Is(err, store.ErrNotExist):
+		// Nothing committed yet: the start of the track is already the tip.
+		r.next = 0
+	case err != nil:
+		return err
+	default:
+		r.next = h.Delta + 1
+	}
+
+	r.idx, r.batch = 0, nil
+	r.last, r.misses = GroupRef{}, 0
+	return nil
+}
+
+// SeekGroup positions the Reader strictly after ref, so a following
+// [Reader.Next] loop resumes without re-yielding the group ref names. Pair it
+// with [Reader.Position] to resume across a restart.
+func (r *Reader) SeekGroup(ctx context.Context, ref GroupRef) error {
+	seg, idx, after, err := r.locateAfter(ctx, r.root, ref)
+	if err != nil {
+		return err
+	}
+	// Whether or not a following group exists, `after` is the right place to
+	// resume: a real segment's tail, or the tip when ref is past everything.
+	r.batch, r.idx, r.next = seg, idx, after
+	r.last, r.misses = GroupRef{}, 0
+	return nil
+}
+
+// position sets the cursor to a resolved segment. Shared by the time-based
+// seeks.
+func (r *Reader) position(seg []GroupInfo, idx int, after uint64) {
+	r.batch, r.idx, r.next = seg, idx, after
+	r.last, r.misses = GroupRef{}, 0
+}
+
+// Next advances to and returns the next group in commit order. It returns
+// [io.EOF] when the Reader has reached the current tip — caught up, for now —
+// and a real error only when the store failed.
+//
+// io.EOF is not terminal: a later group may have been committed, so the next
+// call re-probes. It mutates nothing but the empty-poll counter, so a caller
+// may poll indefinitely.
+//
+// A delta that has been sealed and reclaimed since the Reader last read the
+// root is still served: its groups moved into a sealed run, and Next notices on
+// its rationed root re-read rather than hanging on the deleted delta.
+func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
+	for {
+		if r.idx < len(r.batch) {
+			group := r.batch[r.idx]
+			r.idx++
+			r.last = group.GroupRef
+			return group, nil
+		}
+
+		// batch exhausted: load the next segment.
+
+		if r.next < r.root.OpenFrom {
+			// The next delta is below the open region: either it has always been
+			// sealed, or it was sealed away while this Reader was parked. Either
+			// way its groups live in a sealed run.
+			ref, ok := sealedCovering(r.root, r.next)
+			if !ok {
+				// A gap below OpenFrom that no sealed run covers: skip to the
+				// open region and keep going.
+				r.next = r.root.OpenFrom
+				continue
+			}
+			sealed, err := r.sealed(ctx, ref)
+			if err != nil {
+				return GroupInfo{}, err
+			}
+			r.batch, r.idx, r.next, r.misses = sealed.Groups, 0, ref.LastDelta+1, 0
+			continue
+		}
+
+		delta, err := r.delta(ctx, r.next)
+		if err == nil {
+			r.batch, r.idx, r.next, r.misses = delta.Groups, 0, r.next+1, 0
+			continue
+		}
+		if errors.Is(err, ErrNotCommitted) {
+			// The delta is absent. It may simply not be committed yet, or it may
+			// have been sealed away. A root re-read settles which, but only
+			// matters occasionally, so it is rationed.
+			r.misses++
+			if r.misses == 1 || r.misses%rootRecheckEvery == 0 {
+				if e := r.Refresh(ctx); e != nil {
+					return GroupInfo{}, e
+				}
+				// Fall through to io.EOF rather than re-probing: a refresh that
+				// did not move OpenFrom past next would only add a redundant
+				// probe, and one that did is picked up by the sealed branch on
+				// the next call.
+			}
+			return GroupInfo{}, io.EOF
+		}
+		return GroupInfo{}, err
+	}
+}
+
+// Position returns the most recently yielded group, for saving across a
+// restart. Pass it to [Reader.SeekGroup] to resume strictly after it.
+//
+// Before any group has been yielded it is the zero [GroupRef], which SeekGroup
+// reads as "from the start."
+func (r *Reader) Position() GroupRef { return r.last }
 
 // sealedCovering returns the sealed run holding a delta number, if any.
 func sealedCovering(root rootManifest, delta uint64) (sealedRef, bool) {
@@ -287,36 +448,47 @@ func emptyGroups(func(GroupInfo, error) bool) {}
 // with it — possible at all. For seeking within one track, use
 // [Reader.SeekMedia], which is exact and immune to clock skew.
 //
-// For streaming forward from the result, use a [Scanner] instead.
+// SeekWallclock also positions the cursor at the group it returns, so a
+// following [Reader.Next] loop plays forward from it.
 func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupInfo, error) {
-	timescale := r.rootManifest().Timescale
+	timescale := r.root.Timescale
 
-	g, _, _, _, err := r.seek(ctx, r.rootManifest(), unixNano,
+	g, seg, idx, after, err := r.seek(ctx, r.root, unixNano,
 		func(g GroupInfo) (int64, bool) { return g.Wallclock, g.hasWallclock() },
 		func(g GroupInfo) (int64, bool) { return g.wallclockEnd(timescale) },
 		func(ref sealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
 	)
-	return g, err
+	if err != nil {
+		return GroupInfo{}, err
+	}
+	r.position(seg, idx, after)
+	return g, nil
 }
 
 // SeekMedia returns the group anchored at or before a media timestamp, in the
 // track's timescale units.
 //
-// For streaming forward from the result, use a [Scanner] instead.
+// SeekMedia also positions the cursor at the group it returns — which is what a
+// player wants: land on or before the target, then decode forward with
+// [Reader.Next].
 func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, error) {
-	g, _, _, _, err := r.seek(ctx, r.rootManifest(), mediaTime,
+	g, seg, idx, after, err := r.seek(ctx, r.root, mediaTime,
 		func(g GroupInfo) (int64, bool) { return g.MediaTime, true },
 		func(g GroupInfo) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
 		func(ref sealedRef) (int64, bool) { return ref.MediaStart, true },
 	)
-	return g, err
+	if err != nil {
+		return GroupInfo{}, err
+	}
+	r.position(seg, idx, after)
+	return g, nil
 }
 
 // seek returns the last group anchored at or before target, and where it lives:
 // the segment slice it came from, its index within that segment, and the delta
-// number to resume at once the segment is drained. A [Scanner] uses the
-// location to position itself without a second fetch; [Reader.SeekMedia] and
-// [Reader.SeekWallclock] discard it.
+// number to resume at once the segment is drained. [Reader.SeekMedia] and
+// [Reader.SeekWallclock] use the location to position the cursor without a
+// second fetch.
 //
 // It resolves against anchors rather than testing containment, which is both
 // what a player wants — land on or before the target and decode forward — and
@@ -332,8 +504,8 @@ func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, err
 // recent one wins.
 //
 // The open region is bounded by the seal threshold, so scanning it is bounded
-// too. seek runs against the root it is given, so a [Scanner] passes its own
-// snapshot and avoids a resolve-versus-position race.
+// too. seek takes the root explicitly so that resolving and positioning run
+// against the same snapshot.
 func (r *Reader) seek(
 	ctx context.Context,
 	root rootManifest,
@@ -405,7 +577,7 @@ func (r *Reader) seek(
 }
 
 // locateAfter finds the first committed group strictly after ref — the resume
-// point for a [Scanner] positioned past a recorded [GroupRef]. It returns the
+// point for a [Reader] positioned past a recorded [GroupRef]. It returns the
 // segment the group lives in, its index within it, and the delta number to
 // resume at once that segment is drained. When nothing follows ref it returns a
 // nil segment with next set to the tip, so the caller parks at the end.

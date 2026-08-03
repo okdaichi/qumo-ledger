@@ -45,19 +45,9 @@ func openReader(tb testing.TB, objects store.Store) *Reader {
 	return r
 }
 
-// openScanner opens a Scanner over the standard test track.
-func openScanner(tb testing.TB, objects store.Store) *Scanner {
-	tb.Helper()
-
-	r := openReader(tb, objects)
-	sc, err := r.NewScanner(tb.Context())
-	require.NoError(tb, err)
-	return sc
-}
-
-// drain reads every currently-committed group from a Scanner in order, stopping
+// drain reads every currently-committed group from a Reader in order, stopping
 // at io.EOF, and returns the sequence numbers.
-func drain(tb testing.TB, sc *Scanner) []uint64 {
+func drain(tb testing.TB, sc *Reader) []uint64 {
 	tb.Helper()
 
 	var seqs []uint64
@@ -377,18 +367,6 @@ func TestOpen_RejectsManifestForAnotherTrack(t *testing.T) {
 	assert.ErrorIs(t, err, ErrManifestMismatch)
 }
 
-func TestReader_SeekMedia(t *testing.T) {
-	objects, _ := newPopulatedTrack(t, 5, 3)
-
-	r := openReader(t, objects)
-	require.NoError(t, r.Refresh(t.Context()))
-
-	// 180000 ticks is two seconds at the 90 kHz video timescale.
-	group, err := r.SeekMedia(t.Context(), 450000)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(2), group.Sequence)
-}
-
 // A reader opened before a seal keeps a stale root. Refresh is what lets it see
 // history that has been rotated since.
 func TestReader_Refresh(t *testing.T) {
@@ -405,22 +383,22 @@ func TestReader_Refresh(t *testing.T) {
 	assert.Len(t, r.rootManifest().Sealed, 1)
 }
 
-// --- Scanner -----------------------------------------------------------------
+// --- Positioned streaming (cursor) ---------------------------------------
 
-func TestScanner_SeekStart_Drain(t *testing.T) {
+func TestReader_SeekStart_Drain(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	sc.SeekStart()
 
 	assert.Equal(t, []uint64{0, 1, 2, 3, 4}, drain(t, sc),
 		"a SeekStart drain spans sealed history and the open region as one timeline")
 }
 
-func TestScanner_SeekStart_EmptyTrack(t *testing.T) {
+func TestReader_SeekStart_EmptyTrack(t *testing.T) {
 	_, objects := newTestWriter(t)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	sc.SeekStart()
 
 	_, err := sc.Next(t.Context())
@@ -429,7 +407,7 @@ func TestScanner_SeekStart_EmptyTrack(t *testing.T) {
 
 // SeekGroup is exclusive: it positions strictly after the named group, so a
 // resume never re-yields it.
-func TestScanner_SeekGroup(t *testing.T) {
+func TestReader_SeekGroup(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3) // sealed: 0,1,2  open: 3,4
 
 	tests := map[string]struct {
@@ -446,41 +424,43 @@ func TestScanner_SeekGroup(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			sc := openScanner(t, objects)
+			sc := openReader(t, objects)
 			require.NoError(t, sc.SeekGroup(t.Context(), tt.from))
 			assert.Equal(t, tt.expected, drain(t, sc))
 		})
 	}
 }
 
-func TestScanner_SeekMedia(t *testing.T) {
+// SeekMedia resolves the target group and positions the cursor there, so Next
+// plays forward from it.
+func TestReader_SeekMedia_Positions(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	sc := openScanner(t, objects)
+	r := openReader(t, objects)
 
 	// 450000 lands inside group 2 (360000..540000 at 90 kHz).
-	g, err := sc.SeekMedia(t.Context(), 450000)
+	g, err := r.SeekMedia(t.Context(), 450000)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2), g.Sequence)
-	assert.Equal(t, []uint64{2, 3, 4}, drain(t, sc), "Next plays forward from the seek target")
+	assert.Equal(t, []uint64{2, 3, 4}, drain(t, r), "Next plays forward from the seek target")
 }
 
-func TestScanner_SeekWallclock(t *testing.T) {
+func TestReader_SeekWallclock_Positions(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3)
 
-	sc := openScanner(t, objects)
+	r := openReader(t, objects)
 
 	// 5s after the first anchor lands in group 2.
-	g, err := sc.SeekWallclock(t.Context(), wallclockBase+5_000_000_000)
+	g, err := r.SeekWallclock(t.Context(), wallclockBase+5_000_000_000)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2), g.Sequence)
-	assert.Equal(t, []uint64{2, 3, 4}, drain(t, sc))
+	assert.Equal(t, []uint64{2, 3, 4}, drain(t, r))
 }
 
-func TestScanner_SeekTip(t *testing.T) {
+func TestReader_SeekTip(t *testing.T) {
 	objects, w := newPopulatedTrack(t, 3, 3)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	require.NoError(t, sc.SeekTip(t.Context()))
 
 	// At the tip there is nothing new yet.
@@ -496,10 +476,10 @@ func TestScanner_SeekTip(t *testing.T) {
 	assert.Equal(t, uint64(3), g.Sequence, "only the group committed after SeekTip should arrive")
 }
 
-func TestScanner_SeekTip_EmptyTrack(t *testing.T) {
+func TestReader_SeekTip_EmptyTrack(t *testing.T) {
 	_, objects := newTestWriter(t)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	require.NoError(t, sc.SeekTip(t.Context()))
 
 	_, err := sc.Next(t.Context())
@@ -508,10 +488,10 @@ func TestScanner_SeekTip_EmptyTrack(t *testing.T) {
 
 // Position survives a restart as text: String it, ParseGroupRef it back, and
 // SeekGroup resumes strictly after the recorded group.
-func TestScanner_Position_RoundTrip(t *testing.T) {
+func TestReader_Position_RoundTrip(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 4, 4)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	sc.SeekStart()
 
 	// Process two groups, then record the position.
@@ -523,14 +503,14 @@ func TestScanner_Position_RoundTrip(t *testing.T) {
 	resumed, err := ParseGroupRef(pos.String())
 	require.NoError(t, err)
 
-	// A fresh scanner resumes strictly after the recorded group.
-	sc2 := openScanner(t, objects)
+	// A fresh reader resumes strictly after the recorded group.
+	sc2 := openReader(t, objects)
 	require.NoError(t, sc2.SeekGroup(t.Context(), resumed))
 	assert.Equal(t, []uint64{2, 3}, drain(t, sc2), "resuming must continue after the recorded group")
 }
 
-// drainN advances the scanner n groups, failing if it hits io.EOF early.
-func drainN(tb testing.TB, sc *Scanner, n int) error {
+// drainN advances the reader n groups, failing if it hits io.EOF early.
+func drainN(tb testing.TB, sc *Reader, n int) error {
 	tb.Helper()
 	for range n {
 		if _, err := sc.Next(tb.Context()); err != nil {
@@ -540,24 +520,24 @@ func drainN(tb testing.TB, sc *Scanner, n int) error {
 	return nil
 }
 
-// Sealing deletes the deltas it folds up, so a Scanner parked at a delta that
+// Sealing deletes the deltas it folds up, so a Reader parked at a delta that
 // is later reclaimed must still reach those groups — from the sealed run — and
 // groups committed afterwards. This is the at-least-once path.
-func TestScanner_Next_SealReclaimRace(t *testing.T) {
+func TestReader_Next_SealReclaimRace(t *testing.T) {
 	w, objects := newTestWriter(t)
 	for sequence := range uint64(3) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
 		require.NoError(t, err)
 	}
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	sc.SeekStart()
 
-	// Consume group 0, parking the scanner at delta 1.
+	// Consume group 0, parking the reader at delta 1.
 	_, err := sc.Next(t.Context())
 	require.NoError(t, err)
 
-	// Seal reclaims deltas 0-2 (groups 0,1,2), deleting delta 1 the scanner
+	// Seal reclaims deltas 0-2 (groups 0,1,2), deleting delta 1 the reader
 	// is about to read.
 	require.NoError(t, w.Seal(t.Context()))
 	_, _, err = objects.Get(t.Context(), deltaKey(testTrack, 1))
@@ -587,10 +567,10 @@ func TestScanner_Next_SealReclaimRace(t *testing.T) {
 }
 
 // Next at the tip is non-blocking: it returns io.EOF, not a hang.
-func TestScanner_Next_ReturnsEOFAtTip(t *testing.T) {
+func TestReader_Next_ReturnsEOFAtTip(t *testing.T) {
 	objects, w := newPopulatedTrack(t, 1, 1)
 
-	sc := openScanner(t, objects)
+	sc := openReader(t, objects)
 	sc.SeekStart()
 
 	g, err := sc.Next(t.Context())
@@ -608,9 +588,9 @@ func TestScanner_Next_ReturnsEOFAtTip(t *testing.T) {
 	assert.Equal(t, uint64(1), g.Sequence, "a group committed after io.EOF still arrives")
 }
 
-// A stalled Scanner should cost one probe per poll, and re-read the root only
+// A stalled Reader should cost one probe per poll, and re-read the root only
 // on the first stall and periodically after — not every tick.
-func TestScanner_Next_IdlePollCost(t *testing.T) {
+func TestReader_Next_IdlePollCost(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		objects := &FakeStore{}
 
@@ -618,7 +598,7 @@ func TestScanner_Next_IdlePollCost(t *testing.T) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 		require.NoError(t, err)
 
-		sc := openScanner(t, objects)
+		sc := openReader(t, objects)
 		sc.SeekStart()
 		_, err = sc.Next(t.Context()) // drain the one group
 		require.NoError(t, err)
@@ -651,17 +631,17 @@ func TestScanner_Next_IdlePollCost(t *testing.T) {
 	})
 }
 
-// Scanners over one Reader are independent: one's progress and refreshes do
-// not move another's.
-func TestScanner_MultipleScannersShareReader(t *testing.T) {
+// Readers are independent: each holds its own root and cursor, so a concurrent
+// consumer opens its own rather than sharing one.
+func TestReader_MultipleReadersIndependent(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 3, 3)
 
-	sc1 := openScanner(t, objects)
-	sc2 := openScanner(t, objects)
-	sc1.SeekStart()
-	sc2.SeekStart()
+	first := openReader(t, objects)
+	second := openReader(t, objects)
+	first.SeekStart()
+	second.SeekStart()
 
-	assert.Equal(t, []uint64{0, 1, 2}, drain(t, sc1))
-	assert.Equal(t, []uint64{0, 1, 2}, drain(t, sc2),
-		"draining one scanner must not consume the other's groups")
+	assert.Equal(t, []uint64{0, 1, 2}, drain(t, first))
+	assert.Equal(t, []uint64{0, 1, 2}, drain(t, second),
+		"draining one reader must not consume the other's groups")
 }

@@ -101,30 +101,32 @@
 //
 // # Reading a track
 //
-// A [Reader] is stateless and safe for concurrent use. Its range methods answer
-// a bounded query as a snapshot: [Reader.RangeMedia] and [Reader.RangeWallclock]
-// iterate the groups overlapping a window, and [Reader.SeekMedia] and
-// [Reader.SeekWallclock] resolve a single instant to the group anchored at or
-// before it. Each fetches only the sealed runs that can contribute.
+// A [Reader] is one single-consumer handle that reads a track two ways.
 //
-// Open-ended streaming — seek and play forward, or tail new groups — is a
-// positioned [Scanner], in the shape of [bufio.Scanner] and [database/sql.Rows]:
+// Bounded queries answer a snapshot: [Reader.RangeMedia] and
+// [Reader.RangeWallclock] iterate the groups overlapping a window, and
+// [Reader.SeekMedia] and [Reader.SeekWallclock] resolve a single instant to the
+// group anchored at or before it. Each fetches only the sealed runs that can
+// contribute.
 //
-//	sc, _ := reader.NewScanner(ctx)
-//	sc.SeekStart()
+// Open-ended streaming — seek and play forward, or tail new groups — uses the
+// Reader's cursor, in the shape of [bufio.Scanner] and [database/sql.Rows]:
+//
+//	reader.SeekStart()
 //	for {
-//		group, err := sc.Next(ctx)
+//		group, err := reader.Next(ctx)
 //		if errors.Is(err, io.EOF) {
 //			// caught up for now; wait, then call Next again
 //		}
 //		// handle group
 //	}
 //
-// [Scanner.Next] is non-blocking and returns [io.EOF] at the current tip, so
+// [Reader.Next] is non-blocking and returns [io.EOF] at the current tip, so
 // tailing is a poll loop the caller owns — object stores do not push, and the
 // latency strategy (interval, signal, hybrid) is a deployment decision.
-// [Scanner.Position] returns the [GroupRef] to resume from, and [ParseGroupRef]
-// round-trips its text form across a restart.
+// [Reader.Position] returns the [GroupRef] to resume from, and [ParseGroupRef]
+// round-trips its text form across a restart. Concurrent consumers each open
+// their own Reader, which costs one root fetch.
 //
 // # Reading without the ledger
 //

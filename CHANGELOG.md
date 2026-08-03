@@ -62,15 +62,16 @@ once: the unit of independent decoding *and* the unit of storage.
   group's end, and takes a fully populated `GroupInfo`.
 
 - **ledger:** `AppendGroup` refuses a group that contradicts its predecessor —
-  one starting before the previous ended, or carrying an epoch behind the
-  track's (`ErrGroupOutOfOrder`). Gaps remain legal, since a dropped group is
-  real information rather than corruption.
+  one starting before the previous ended (`ErrGroupOutOfOrder`). Gaps remain
+  legal, since a dropped group is real information rather than corruption.
 
 - **ledger:** Group identity is `(Epoch, Sequence)`. Producers reset numbering
   on restart, and because group objects are immutable a reused sequence would
   collide rather than overwrite. The producer's own numbering is preserved
   rather than renumbered, so clients can align replay against a relay serving
-  the same track live.
+  the same track live. The writer owns the current epoch — it stamps `Epoch`
+  from its root on every append, ignoring any caller-supplied value — and a
+  producer restart advances it through an explicit `Writer.AdvanceEpoch` verb.
 
 - **ledger:** `Reader` answers windows, not just instants: `RangeMedia` and
   `RangeWallclock` iterate the groups overlapping a range, fetching only the
@@ -81,14 +82,15 @@ once: the unit of independent decoding *and* the unit of storage.
   to be running anywhere. Manifests are verified against the key they were
   fetched from, so a misfiled or swapped object is caught rather than trusted.
 
-- **ledger:** `Reader.NewScanner` returns a positioned `Scanner` — in the shape
-  of `bufio.Scanner` and `database/sql.Rows` — that streams a track's groups in
-  commit order. `SeekMedia`, `SeekWallclock`, `SeekGroup`, and `SeekTip`
-  position it; `Next` returns each group and `io.EOF` at the current tip.
-  Tailing is a poll loop the caller owns (object stores do not push), and
-  `Position` returns the `GroupRef` to resume from — `ParseGroupRef` round-trips
-  its text form, so a follower survives a restart and stays valid across a seal
-  that reclaims the deltas it was reading.
+- **ledger:** The same `Reader` also streams a track's groups in commit order,
+  in the shape of `bufio.Scanner` and `database/sql.Rows`: `SeekStart`,
+  `SeekTip`, `SeekGroup`, `SeekMedia`, and `SeekWallclock` position its cursor,
+  and `Next` returns each group and `io.EOF` at the current tip. Tailing is a
+  poll loop the caller owns (object stores do not push), and `Position` returns
+  the `GroupRef` to resume from — `ParseGroupRef` round-trips its text form, so
+  a follower survives a restart and stays valid across a seal that reclaims the
+  deltas it was reading. A Reader is single-consumer; concurrent consumers each
+  open their own, which costs one root fetch.
 
 - **ledger/store:** The storage contract — conditional create (`ErrExist`) as
   the primitive everything rests on, compare-and-swap for the single mutable

@@ -55,9 +55,10 @@ writer, _ := track.Writer(ctx)
 writer.Append(ctx, 180000, payload) // two seconds at 90 kHz
 
 // AppendGroup is the escape hatch — a producer's own numbering, a dropped
-// group, or a media anchor that is not simply the previous group's end.
+// group, or a media anchor that is not simply the previous group's end. The
+// writer fills Epoch (advance it with Writer.AdvanceEpoch on a restart).
 writer.AppendGroup(ctx, ledger.GroupInfo{
-    GroupRef:  ledger.GroupRef{Epoch: 1, Sequence: 42},
+    GroupRef:  ledger.GroupRef{Sequence: 42},
     MediaTime: 7560000, // media anchor, in timescale units
     Duration:  180000,  // optional: two seconds at 90 kHz
     Wallclock: w0,      // optional: wallclock anchor, Unix nanoseconds
@@ -79,14 +80,13 @@ for group, err := range reader.RangeWallclock(ctx, from, to) {
 }
 
 // Following is polling, because object stores do not push — but the poll loop
-// is the caller's. A Scanner streams the track in commit order and reports its
+// is the caller's. The Reader streams the track in commit order and reports its
 // position, so a follower can persist it and resume.
-sc, _ := reader.NewScanner(ctx)
-sc.SeekTip(ctx)
+reader.SeekTip(ctx)
 ticker := time.NewTicker(ledger.DefaultPollInterval)
 defer ticker.Stop()
 for {
-    group, err := sc.Next(ctx)
+    group, err := reader.Next(ctx)
     if errors.Is(err, io.EOF) {
         select {
         case <-ctx.Done():
@@ -98,7 +98,7 @@ for {
     if err != nil {
         return err
     }
-    save(sc.Position()) // survives a restart: it is the GroupRef text
+    save(reader.Position()) // survives a restart: it is the GroupRef text
 }
 ```
 

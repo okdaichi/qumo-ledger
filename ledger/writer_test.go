@@ -216,7 +216,7 @@ func TestWriter_AppendGroup_Duplicate(t *testing.T) {
 func TestWriter_AppendGroup_InvalidMeta(t *testing.T) {
 	w, _ := newTestWriter(t)
 
-	_, err := w.AppendGroup(t.Context(), GroupInfo{GroupRef: GroupRef{Epoch: 0, Sequence: 1}}, []byte("x"))
+	_, err := w.AppendGroup(t.Context(), GroupInfo{GroupRef: GroupRef{Sequence: 1}, Duration: -1}, []byte("x"))
 
 	assert.ErrorIs(t, err, ErrInvalidGroup)
 }
@@ -243,10 +243,12 @@ func TestWriter_AppendGroup_EpochSeparatesProducerLifetimes(t *testing.T) {
 	_, err := w.AppendGroup(t.Context(), first, []byte("before restart"))
 	require.NoError(t, err)
 
-	restarted := testGroup(t, 7)
-	restarted.Epoch = 2
-	second, err := w.AppendGroup(t.Context(), restarted, []byte("after restart"))
-	require.NoError(t, err, "a new epoch must give the reused sequence a fresh keyspace")
+	require.NoError(t, w.AdvanceEpoch(t.Context()))
+
+	// The same sequence under a new epoch must get a fresh keyspace rather than
+	// colliding with the immutable object from the previous lifetime.
+	second, err := w.AppendGroup(t.Context(), testGroup(t, 7), []byte("after restart"))
+	require.NoError(t, err)
 
 	assert.NotEqual(t, first.ObjectKey, second.ObjectKey)
 	assert.Equal(t, uint64(2), w.Root().Epoch, "the root advances to the epoch being written")
@@ -284,22 +286,6 @@ func TestWriter_AppendGroup_AllowsGapAfterPredecessor(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestWriter_AppendGroup_RejectsRewoundEpoch(t *testing.T) {
-	w, _ := newTestWriter(t)
-
-	advanced := testGroup(t, 0)
-	advanced.Epoch = 3
-	_, err := w.AppendGroup(t.Context(), advanced, []byte("payload"))
-	require.NoError(t, err)
-
-	stale := testGroup(t, 1)
-	stale.Epoch = 2
-
-	_, err = w.AppendGroup(t.Context(), stale, []byte("payload"))
-
-	assert.ErrorIs(t, err, ErrGroupOutOfOrder)
-}
-
 // An epoch restarts the timeline, so the ordering check must not carry across
 // one — group 0 of a new epoch legitimately precedes the old epoch's last.
 func TestWriter_AppendGroup_OrderingResetsWithEpoch(t *testing.T) {
@@ -308,13 +294,49 @@ func TestWriter_AppendGroup_OrderingResetsWithEpoch(t *testing.T) {
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 9), []byte("payload"))
 	require.NoError(t, err)
 
+	require.NoError(t, w.AdvanceEpoch(t.Context()))
+
 	restarted := testGroup(t, 0)
-	restarted.Epoch = 2
 	restarted.MediaTime = 0
 
 	_, err = w.AppendGroup(t.Context(), restarted, []byte("payload"))
 
-	assert.NoError(t, err)
+	assert.NoError(t, err, "a new epoch restarts the timeline, so group 0 may precede the old epoch's last")
+}
+
+// AdvanceEpoch persists a new epoch that survives a reopen, and a reused
+// sequence under it lands in a fresh keyspace.
+func TestWriter_AdvanceEpoch(t *testing.T) {
+	objects := memstore.New()
+	track, err := Create(t.Context(), objects, testTrack, testConfig(t), Config{})
+	require.NoError(t, err)
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+
+	first, err := w.AppendGroup(t.Context(), testGroup(t, 3), []byte("before"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), w.Root().Epoch)
+
+	require.NoError(t, w.AdvanceEpoch(t.Context()))
+	require.Equal(t, uint64(2), w.Root().Epoch, "AdvanceEpoch advances the epoch immediately")
+
+	// The same sequence under the new epoch gets its own object key.
+	second, err := w.AppendGroup(t.Context(), testGroup(t, 3), []byte("after"))
+	require.NoError(t, err)
+	assert.NotEqual(t, first.ObjectKey, second.ObjectKey)
+
+	// The advanced epoch persists across a reopen.
+	reopened, err := Open(t.Context(), objects, testTrack, Config{})
+	require.NoError(t, err)
+	reopenedReader, err := reopened.Reader(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), reopenedReader.Root().Epoch, "the advanced epoch must be durable")
+
+	// Both keys resolve.
+	for _, meta := range []GroupInfo{first, second} {
+		_, _, err := objects.Get(t.Context(), meta.ObjectKey)
+		assert.NoError(t, err, "group %s must be readable", meta.GroupRef)
+	}
 }
 
 // A track declaring frame-derived timestamps must keep an absent anchor absent
@@ -421,11 +443,9 @@ func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
 		"the root summary must match the sealed manifest it points at")
 
 	r := openReader(t, objects)
-	sc, err := r.NewScanner(t.Context())
-	require.NoError(t, err)
-	sc.SeekStart()
+	r.SeekStart()
 
-	assert.Equal(t, []uint64{0, 1, 2, 3}, drain(t, sc), "no committed group may become unreachable")
+	assert.Equal(t, []uint64{0, 1, 2, 3}, drain(t, r), "no committed group may become unreachable")
 }
 
 func TestWriter_Seal_Empty(t *testing.T) {
