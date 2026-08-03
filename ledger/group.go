@@ -15,6 +15,15 @@ import (
 // each producer lifetime into its own keyspace, so a restart continues cleanly
 // while the producer's original sequence numbers survive intact for clients
 // aligning replay against a live relay.
+//
+// Treat [GroupRef.String] as the identifier to hold onto: it is the stable,
+// portable form, and [ParseGroupRef] recovers the ref from it. Persist that
+// string in a state file, a database column, or a log line rather than the two
+// numbers, and the pair stays an implementation detail you never have to
+// reassemble. The fields are exported because a GroupRef is embedded in
+// [GroupInfo], which is the manifest's own JSON shape; reading Epoch and
+// Sequence directly is for interpreting a ref, not for building one — the
+// writer assigns Epoch (see [Writer.AdvanceEpoch]).
 type GroupRef struct {
 	// Epoch increments each time a producer restarts its numbering.
 	Epoch uint64 `json:"epoch"`

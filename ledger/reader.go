@@ -363,6 +363,13 @@ func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
 // Position returns the most recently yielded group, for saving across a
 // restart. Pass it to [Reader.SeekGroup] to resume strictly after it.
 //
+// Save it as text — [GroupRef.String] on the way out, [ParseGroupRef] on the
+// way back — so a consumer's stored position is one opaque string:
+//
+//	save(reader.Position().String())     // "e000001-g00000042"
+//	ref, _ := ledger.ParseGroupRef(saved)
+//	reader.SeekGroup(ctx, ref)
+//
 // Before any group has been yielded it is the zero [GroupRef], which SeekGroup
 // reads as "from the start."
 func (r *Reader) Position() GroupRef { return r.last }
