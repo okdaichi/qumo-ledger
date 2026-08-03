@@ -4,7 +4,7 @@
 // storage format itself: a Group is one segment, [ledger.GroupInfo.Duration]
 // becomes HLS EXTINF and DASH @d, a new producer epoch becomes an HLS
 // #EXT-X-DISCONTINUITY and a DASH timeline reset, and a wallclock anchor becomes
-// #EXT-X-PROGRAM-DATE-TIME and the MPD availabilityStartTime. A [Server] is an
+// #EXT-X-PROGRAM-DATE-TIME and the MPD availabilityStartTime. A [Handler] is an
 // [http.Handler] over one [*ledger.Track] that routes playlist and manifest
 // requests and serves the segments both point at.
 //

@@ -23,8 +23,8 @@ type trackFixture struct {
 	payload [][]byte
 }
 
-func newTrackFixture(t *testing.T) trackFixture {
-	t.Helper()
+func newTrackFixture(tb testing.TB) trackFixture {
+	tb.Helper()
 	ctx := context.Background()
 
 	store := memstore.New()
@@ -32,10 +32,10 @@ func newTrackFixture(t *testing.T) trackFixture {
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
 	}, ledger.Config{})
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	writer, err := track.Writer(ctx)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	fix := trackFixture{track: track}
 	for sequence := range int64(2) {
@@ -45,18 +45,18 @@ func newTrackFixture(t *testing.T) trackFixture {
 			MediaTime: sequence * 180000,
 			Duration:  180000,
 		}, payload)
-		require.NoError(t, err)
+		require.NoError(tb, err)
 		fix.metas = append(fix.metas, meta)
 		fix.payload = append(fix.payload, payload)
 	}
 	return fix
 }
 
-func TestServer_HLSPlaylist(t *testing.T) {
+func TestHandler_HLSPlaylist(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{})
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/playlist.m3u8")
@@ -75,11 +75,11 @@ func TestServer_HLSPlaylist(t *testing.T) {
 	assert.Contains(t, got, fix.metas[1].ID.String()+".m4s")
 }
 
-func TestServer_DASHManifest(t *testing.T) {
+func TestHandler_DASHManifest(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{})
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/manifest.mpd")
@@ -99,11 +99,11 @@ func TestServer_DASHManifest(t *testing.T) {
 }
 
 // The default resolver proxies: a segment request returns the stored bytes.
-func TestServer_SegmentProxies(t *testing.T) {
+func TestHandler_SegmentProxies(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{})
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
@@ -120,15 +120,15 @@ func TestServer_SegmentProxies(t *testing.T) {
 
 // A redirect resolver sends the player straight to the object: the handler asks
 // the resolver and 302s to whatever URL it mints from ObjectKey.
-func TestServer_SegmentRedirect(t *testing.T) {
+func TestHandler_SegmentRedirect(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{
+	handler, err := stream.NewHandler(fix.track, stream.Options{
 		Resolver: stream.RedirectResolver(func(g ledger.GroupInfo) string {
 			return "https://objects.example/" + g.ObjectKey
 		}),
 	})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	// Do not follow the redirect: the test asserts the 302, not the object store.
@@ -145,11 +145,11 @@ func TestServer_SegmentRedirect(t *testing.T) {
 	assert.Equal(t, "https://objects.example/"+fix.metas[1].ObjectKey, loc.String())
 }
 
-func TestServer_UnknownSegmentNotFound(t *testing.T) {
+func TestHandler_UnknownSegmentNotFound(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{})
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	// A sequence that was never committed.
@@ -162,11 +162,11 @@ func TestServer_UnknownSegmentNotFound(t *testing.T) {
 
 // Serving is concurrent-safe: many segment requests at once must not race. The
 // race detector is the assertion.
-func TestServer_ConcurrentSegments(t *testing.T) {
+func TestHandler_ConcurrentSegments(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{})
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	var wg sync.WaitGroup
@@ -187,13 +187,13 @@ func TestServer_ConcurrentSegments(t *testing.T) {
 
 // A supplied init segment is served at /init.<ext> and referenced from both
 // manifests.
-func TestServer_InitSegment(t *testing.T) {
+func TestHandler_InitSegment(t *testing.T) {
 	fix := newTrackFixture(t)
-	server, err := stream.NewServer(fix.track, stream.Options{
+	handler, err := stream.NewHandler(fix.track, stream.Options{
 		InitSegment: stream.InitSegment{Bytes: []byte("init-bytes")},
 	})
 	require.NoError(t, err)
-	ts := httptest.NewServer(server)
+	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/init.m4s")

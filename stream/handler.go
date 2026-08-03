@@ -12,11 +12,12 @@ import (
 	"github.com/okdaichi/qumo-ledger/ledger"
 )
 
-// Server serves one track over HTTP as both HLS and DASH. It implements
-// [http.Handler] and routes by the request URL's base name, so it is
-// mount-point-agnostic — mount it at the track's path:
+// Handler serves one track over HTTP as both HLS and DASH. It implements
+// [http.Handler] but owns no listener and no lifecycle: drop it into an
+// [http.Server], the way [http.FileServer] is used. It routes by the request
+// URL's base name, so it is mount-point-agnostic — mount it at the track's path:
 //
-//	mux.Handle("/"+string(track)+"/", server)
+//	mux.Handle("/"+string(track)+"/", handler)
 //
 //	.../playlist.m3u8 (or any *.m3u8)  the HLS media playlist
 //	.../manifest.mpd   (or any *.mpd)   the DASH MPD
@@ -26,7 +27,7 @@ import (
 // A fresh [*ledger.Reader] is opened per request. A Reader is single-consumer,
 // and concurrent consumers each opening their own is the documented cheap
 // pattern, so the handler does that rather than share one.
-type Server struct {
+type Handler struct {
 	track    *ledger.Track
 	schema   ledger.TrackSchema
 	resolver SegmentResolver
@@ -35,7 +36,7 @@ type Server struct {
 	segMIME  string
 }
 
-// Options configures a [Server]. The zero value is usable alongside a track: the
+// Options configures a [Handler]. The zero value is usable alongside a track: the
 // resolver proxies, segments take the schema's extension and MIME, and no init
 // segment is emitted.
 type Options struct {
@@ -69,10 +70,10 @@ type InitSegment struct {
 	URL string
 }
 
-// NewServer builds a [Server] over track. It reads the track root once to derive
-// the segment extension and MIME from the schema; the matching Options fields
-// override them.
-func NewServer(track *ledger.Track, opts Options) (*Server, error) {
+// NewHandler builds a [Handler] over track. It reads the track root once to
+// derive the segment extension and MIME from the schema; the matching Options
+// fields override them.
+func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 	if track == nil {
 		return nil, errors.New("stream: nil track")
 	}
@@ -93,7 +94,7 @@ func NewServer(track *ledger.Track, opts Options) (*Server, error) {
 		resolver = ProxyResolver{}
 	}
 
-	return &Server{
+	return &Handler{
 		track:    track,
 		schema:   info.TrackSchema,
 		resolver: resolver,
@@ -104,74 +105,74 @@ func NewServer(track *ledger.Track, opts Options) (*Server, error) {
 }
 
 // ServeHTTP routes a request to the playlist, manifest, segment, or init handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	base := path.Base(r.URL.Path)
 	switch {
 	case strings.HasSuffix(base, ".m3u8"):
-		s.serveHLS(w, r)
+		h.serveHLS(w, r)
 	case strings.HasSuffix(base, ".mpd"):
-		s.serveDASH(w, r)
-	case base == "init"+s.segExt:
-		s.serveInit(w, r)
+		h.serveDASH(w, r)
+	case base == "init"+h.segExt:
+		h.serveInit(w, r)
 	default:
-		s.serveSegment(w, r)
+		h.serveSegment(w, r)
 	}
 }
 
 // serveHLS renders and writes the HLS media playlist.
-func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request) {
-	groups, err := s.gather(r.Context())
+func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
+	groups, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderHLS(s.schema, groups, s.renderOpts())
+	body, err := renderHLS(h.schema, groups, h.renderOpts())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) // not actionable: once the body write fails the client is gone
 }
 
 // serveDASH renders and writes the DASH MPD.
-func (s *Server) serveDASH(w http.ResponseWriter, r *http.Request) {
-	groups, err := s.gather(r.Context())
+func (h *Handler) serveDASH(w http.ResponseWriter, r *http.Request) {
+	groups, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderDASH(s.schema, groups, s.renderOpts())
+	body, err := renderDASH(h.schema, groups, h.renderOpts())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/dash+xml")
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) // not actionable: once the body write fails the client is gone
 }
 
 // serveInit writes the caller-supplied init segment, when there is one.
-func (s *Server) serveInit(w http.ResponseWriter, r *http.Request) {
-	if len(s.init.Bytes) == 0 {
+func (h *Handler) serveInit(w http.ResponseWriter, r *http.Request) {
+	if len(h.init.Bytes) == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", s.segMIME)
-	w.Header().Set("Content-Length", strconv.Itoa(len(s.init.Bytes)))
-	_, _ = w.Write(s.init.Bytes)
+	w.Header().Set("Content-Type", h.segMIME)
+	w.Header().Set("Content-Length", strconv.Itoa(len(h.init.Bytes)))
+	_, _ = w.Write(h.init.Bytes) // not actionable: once the body write fails the client is gone
 }
 
 // serveSegment resolves a segment by its GroupID and either redirects to it or
 // proxies its bytes. One handler serves both HLS and DASH, since both address
 // segments by GroupID.
-func (s *Server) serveSegment(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseSegmentID(path.Base(r.URL.Path), s.segExt)
+func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseSegmentID(path.Base(r.URL.Path), h.segExt)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 
-	reader, err := s.track.Reader(r.Context())
+	reader, err := h.track.Reader(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -185,7 +186,7 @@ func (s *Server) serveSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, err := s.resolver.ResolveSegment(r.Context(), group)
+	url, err := h.resolver.ResolveSegment(r.Context(), group)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -203,17 +204,17 @@ func (s *Server) serveSegment(w http.ResponseWriter, r *http.Request) {
 
 	mime := group.MIME
 	if mime == "" {
-		mime = s.segMIME
+		mime = h.segMIME
 	}
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	_, _ = w.Write(data)
+	_, _ = w.Write(data) // not actionable: once the body write fails the client is gone
 }
 
 // gather opens a Reader, rewinds to the start, and drains every committed group
 // in commit order. It is the shared input to both renderers.
-func (s *Server) gather(ctx context.Context) ([]ledger.GroupInfo, error) {
-	reader, err := s.track.Reader(ctx)
+func (h *Handler) gather(ctx context.Context) ([]ledger.GroupInfo, error) {
+	reader, err := h.track.Reader(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -232,19 +233,19 @@ func (s *Server) gather(ctx context.Context) ([]ledger.GroupInfo, error) {
 	}
 }
 
-// renderOpts is the renderers' input projected from the server's resolved state.
-func (s *Server) renderOpts() renderOpts {
-	return renderOpts{segExt: s.segExt, initURI: s.initURI()}
+// renderOpts is the renderers' input projected from the handler's resolved state.
+func (h *Handler) renderOpts() renderOpts {
+	return renderOpts{segExt: h.segExt, initURI: h.initURI()}
 }
 
 // initURI is the URI both manifests reference for the init segment: a local path
-// when the server serves the bytes, the caller's URL when it does not.
-func (s *Server) initURI() string {
+// when the handler serves the bytes, the caller's URL when it does not.
+func (h *Handler) initURI() string {
 	switch {
-	case len(s.init.Bytes) > 0:
-		return "init" + s.segExt
-	case s.init.URL != "":
-		return s.init.URL
+	case len(h.init.Bytes) > 0:
+		return "init" + h.segExt
+	case h.init.URL != "":
+		return h.init.URL
 	default:
 		return ""
 	}
