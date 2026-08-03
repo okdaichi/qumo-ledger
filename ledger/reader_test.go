@@ -405,9 +405,9 @@ func TestReader_SeekStart_EmptyTrack(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
-// SeekGroup is exclusive: it positions strictly after the named group, so a
+// SeekAfter is exclusive: it positions strictly after the named group, so a
 // resume never re-yields it.
-func TestReader_SeekGroup(t *testing.T) {
+func TestReader_SeekAfter(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 5, 3) // sealed: 0,1,2  open: 3,4
 
 	tests := map[string]struct {
@@ -425,10 +425,33 @@ func TestReader_SeekGroup(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			sc := openReader(t, objects)
-			require.NoError(t, sc.SeekGroup(t.Context(), tt.from))
+			require.NoError(t, sc.SeekAfter(t.Context(), tt.from))
 			assert.Equal(t, tt.expected, drain(t, sc))
 		})
 	}
+}
+
+// The zero ref precedes every group, so SeekAfter with one is SeekStart — and
+// must cost nothing. Locating "the group after nothing" the general way would
+// fetch a sealed manifest to find the first group.
+func TestReader_SeekAfter_ZeroRefCostsNoRequest(t *testing.T) {
+	objects := &FakeStore{}
+
+	w := newWriter(t, objects, Config{})
+	for sequence := range uint64(2) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Seal(t.Context()))
+
+	r := openReader(t, objects)
+	objects.ResetCalls()
+
+	require.NoError(t, r.SeekAfter(t.Context(), GroupRef{}))
+
+	assert.Equal(t, 0, objects.GetCount(func(string) bool { return true }),
+		"seeking after the zero ref must rewind the cursor rather than fetch")
+	assert.Equal(t, []uint64{0, 1}, drain(t, r), "and it must still read from the start")
 }
 
 // SeekMedia resolves the target group and positions the cursor there, so Next
@@ -487,7 +510,7 @@ func TestReader_SeekTip_EmptyTrack(t *testing.T) {
 }
 
 // Position survives a restart as text: String it, ParseGroupRef it back, and
-// SeekGroup resumes strictly after the recorded group.
+// SeekAfter resumes strictly after the recorded group.
 func TestReader_Position_RoundTrip(t *testing.T) {
 	objects, _ := newPopulatedTrack(t, 4, 4)
 
@@ -505,7 +528,7 @@ func TestReader_Position_RoundTrip(t *testing.T) {
 
 	// A fresh reader resumes strictly after the recorded group.
 	sc2 := openReader(t, objects)
-	require.NoError(t, sc2.SeekGroup(t.Context(), resumed))
+	require.NoError(t, sc2.SeekAfter(t.Context(), resumed))
 	assert.Equal(t, []uint64{2, 3}, drain(t, sc2), "resuming must continue after the recorded group")
 }
 

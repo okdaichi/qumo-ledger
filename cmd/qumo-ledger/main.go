@@ -157,7 +157,7 @@ func follow(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := reader.SeekGroup(ctx, from); err != nil {
+		if err := reader.SeekAfter(ctx, from); err != nil {
 			return err
 		}
 	case *tip:

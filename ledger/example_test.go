@@ -265,7 +265,7 @@ func ExampleReader_Next() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := restarted.SeekGroup(ctx, resumed); err != nil {
+	if err := restarted.SeekAfter(ctx, resumed); err != nil {
 		log.Fatal(err)
 	}
 	group, err := restarted.Next(ctx)

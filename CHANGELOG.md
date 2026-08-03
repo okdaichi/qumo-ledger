@@ -90,7 +90,7 @@ once: the unit of independent decoding *and* the unit of storage.
 
 - **ledger:** The same `Reader` also streams a track's groups in commit order,
   in the shape of `bufio.Scanner` and `database/sql.Rows`: `SeekStart`,
-  `SeekTip`, `SeekGroup`, `SeekMedia`, and `SeekWallclock` position its cursor,
+  `SeekTip`, `SeekAfter`, `SeekMedia`, and `SeekWallclock` position its cursor,
   and `Next` returns each group and `io.EOF` at the current tip. Tailing is a
   poll loop the caller owns (object stores do not push), and `Position` returns
   the `GroupRef` to resume from — `ParseGroupRef` round-trips its text form, so

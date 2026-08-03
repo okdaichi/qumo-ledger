@@ -31,6 +31,17 @@ import (
 // following Next yields. [Reader.Position] returns the [GroupRef] to resume
 // from; [ParseGroupRef] round-trips its text form across a restart.
 //
+// The Seek methods differ in where they land, which their names carry. The
+// time-based ones are inclusive — a caller asking about an instant wants the
+// group covering it — while [Reader.SeekAfter] is exclusive, because a caller
+// replaying from a recorded position has already handled that group:
+//
+//	SeekStart()          the first group          (free: no request)
+//	SeekTip(ctx)         after everything committed
+//	SeekAfter(ctx, ref)  strictly after ref
+//	SeekMedia(ctx, t)    on the group covering t
+//	SeekWallclock(ctx,t) on the group covering t
+//
 // Tailing is a poll loop the caller owns, because object stores do not push:
 //
 //	reader.SeekTip(ctx)
@@ -72,7 +83,7 @@ type Reader struct {
 
 	root rootManifest
 
-	// Cursor state for streaming (SeekStart/SeekTip/SeekGroup + Next). Not
+	// Cursor state for streaming (SeekStart/SeekTip/SeekAfter + Next). Not
 	// safe for concurrent use.
 	next   uint64
 	idx    int
@@ -272,10 +283,25 @@ func (r *Reader) SeekTip(ctx context.Context) error {
 	return nil
 }
 
-// SeekGroup positions the Reader strictly after ref, so a following
+// SeekAfter positions the Reader strictly after ref, so a following
 // [Reader.Next] loop resumes without re-yielding the group ref names. Pair it
 // with [Reader.Position] to resume across a restart.
-func (r *Reader) SeekGroup(ctx context.Context, ref GroupRef) error {
+//
+// The exclusivity is what makes it a resume: [Reader.SeekMedia] and
+// [Reader.SeekWallclock] land *on* the group they resolve, because a caller
+// asking about an instant wants the group covering it. A caller replaying from a
+// recorded position has already handled that group and wants the next one — and
+// cannot name it, since producer sequences are gappy.
+//
+// The zero ref precedes every group, so SeekAfter with one is [Reader.SeekStart].
+func (r *Reader) SeekAfter(ctx context.Context, ref GroupRef) error {
+	if ref == (GroupRef{}) {
+		// Nothing precedes the start, and rewinding costs no request where
+		// locating the first group would fetch a sealed manifest.
+		r.SeekStart()
+		return nil
+	}
+
 	seg, idx, after, err := r.locateAfter(ctx, r.root, ref)
 	if err != nil {
 		return err
@@ -361,16 +387,16 @@ func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
 }
 
 // Position returns the most recently yielded group, for saving across a
-// restart. Pass it to [Reader.SeekGroup] to resume strictly after it.
+// restart. Pass it to [Reader.SeekAfter] to resume strictly after it.
 //
 // Save it as text — [GroupRef.String] on the way out, [ParseGroupRef] on the
 // way back — so a consumer's stored position is one opaque string:
 //
 //	save(reader.Position().String())     // "e000001-g00000042"
 //	ref, _ := ledger.ParseGroupRef(saved)
-//	reader.SeekGroup(ctx, ref)
+//	reader.SeekAfter(ctx, ref)
 //
-// Before any group has been yielded it is the zero [GroupRef], which SeekGroup
+// Before any group has been yielded it is the zero [GroupRef], which SeekAfter
 // reads as "from the start."
 func (r *Reader) Position() GroupRef { return r.last }
 
