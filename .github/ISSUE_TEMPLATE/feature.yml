@@ -1,0 +1,82 @@
+name: "Feature Request"
+description: "Propose a new feature or improvement"
+title: "[FEATURE] "
+labels: ["type:feature", "status:triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for contributing! Please provide the following information.
+
+  - type: textarea
+    id: overview
+    attributes:
+      label: "Overview"
+      description: "Briefly describe the purpose of this feature."
+      placeholder: |
+        Example: A short summary of what this feature is intended to accomplish.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation_benefits
+    attributes:
+      label: "Motivation & Benefits"
+      description: "Why is this feature needed, and what advantages does it bring?"
+      placeholder: |
+        Example: Explain the problem this feature solves, and what benefits it provides to users or developers.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: "Use Case"
+      description: "Describe how this feature would be used."
+      placeholder: |
+        Example: Provide a typical scenario where this feature would be applied.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: "Proposed Solution (include Next Steps)"
+      description: "Provide a high-level idea of how this could be implemented, including suggested next steps."
+      placeholder: |
+        Example: Describe the approach for implementing this feature, along with any suggested next steps for discussion or prototyping.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives Considered"
+      description: "Any other approaches you considered"
+      placeholder: |
+        Example: List any alternative solutions or approaches that were considered.
+    validations:
+      required: false
+
+  - type: input
+    id: related_issues
+    attributes:
+      label: "Related issues"
+      description: "Please provide the issue number or URL of related issues (optional). Example: #123, https://github.com/owner/repo/issues/123"
+      placeholder: "#123, https://github.com/owner/repo/issues/123"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist"
+      options:
+        - label: "I have searched existing issues"
+          required: true
+        - label: "I have read relevant documentation"
+          required: false
+        - label: "I can contribute to this feature"
+          required: false
