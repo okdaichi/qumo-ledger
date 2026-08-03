@@ -101,7 +101,7 @@ func TestTrackInfo_TrackSchema(t *testing.T) {
 	assert.Equal(t, uint32(90000), source.Timescale)
 	assert.Equal(t, TimeSourceFrame, source.TimeSource)
 	assert.Equal(t, TrackPath("live/cam1/video"), source.Track)
-	assert.Equal(t, uint64(1), source.Epoch)
+	assert.Equal(t, uint64(1), source.LatestEpoch)
 
 	// The schema is a value, so a second track can be created with the first
 	// one's schema rather than restating it.

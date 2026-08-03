@@ -17,14 +17,16 @@ This document records the decisions and, more importantly, why they were made.
 
 ```
 <track-path>/
-  root.manifest                 track metadata; changes only on seal or epoch change
-  delta/
-    head                        {delta, latest}  ← the only mutable object
-    open/00000042.manifest      immutable, one per commit
-    open/00000043.manifest
-    sealed-000001.manifest      immutable, rotated by size
-  groups/
-    e000001-g00000042           immutable payload
+  root.manifest                 track root: schema + latest epoch (near-immutable)
+  e000001/                      one producer lifetime
+    log.manifest                epoch's log root: sealed index, open region
+    delta/
+      head                      {delta, latest}  ← the only mutable object, per epoch
+      open/00000042.manifest    immutable, one per commit
+      sealed-00000001.manifest  immutable, rotated by size
+    groups/
+      g00000042                 immutable payload (sequence in the key)
+  e000002/                      the next producer lifetime, its own log
 ```
 
 ---
@@ -125,27 +127,33 @@ only by garbage collection.
 dropped under congestion, so a gap is real information rather than corruption.
 Readers must take a Group's key from `GroupInfo.ObjectKey` and never derive it.
 
-## 8. Group identity is `(Epoch, Sequence)`
+## 8. Group identity is a single `GroupID`
 
 **Why.** Sequence alone is not an identity: a producer that restarts resets its
 numbering, and because group objects are immutable a reused sequence would
-*collide* rather than overwrite — leaving the track wedged. `Epoch` gives each
-producer lifetime its own keyspace.
+*collide* rather than overwrite — leaving the track wedged. Epoch gives each
+producer lifetime its own keyspace, so it must be part of identity.
+
+But epoch is carried *inside one number*, not handled as a separate dimension. A
+`GroupID` packs the epoch into the high bits and the sequence into the low, so
+numeric order is commit order across the whole track: a reader streams one
+ascending run of IDs and epoch boundaries are invisible to it. Callers handle a
+single value; `GroupID.String` is the portable form for logs and persisted
+positions, and `ParseGroupID` recovers it.
 
 The producer's own sequence numbers are preserved rather than renumbered, and
 that is the whole point: a relay serving the same track live uses those numbers,
 and a client can only align live playback against replay if both agree on what
 group 42 is. Renumbering would break decision 2's contract with clients.
 
-**How an epoch advances.** The writer owns the current epoch: `Append` and
-`AppendGroup` stamp it from the writer's root, ignoring any caller-supplied
-value (as they already do for `ObjectKey` and `Size`). A producer restart is an
-explicit verb — `Writer.AdvanceEpoch` — rather than something inferred from the
-appended metadata. That keeps a caller from fabricating inconsistent epochs, and
-makes a restart a durable, visible event (a root update) rather than a side
-effect of the next append. Epoch stays observable on read: it appears in every
-read-side `GroupInfo` and in the resume `GroupRef`, where it disambiguates
-sequences across producer lifetimes.
+**How an epoch advances.** Each producer lifetime is its own append-only log
+under `<track>/e%06d/`, so a reused sequence under a new epoch lands in a fresh
+keyspace rather than colliding. A writer opens at the track's latest epoch, and
+a producer restart is an explicit verb — `Writer.NewEpoch` — which creates the
+next log and switches the writer to it. Epoch is never a number a caller passes;
+it is the writer's lifetime, stamped onto every appended group. The track root
+is near-immutable as a result: it changes only when an epoch is created, never
+on a seal.
 
 ## 9. A group is anchored on two timelines, not described as an interval
 
@@ -284,12 +292,13 @@ separate "bucket" type to explain alongside it.
 
 ## 13. Manifests are an internal wire format, not a public type
 
-The manifest structs (`rootManifest`, `deltaManifest`, `sealedManifest`, `head`)
-are unexported. A Go consumer reads track metadata through `TrackInfo`, the
-projection returned by `Reader.Root` and `Writer.Root`; a reader in any language
-reads the JSON schema documented in the object layout above. There is no
-`Reader.Head` on the public API — the head pointer is a discovery cache (decision
-5), and `Reader.SeekTip` already serves a follower resuming near the end.
+The manifest structs (`trackRoot`, `epochLogRoot`, `deltaManifest`,
+`sealedManifest`, `head`) are unexported. A Go consumer reads track metadata
+through `TrackInfo`, the projection returned by `Reader.Root` and `Writer.Root`;
+a reader in any language reads the JSON schema documented in the object layout
+above. There is no `Reader.Head` on the public API — the head pointer is a
+discovery cache (decision 5), and `Reader.SeekTip` already serves a follower
+resuming near the end.
 
 **Why.** The on-disk format is the product, so it must be stable and is versioned
 through a `version` field; the Go API is free to evolve separately. Exporting the

@@ -13,6 +13,11 @@ import (
 // Reader reads a track. It needs nothing but object-store access — no ledger
 // process has to be running for a Reader to seek or replay.
 //
+// A Reader spans every epoch, in order: a track reads as one ascending run of
+// [GroupID]s, and epoch boundaries are invisible to a consumer. Advancing from
+// one epoch to the next happens inside [Reader.Next] as each lifetime is
+// drained.
+//
 // A Reader is single-consumer: it holds a cursor for streaming and is not safe
 // for concurrent use. Concurrent consumers each open their own Reader, which is
 // cheap (one root fetch).
@@ -23,13 +28,15 @@ import (
 // [Reader.RangeMedia] and [Reader.RangeWallclock] iterate the groups overlapping
 // a window, [Reader.SeekMedia] and [Reader.SeekWallclock] resolve one instant to
 // the group anchored at or before it, and [Reader.ReadGroup] fetches a payload.
+// The media-time queries are per-epoch — media time resets at each epoch — so a
+// window or seek runs against every epoch's own timeline; wallclock is absolute
+// and comparable across all of them.
 //
 // Positioned streaming drives the cursor: a Seek method positions it, then
 // [Reader.Next] returns each following group and [io.EOF] at the current tip.
 // SeekMedia and SeekWallclock do double duty — they resolve the target group
 // and position the cursor there, so the group they return is the first a
-// following Next yields. [Reader.Position] returns the [GroupRef] to resume
-// from; [ParseGroupRef] round-trips its text form across a restart.
+// following Next yields. [Reader.Position] returns the [GroupID] to resume from.
 //
 // The Seek methods differ in where they land, which their names carry. The
 // time-based ones are inclusive — a caller asking about an instant wants the
@@ -38,7 +45,7 @@ import (
 //
 //	SeekStart()          the first group          (free: no request)
 //	SeekTip(ctx)         after everything committed
-//	SeekAfter(ctx, ref)  strictly after ref
+//	SeekAfter(ctx, id)   strictly after id
 //	SeekMedia(ctx, t)    on the group covering t
 //	SeekWallclock(ctx,t) on the group covering t
 //
@@ -79,73 +86,123 @@ import (
 //	}
 type Reader struct {
 	objects store.Store
-	track   TrackPath
+	path    TrackPath
+	schema  TrackSchema
 
-	root rootManifest
+	// latest is the track's latest epoch as it stood when the Reader last read
+	// the track root — a snapshot refreshed by [Reader.Refresh]. It is how Next
+	// learns a new lifetime has appeared.
+	latest uint64
 
-	// Cursor state for streaming (SeekStart/SeekTip/SeekAfter + Next). Not
-	// safe for concurrent use.
+	// epoch1Log is epoch 1's log root, cached at construction so [Reader.SeekStart]
+	// can rewind for free.
+	epoch1Log epochLogRoot
+
+	// epoch and logRoot are the lifetime currently being streamed and its log
+	// root. Next advances epoch when the current one is drained.
+	epoch   uint64
+	logRoot epochLogRoot
+
+	// Cursor state within the current epoch (SeekStart/SeekTip/SeekAfter + Next).
+	// Not safe for concurrent use.
 	next   uint64
 	idx    int
 	batch  []GroupInfo
 	misses int
-	last   GroupRef
+	last   GroupID
 }
 
-// Reader opens the track for reading. It loads the root manifest and nothing
-// else: reading needs no recovery, so a reader joins cheaply.
+// Reader opens the track for reading across every epoch. It loads the track
+// root and epoch 1's log and nothing else: reading needs no recovery, so a
+// reader joins cheaply.
 func (t *Track) Reader(ctx context.Context) (*Reader, error) {
-	root, _, err := fetchRoot(ctx, t.store, t.path)
-	if err != nil {
-		return nil, err
+	t.mu.Lock()
+	latest := t.root.LatestEpoch
+	schema := t.root.schema()
+	t.mu.Unlock()
+
+	if latest == 0 {
+		return nil, fmt.Errorf("%w: %s has no epochs", ErrEpochNotFound, t.path)
 	}
 
-	// A fresh Reader is positioned at the start, so Next drains the whole track
-	// before tailing. Use SeekTip to skip history.
-	return &Reader{objects: t.store, track: t.path, root: root}, nil
+	// A fresh Reader is positioned at the start of epoch 1, so Next drains the
+	// whole track before tailing. Use SeekTip to skip history.
+	r := &Reader{objects: t.store, path: t.path, schema: schema, latest: latest}
+	if err := r.loadEpoch(ctx, 1); err != nil {
+		return nil, err
+	}
+	r.epoch1Log = r.logRoot
+	return r, nil
 }
 
-// Track returns the path being read.
-func (r *Reader) Track() TrackPath { return r.track }
-
-// rootManifest returns a defensive copy of the cached root. Internal callers
-// need the full root — its sealed index and open region — to seek and walk; the
-// projection [Reader.Root] returns hides all of that.
-func (r *Reader) rootManifest() rootManifest {
-	root := r.root
-	root.Sealed = append([]sealedRef(nil), r.root.Sealed...)
-
-	return root
-}
-
-// Root returns the track's read-side metadata. It is a projection of the cached
-// root, not the root itself: how the history is laid out on disk is not part of
-// the public API. See [TrackInfo].
-func (r *Reader) Root() TrackInfo {
-	return r.rootManifest().info()
-}
-
-// Refresh re-reads the root manifest, picking up history sealed since the
-// Reader was opened. Bounded seeks into rotated history need it; the open
-// region is discovered by probing, so tailing does not — Next re-reads the root
-// on its own schedule.
-func (r *Reader) Refresh(ctx context.Context) error {
-	root, _, err := fetchRoot(ctx, r.objects, r.track)
+// loadEpoch fetches epoch's log root and resets the cursor to its start.
+func (r *Reader) loadEpoch(ctx context.Context, epoch uint64) error {
+	logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
 	if err != nil {
 		return err
 	}
-	r.root = root
+	r.epoch = epoch
+	r.logRoot = logRoot
+	r.next, r.idx, r.batch = 0, 0, nil
+	r.misses = 0
 	return nil
 }
 
-// Delta returns the nth delta manifest, or ErrNotCommitted if it does not
-// exist yet. Absence is the normal signal that a reader has caught up with the
-// writer, not a failure.
-func (r *Reader) delta(ctx context.Context, n uint64) (deltaManifest, error) {
-	data, _, err := r.objects.Get(ctx, deltaKey(r.track, n))
+// Track returns the path being read.
+func (r *Reader) Track() TrackPath { return r.path }
+
+// logRootCopy returns a defensive copy of the current epoch's log root. Tests
+// need it to assert on the sealed index after a seal; the projection
+// [Reader.Root] hides all of that.
+func (r *Reader) logRootCopy() epochLogRoot {
+	root := r.logRoot
+	root.Sealed = append([]sealedRef(nil), r.logRoot.Sealed...)
+	return root
+}
+
+// Root returns the track's read-side metadata. It is a projection of the
+// schema and the latest epoch as of when this Reader last refreshed, not the
+// log root itself: how the history is laid out on disk is not part of the
+// public API. See [TrackInfo].
+func (r *Reader) Root() TrackInfo {
+	return TrackInfo{
+		TrackSchema: r.schema,
+		Track:       r.path,
+		LatestEpoch: r.latest,
+	}
+}
+
+// Refresh re-reads the track root and the current epoch's log root, picking up
+// history sealed since the Reader was opened and any new epoch a producer has
+// begun. Bounded seeks into rotated history need it; the open region is
+// discovered by probing, so tailing does not — Next refreshes on its own
+// schedule.
+func (r *Reader) Refresh(ctx context.Context) error {
+	root, _, err := fetchTrackRoot(ctx, r.objects, r.path)
+	if err != nil {
+		return err
+	}
+	r.latest = root.LatestEpoch
+
+	logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, r.epoch)
+	if err != nil {
+		return err
+	}
+	r.logRoot = logRoot
+	if r.epoch == 1 {
+		r.epoch1Log = logRoot
+	}
+	return nil
+}
+
+// delta returns the nth delta manifest of epoch, or ErrNotCommitted if it does
+// not exist yet. Absence is the normal signal that a reader has caught up with
+// the writer, not a failure.
+func (r *Reader) delta(ctx context.Context, epoch, n uint64) (deltaManifest, error) {
+	data, _, err := r.objects.Get(ctx, deltaKey(r.path, epoch, n))
 	if err != nil {
 		if errors.Is(err, store.ErrNotExist) {
-			return deltaManifest{}, fmt.Errorf("%w: %s delta %d", ErrNotCommitted, r.track, n)
+			return deltaManifest{}, fmt.Errorf("%w: %s epoch %d delta %d", ErrNotCommitted, r.path, epoch, n)
 		}
 		return deltaManifest{}, fmt.Errorf("ledger: read delta %d: %w", n, err)
 	}
@@ -153,8 +210,8 @@ func (r *Reader) delta(ctx context.Context, n uint64) (deltaManifest, error) {
 	return decodeManifest(data, func(d deltaManifest) int { return d.Version })
 }
 
-// Sealed returns a sealed manifest by its reference in the root.
-func (r *Reader) sealed(ctx context.Context, ref sealedRef) (sealedManifest, error) {
+// sealed returns a sealed manifest of epoch by its reference in the log root.
+func (r *Reader) sealed(ctx context.Context, epoch uint64, ref sealedRef) (sealedManifest, error) {
 	data, _, err := r.objects.Get(ctx, ref.Key)
 	if err != nil {
 		return sealedManifest{}, fmt.Errorf("ledger: read sealed manifest %q: %w", ref.Key, err)
@@ -165,12 +222,16 @@ func (r *Reader) sealed(ctx context.Context, ref sealedRef) (sealedManifest, err
 		return sealedManifest{}, err
 	}
 
-	// The manifest names its own track and range, so disagreement with the
-	// reference means the object is not the one the root meant to point at.
+	// The manifest names its own track, epoch, and range, so disagreement with
+	// the reference means the object is not the one the log root meant to point
+	// at.
 	switch {
-	case sealed.Track != r.track:
+	case sealed.Track != r.path:
 		return sealedManifest{}, fmt.Errorf("%w: %q holds track %s, expected %s",
-			ErrManifestMismatch, ref.Key, sealed.Track, r.track)
+			ErrManifestMismatch, ref.Key, sealed.Track, r.path)
+	case sealed.Epoch != epoch:
+		return sealedManifest{}, fmt.Errorf("%w: %q holds epoch %d, expected %d",
+			ErrManifestMismatch, ref.Key, sealed.Epoch, epoch)
 	case sealed.FirstDelta != ref.FirstDelta || sealed.LastDelta != ref.LastDelta:
 		return sealedManifest{}, fmt.Errorf("%w: %q covers deltas %d-%d, expected %d-%d",
 			ErrManifestMismatch, ref.Key, sealed.FirstDelta, sealed.LastDelta, ref.FirstDelta, ref.LastDelta)
@@ -186,35 +247,35 @@ func (r *Reader) sealed(ctx context.Context, ref sealedRef) (sealedManifest, err
 func (r *Reader) ReadGroup(ctx context.Context, meta GroupInfo) ([]byte, error) {
 	data, _, err := r.objects.Get(ctx, meta.ObjectKey)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: read group %s: %w", meta.GroupRef, err)
+		return nil, fmt.Errorf("ledger: read group %s: %w", meta.ID, err)
 	}
 
 	return data, nil
 }
 
 // RangeMedia iterates the groups overlapping the half-open media-time window
-// [from, to), in the track's timescale units.
+// [from, to), in the track's timescale units, across every epoch.
 //
-// A group with a known duration is included when it overlaps the window, so the
-// group *containing* from is returned even though it starts earlier — which is
-// what a player needs to decode into the window. A group with no duration is a
-// point, and is included only when its anchor falls inside.
+// Media time resets at each epoch, so a window is run against each lifetime's
+// own timeline; the same offset can match in more than one epoch. A group with
+// a known duration is included when it overlaps the window, so the group
+// *containing* from is returned even though it starts earlier — which is what a
+// player needs to decode into the window. A group with no duration is a point,
+// and is included only when its anchor falls inside.
 func (r *Reader) RangeMedia(ctx context.Context, from, to int64) iter.Seq2[GroupInfo, error] {
 	if from >= to {
 		return emptyGroups
 	}
 
 	return filterGroups(
-		// MediaEnd is a true end, so a run finishing at or before the window cannot
-		// contribute and need not be fetched.
 		r.walk(ctx, func(ref sealedRef) bool { return ref.MediaStart < to && ref.MediaEnd > from }),
 		func(group GroupInfo) bool { return group.overlapsMedia(from, to) },
 	)
 }
 
 // RangeWallclock iterates the groups overlapping the half-open wallclock window
-// [from, to), in Unix nanoseconds. Groups carrying no wallclock anchor are
-// skipped: they cannot be placed on a shared timeline.
+// [from, to), in Unix nanoseconds, across every epoch. Groups carrying no
+// wallclock anchor are skipped: they cannot be placed on a shared timeline.
 //
 // This is the cross-track query. Running it over a video track and a sensor
 // track with the same window is what lines the two recordings up.
@@ -223,7 +284,7 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 		return emptyGroups
 	}
 
-	timescale := r.rootManifest().Timescale
+	timescale := r.schema.Timescale
 
 	return filterGroups(
 		r.walk(ctx, func(ref sealedRef) bool {
@@ -248,29 +309,36 @@ func (r *Reader) RangeWallclock(ctx context.Context, from, to int64) iter.Seq2[G
 const DefaultPollInterval = 500_000_000 // 500ms, as a count of nanoseconds
 
 // rootRecheckEvery is how many consecutive empty polls pass between re-reads of
-// the root manifest while a Reader is stalled at the tip.
+// the roots while a Reader is stalled at the tip.
 //
-// A stalled Reader needs the root only to notice a seal that happened since it
-// last read one, and a seal cannot happen before the delta it is waiting for is
-// even committed. Re-reading on every poll therefore learns nothing and wastes
-// a request, so it is rationed.
+// A stalled Reader needs the roots only to notice a seal or a new epoch that
+// happened since it last read them, and neither can happen before the delta it
+// is waiting for is even committed. Re-reading on every poll therefore learns
+// nothing and wastes requests, so it is rationed.
 const rootRecheckEvery = 8
 
-// SeekStart positions the Reader at the first group, so a following [Reader.Next]
-// loop drains the whole recording before tailing.
+// SeekStart positions the Reader at the first group, so a following
+// [Reader.Next] loop drains the whole track before tailing. It costs no
+// request: epoch 1's log root is cached at construction.
 func (r *Reader) SeekStart() {
+	r.epoch = 1
+	r.logRoot = r.epoch1Log
 	r.next, r.idx, r.batch = 0, 0, nil
-	r.last, r.misses = GroupRef{}, 0
+	r.last, r.misses = 0, 0
 }
 
-// SeekTip positions the Reader after everything currently committed, so only
-// groups committed after the call arrive. The position is derived from the head
-// pointer, which may lag the true tip, so a tail from it can replay a few
-// groups that were already committed — delivery is at least once by design.
+// SeekTip positions the Reader after everything currently committed in the
+// latest epoch, so only groups committed after the call arrive. The position is
+// derived from the head pointer, which may lag the true tip, so a tail from it
+// can replay a few groups that were already committed — delivery is at least
+// once by design.
 func (r *Reader) SeekTip(ctx context.Context) error {
-	switch h, _, err := fetchHead(ctx, r.objects, r.track); {
+	if err := r.loadEpoch(ctx, r.latest); err != nil {
+		return err
+	}
+	switch h, _, err := fetchHead(ctx, r.objects, r.path, r.latest); {
 	case errors.Is(err, store.ErrNotExist):
-		// Nothing committed yet: the start of the track is already the tip.
+		// Nothing committed yet: the start of the epoch is already the tip.
 		r.next = 0
 	case err != nil:
 		return err
@@ -279,12 +347,12 @@ func (r *Reader) SeekTip(ctx context.Context) error {
 	}
 
 	r.idx, r.batch = 0, nil
-	r.last, r.misses = GroupRef{}, 0
+	r.last, r.misses = 0, 0
 	return nil
 }
 
-// SeekAfter positions the Reader strictly after ref, so a following
-// [Reader.Next] loop resumes without re-yielding the group ref names. Pair it
+// SeekAfter positions the Reader strictly after id, so a following
+// [Reader.Next] loop resumes without re-yielding the group id names. Pair it
 // with [Reader.Position] to resume across a restart.
 //
 // The exclusivity is what makes it a resume: [Reader.SeekMedia] and
@@ -293,67 +361,79 @@ func (r *Reader) SeekTip(ctx context.Context) error {
 // recorded position has already handled that group and wants the next one — and
 // cannot name it, since producer sequences are gappy.
 //
-// The zero ref precedes every group, so SeekAfter with one is [Reader.SeekStart].
-func (r *Reader) SeekAfter(ctx context.Context, ref GroupRef) error {
-	if ref == (GroupRef{}) {
+// The zero id precedes every group, so SeekAfter with one is [Reader.SeekStart].
+func (r *Reader) SeekAfter(ctx context.Context, id GroupID) error {
+	if id == 0 {
 		// Nothing precedes the start, and rewinding costs no request where
 		// locating the first group would fetch a sealed manifest.
 		r.SeekStart()
 		return nil
 	}
 
-	seg, idx, after, err := r.locateAfter(ctx, r.root, ref)
+	epoch := id.Epoch()
+	if epoch > r.latest {
+		epoch = r.latest
+	}
+	if err := r.loadEpoch(ctx, epoch); err != nil {
+		return err
+	}
+
+	seg, idx, after, err := r.locateAfter(ctx, r.logRoot, id.Sequence())
 	if err != nil {
 		return err
 	}
 	// Whether or not a following group exists, `after` is the right place to
-	// resume: a real segment's tail, or the tip when ref is past everything.
+	// resume: a real segment's tail, or the tip when id is past everything in
+	// this epoch — Next then advances into the next one.
 	r.batch, r.idx, r.next = seg, idx, after
-	r.last, r.misses = GroupRef{}, 0
+	r.last, r.misses = 0, 0
 	return nil
 }
 
-// position sets the cursor to a resolved segment. Shared by the time-based
-// seeks.
-func (r *Reader) position(seg []GroupInfo, idx int, after uint64) {
+// position sets the cursor to a resolved segment in the current epoch. Shared
+// by the time-based seeks.
+func (r *Reader) position(epoch uint64, seg []GroupInfo, idx int, after uint64) {
+	r.epoch = epoch
 	r.batch, r.idx, r.next = seg, idx, after
-	r.last, r.misses = GroupRef{}, 0
+	r.last, r.misses = 0, 0
 }
 
-// Next advances to and returns the next group in commit order. It returns
-// [io.EOF] when the Reader has reached the current tip — caught up, for now —
-// and a real error only when the store failed.
+// Next advances to and returns the next group in commit order, across epochs.
+// It returns [io.EOF] when the Reader has reached the current tip — caught up,
+// for now — and a real error only when the store failed.
 //
 // io.EOF is not terminal: a later group may have been committed, so the next
 // call re-probes. It mutates nothing but the empty-poll counter, so a caller
 // may poll indefinitely.
 //
-// A delta that has been sealed and reclaimed since the Reader last read the
-// root is still served: its groups moved into a sealed run, and Next notices on
-// its rationed root re-read rather than hanging on the deleted delta.
+// When the current epoch is drained and a newer one exists, Next steps into it
+// and continues, so a single reader spans a producer restart. A delta that has
+// been sealed and reclaimed since the Reader last read the log root is still
+// served: its groups moved into a sealed run, and Next notices on its rationed
+// re-read rather than hanging on the deleted delta.
 func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
 	for {
 		if r.idx < len(r.batch) {
 			group := r.batch[r.idx]
 			r.idx++
-			r.last = group.GroupRef
+			r.last = group.ID
 			return group, nil
 		}
 
-		// batch exhausted: load the next segment.
+		// batch exhausted: load the next segment in the current epoch.
 
-		if r.next < r.root.OpenFrom {
+		if r.next < r.logRoot.OpenFrom {
 			// The next delta is below the open region: either it has always been
 			// sealed, or it was sealed away while this Reader was parked. Either
 			// way its groups live in a sealed run.
-			ref, ok := sealedCovering(r.root, r.next)
+			ref, ok := sealedCovering(r.logRoot, r.next)
 			if !ok {
 				// A gap below OpenFrom that no sealed run covers: skip to the
 				// open region and keep going.
-				r.next = r.root.OpenFrom
+				r.next = r.logRoot.OpenFrom
 				continue
 			}
-			sealed, err := r.sealed(ctx, ref)
+			sealed, err := r.sealed(ctx, r.epoch, ref)
 			if err != nil {
 				return GroupInfo{}, err
 			}
@@ -361,24 +441,28 @@ func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
 			continue
 		}
 
-		delta, err := r.delta(ctx, r.next)
+		delta, err := r.delta(ctx, r.epoch, r.next)
 		if err == nil {
 			r.batch, r.idx, r.next, r.misses = delta.Groups, 0, r.next+1, 0
 			continue
 		}
 		if errors.Is(err, ErrNotCommitted) {
-			// The delta is absent. It may simply not be committed yet, or it may
-			// have been sealed away. A root re-read settles which, but only
-			// matters occasionally, so it is rationed.
+			// The current epoch is drained. Step into the next one if it exists.
+			if r.epoch < r.latest {
+				if err := r.loadEpoch(ctx, r.epoch+1); err != nil {
+					return GroupInfo{}, err
+				}
+				continue
+			}
+			// At the latest epoch's tip: the delta is absent. It may simply not
+			// be committed yet, may have been sealed away, or a new epoch may
+			// have begun. A root re-read settles which, but only matters
+			// occasionally, so it is rationed.
 			r.misses++
 			if r.misses == 1 || r.misses%rootRecheckEvery == 0 {
 				if e := r.Refresh(ctx); e != nil {
 					return GroupInfo{}, e
 				}
-				// Fall through to io.EOF rather than re-probing: a refresh that
-				// did not move OpenFrom past next would only add a redundant
-				// probe, and one that did is picked up by the sealed branch on
-				// the next call.
 			}
 			return GroupInfo{}, io.EOF
 		}
@@ -386,22 +470,22 @@ func (r *Reader) Next(ctx context.Context) (GroupInfo, error) {
 	}
 }
 
-// Position returns the most recently yielded group, for saving across a
-// restart. Pass it to [Reader.SeekAfter] to resume strictly after it.
+// Position returns the [GroupID] of the most recently yielded group, for saving
+// across a restart. Pass it to [Reader.SeekAfter] to resume strictly after it.
 //
-// Save it as text — [GroupRef.String] on the way out, [ParseGroupRef] on the
-// way back — so a consumer's stored position is one opaque string:
+// Save it as text — [GroupID.String] on the way out, [ParseGroupID] on the way
+// back — so a consumer's stored position is one opaque string:
 //
 //	save(reader.Position().String())     // "e000001-g00000042"
-//	ref, _ := ledger.ParseGroupRef(saved)
-//	reader.SeekAfter(ctx, ref)
+//	id, _ := ledger.ParseGroupID(saved)
+//	reader.SeekAfter(ctx, id)
 //
-// Before any group has been yielded it is the zero [GroupRef], which SeekAfter
+// Before any group has been yielded it is the zero [GroupID], which SeekAfter
 // reads as "from the start."
-func (r *Reader) Position() GroupRef { return r.last }
+func (r *Reader) Position() GroupID { return r.last }
 
 // sealedCovering returns the sealed run holding a delta number, if any.
-func sealedCovering(root rootManifest, delta uint64) (sealedRef, bool) {
+func sealedCovering(root epochLogRoot, delta uint64) (sealedRef, bool) {
 	for _, ref := range root.Sealed {
 		if delta >= ref.FirstDelta && delta <= ref.LastDelta {
 			return ref, true
@@ -411,41 +495,47 @@ func sealedCovering(root rootManifest, delta uint64) (sealedRef, bool) {
 	return sealedRef{}, false
 }
 
-// walk iterates the track in commit order, fetching only the sealed runs that
-// include accepts. A nil include fetches every run.
+// walk iterates the track in commit order across every epoch, fetching only the
+// sealed runs that include accepts. A nil include fetches every run.
 func (r *Reader) walk(ctx context.Context, include func(sealedRef) bool) iter.Seq2[GroupInfo, error] {
 	return func(yield func(GroupInfo, error) bool) {
-		root := r.rootManifest()
-
-		for _, ref := range root.Sealed {
-			if include != nil && !include(ref) {
-				continue
-			}
-
-			sealed, err := r.sealed(ctx, ref)
+		for epoch := uint64(1); epoch <= r.latest; epoch++ {
+			logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
 			if err != nil {
 				yield(GroupInfo{}, err)
 				return
 			}
-			for _, group := range sealed.Groups {
-				if !yield(group, nil) {
+
+			for _, ref := range logRoot.Sealed {
+				if include != nil && !include(ref) {
+					continue
+				}
+
+				sealed, err := r.sealed(ctx, epoch, ref)
+				if err != nil {
+					yield(GroupInfo{}, err)
 					return
 				}
+				for _, group := range sealed.Groups {
+					if !yield(group, nil) {
+						return
+					}
+				}
 			}
-		}
 
-		for n := root.OpenFrom; ; n++ {
-			delta, err := r.delta(ctx, n)
-			if errors.Is(err, ErrNotCommitted) {
-				return
-			}
-			if err != nil {
-				yield(GroupInfo{}, err)
-				return
-			}
-			for _, group := range delta.Groups {
-				if !yield(group, nil) {
+			for n := logRoot.OpenFrom; ; n++ {
+				delta, err := r.delta(ctx, epoch, n)
+				if errors.Is(err, ErrNotCommitted) {
+					break
+				}
+				if err != nil {
+					yield(GroupInfo{}, err)
 					return
+				}
+				for _, group := range delta.Groups {
+					if !yield(group, nil) {
+						return
+					}
 				}
 			}
 		}
@@ -478,101 +568,107 @@ func emptyGroups(func(GroupInfo, error) bool) {}
 //
 // Wallclock is the cross-track key: seeking two tracks to the same instant is
 // what makes correlated replay — video alongside the sensor readings recorded
-// with it — possible at all. For seeking within one track, use
-// [Reader.SeekMedia], which is exact and immune to clock skew.
+// with it — possible at all. For seeking within one track's own clock, use
+// [Reader.SeekMedia], which is exact and immune to skew.
 //
-// SeekWallclock also positions the cursor at the group it returns, so a
-// following [Reader.Next] loop plays forward from it.
+// The search runs newest-epoch-first, so when more than one epoch has a group at
+// the instant the latest lifetime wins. SeekWallclock also positions the cursor
+// at the group it returns, so a following [Reader.Next] loop plays forward from
+// it.
 func (r *Reader) SeekWallclock(ctx context.Context, unixNano int64) (GroupInfo, error) {
-	timescale := r.root.Timescale
-
-	g, seg, idx, after, err := r.seek(ctx, r.root, unixNano,
+	return r.seekTime(ctx, unixNano,
 		func(g GroupInfo) (int64, bool) { return g.Wallclock, g.hasWallclock() },
-		func(g GroupInfo) (int64, bool) { return g.wallclockEnd(timescale) },
+		func(g GroupInfo, ts uint32) (int64, bool) { return g.wallclockEnd(ts) },
 		func(ref sealedRef) (int64, bool) { return ref.WallclockStart, ref.WallclockStart != 0 },
 	)
-	if err != nil {
-		return GroupInfo{}, err
-	}
-	r.position(seg, idx, after)
-	return g, nil
 }
 
 // SeekMedia returns the group anchored at or before a media timestamp, in the
 // track's timescale units.
 //
-// SeekMedia also positions the cursor at the group it returns — which is what a
-// player wants: land on or before the target, then decode forward with
-// [Reader.Next].
+// Media time resets at each epoch, so the search runs newest-epoch-first and
+// the latest lifetime that has a group at the timestamp wins. SeekMedia also
+// positions the cursor at the group it returns — which is what a player wants:
+// land on or before the target, then decode forward with [Reader.Next].
 func (r *Reader) SeekMedia(ctx context.Context, mediaTime int64) (GroupInfo, error) {
-	g, seg, idx, after, err := r.seek(ctx, r.root, mediaTime,
+	return r.seekTime(ctx, mediaTime,
 		func(g GroupInfo) (int64, bool) { return g.MediaTime, true },
-		func(g GroupInfo) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
+		func(g GroupInfo, _ uint32) (int64, bool) { return g.mediaEnd(), g.hasDuration() },
 		func(ref sealedRef) (int64, bool) { return ref.MediaStart, true },
 	)
-	if err != nil {
-		return GroupInfo{}, err
-	}
-	r.position(seg, idx, after)
-	return g, nil
 }
 
-// seek returns the last group anchored at or before target, and where it lives:
-// the segment slice it came from, its index within that segment, and the delta
-// number to resume at once the segment is drained. [Reader.SeekMedia] and
-// [Reader.SeekWallclock] use the location to position the cursor without a
-// second fetch.
+// seekTime resolves the last group anchored at or before target across epochs,
+// newest-epoch-first, and positions the cursor there. It returns the location
+// so the time-based seeks position without a second fetch.
 //
 // It resolves against anchors rather than testing containment, which is both
 // what a player wants — land on or before the target and decode forward — and
 // what keeps seeking correct when a producer supplies no duration. Duration is
 // consulted only at the end, to reject a target that falls past a known end.
-//
-// The search runs newest-first. The open region is examined before the sealed
-// history because it holds the newest data, and the sealed runs are then walked
-// in reverse until one begins at or before the target — so a seek fetches at
-// most one sealed manifest rather than one per run, however long the track has
-// been recording. Walking backwards also settles what an epoch reset makes
-// ambiguous: when the same media timestamp exists in several epochs, the most
-// recent one wins.
-//
-// The open region is bounded by the seal threshold, so scanning it is bounded
-// too. seek takes the root explicitly so that resolving and positioning run
-// against the same snapshot.
-func (r *Reader) seek(
+func (r *Reader) seekTime(
 	ctx context.Context,
-	root rootManifest,
 	target int64,
 	anchor func(GroupInfo) (int64, bool),
-	end func(GroupInfo) (int64, bool),
+	end func(GroupInfo, uint32) (int64, bool),
 	start func(sealedRef) (int64, bool),
-) (GroupInfo, []GroupInfo, int, uint64, error) {
-	var (
-		best     GroupInfo
-		bestAt   int64
-		bestSeg  []GroupInfo
-		bestIdx  int
-		bestNext uint64
-		found    bool
-		consider = func(seg []GroupInfo, i int, after uint64) {
-			group := seg[i]
-			at, ok := anchor(group)
-			if !ok || at > target {
-				return
-			}
-			if !found || at >= bestAt {
-				best, bestAt, bestSeg, bestIdx, bestNext, found = group, at, seg, i, after, true
-			}
+) (GroupInfo, error) {
+	timescale := r.schema.Timescale
+
+	for epoch := r.latest; epoch >= 1; epoch-- {
+		logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
+		if err != nil {
+			return GroupInfo{}, err
 		}
-	)
+
+		best, bestSeg, bestIdx, bestNext, found := r.seekWithinEpoch(ctx, epoch, logRoot, target, anchor, end, start)
+		if !found {
+			continue
+		}
+		if at, ok := end(best, timescale); ok && target >= at {
+			return GroupInfo{}, fmt.Errorf("%w: %d falls past the end of %s in %s epoch %d", ErrGroupNotFound, target, best.ID, r.path, epoch)
+		}
+		r.position(epoch, bestSeg, bestIdx, bestNext)
+		return best, nil
+	}
+
+	return GroupInfo{}, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrGroupNotFound, r.path, target)
+}
+
+// seekWithinEpoch resolves the last group anchored at or before target within a
+// single epoch's log. The open region is examined before the sealed history
+// because it holds the newest data; sealed runs are then walked in reverse
+// until one begins at or before the target.
+func (r *Reader) seekWithinEpoch(
+	ctx context.Context,
+	epoch uint64,
+	root epochLogRoot,
+	target int64,
+	anchor func(GroupInfo) (int64, bool),
+	end func(GroupInfo, uint32) (int64, bool),
+	start func(sealedRef) (int64, bool),
+) (best GroupInfo, bestSeg []GroupInfo, bestIdx int, bestNext uint64, found bool) {
+	var bestAt int64
+	consider := func(seg []GroupInfo, i int, after uint64) {
+		group := seg[i]
+		at, ok := anchor(group)
+		if !ok || at > target {
+			return
+		}
+		if !found || at >= bestAt {
+			best, bestSeg, bestIdx, bestNext = group, seg, i, after
+			bestAt = at
+			found = true
+		}
+	}
 
 	for n := root.OpenFrom; ; n++ {
-		delta, err := r.delta(ctx, n)
+		delta, err := r.delta(ctx, epoch, n)
 		if errors.Is(err, ErrNotCommitted) {
 			break
 		}
 		if err != nil {
-			return GroupInfo{}, nil, 0, 0, err
+			return GroupInfo{}, nil, 0, 0, false
 		}
 		for i := range delta.Groups {
 			consider(delta.Groups, i, n+1)
@@ -590,87 +686,106 @@ func (r *Reader) seek(
 			continue
 		}
 
-		sealed, err := r.sealed(ctx, ref)
+		sealed, err := r.sealed(ctx, epoch, ref)
 		if err != nil {
-			return GroupInfo{}, nil, 0, 0, err
+			return GroupInfo{}, nil, 0, 0, false
 		}
 		for j := range sealed.Groups {
 			consider(sealed.Groups, j, ref.LastDelta+1)
 		}
 	}
 
-	if !found {
-		return GroupInfo{}, nil, 0, 0, fmt.Errorf("%w: nothing in %s is anchored at or before %d", ErrGroupNotFound, r.track, target)
-	}
-	if at, ok := end(best); ok && target >= at {
-		return GroupInfo{}, nil, 0, 0, fmt.Errorf("%w: %d falls past the end of %s in %s", ErrGroupNotFound, target, best.GroupRef, r.track)
-	}
-
-	return best, bestSeg, bestIdx, bestNext, nil
+	return best, bestSeg, bestIdx, bestNext, found
 }
 
-// locateAfter finds the first committed group strictly after ref — the resume
-// point for a [Reader] positioned past a recorded [GroupRef]. It returns the
-// segment the group lives in, its index within it, and the delta number to
-// resume at once that segment is drained. When nothing follows ref it returns a
-// nil segment with next set to the tip, so the caller parks at the end.
-func (r *Reader) locateAfter(ctx context.Context, root rootManifest, ref GroupRef) (seg []GroupInfo, idx int, next uint64, err error) {
+// locateAfter finds the first committed group strictly after seq within the
+// current epoch — the resume point for a [Reader] positioned past a recorded
+// sequence. It returns the segment the group lives in, its index within it, and
+// the delta number to resume at once that segment is drained. When nothing
+// follows seq it returns a nil segment with next set to the tip, so the caller
+// parks at the end and Next steps into the next epoch.
+func (r *Reader) locateAfter(ctx context.Context, root epochLogRoot, seq uint64) (seg []GroupInfo, idx int, next uint64, err error) {
 	for _, sref := range root.Sealed {
-		// A run whose last group does not exceed ref holds nothing after it.
-		if !ref.Before(sref.Last) {
+		// A run whose last group does not exceed seq holds nothing after it.
+		if seq >= sref.Last.Sequence() {
 			continue
 		}
-		sealed, err := r.sealed(ctx, sref)
+		sealed, err := r.sealed(ctx, r.epoch, sref)
 		if err != nil {
 			return nil, 0, 0, err
 		}
 		for i, g := range sealed.Groups {
-			if ref.Before(g.GroupRef) {
+			if seq < g.ID.Sequence() {
 				return sealed.Groups, i, sref.LastDelta + 1, nil
 			}
 		}
 	}
 
 	for n := root.OpenFrom; ; n++ {
-		delta, err := r.delta(ctx, n)
+		delta, err := r.delta(ctx, r.epoch, n)
 		if errors.Is(err, ErrNotCommitted) {
-			// Nothing follows ref; park at the tip.
+			// Nothing follows seq; park at the tip.
 			return nil, 0, n, nil
 		}
 		if err != nil {
 			return nil, 0, 0, err
 		}
 		for i, g := range delta.Groups {
-			if ref.Before(g.GroupRef) {
+			if seq < g.ID.Sequence() {
 				return delta.Groups, i, n + 1, nil
 			}
 		}
 	}
 }
 
-func fetchRoot(ctx context.Context, objects store.Store, track TrackPath) (rootManifest, store.Version, error) {
+func fetchTrackRoot(ctx context.Context, objects store.Store, track TrackPath) (trackRoot, store.Version, error) {
 	data, version, err := objects.Get(ctx, rootKey(track))
 	if err != nil {
 		if errors.Is(err, store.ErrNotExist) {
-			return rootManifest{}, store.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
+			return trackRoot{}, store.NoVersion, fmt.Errorf("%w: %s", ErrTrackNotFound, track)
 		}
-		return rootManifest{}, store.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
+		return trackRoot{}, store.NoVersion, fmt.Errorf("ledger: read root of %s: %w", track, err)
 	}
 
-	root, err := decodeManifest(data, func(m rootManifest) int { return m.Version })
+	root, err := decodeManifest(data, func(m trackRoot) int { return m.Version })
 	if err != nil {
-		return rootManifest{}, store.NoVersion, err
+		return trackRoot{}, store.NoVersion, err
 	}
 	if root.Track != track {
-		return rootManifest{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
+		return trackRoot{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
 			ErrManifestMismatch, rootKey(track), root.Track, track)
 	}
 
 	return root, version, nil
 }
 
-func fetchHead(ctx context.Context, objects store.Store, track TrackPath) (head, store.Version, error) {
-	data, version, err := objects.Get(ctx, headKey(track))
+func fetchEpochLog(ctx context.Context, objects store.Store, track TrackPath, epoch uint64) (epochLogRoot, store.Version, error) {
+	data, version, err := objects.Get(ctx, epochLogKey(track, epoch))
+	if err != nil {
+		if errors.Is(err, store.ErrNotExist) {
+			return epochLogRoot{}, store.NoVersion, fmt.Errorf("%w: %s epoch %d", ErrEpochNotFound, track, epoch)
+		}
+		return epochLogRoot{}, store.NoVersion, fmt.Errorf("ledger: read log of %s epoch %d: %w", track, epoch, err)
+	}
+
+	root, err := decodeManifest(data, func(m epochLogRoot) int { return m.Version })
+	if err != nil {
+		return epochLogRoot{}, store.NoVersion, err
+	}
+	if root.Track != track {
+		return epochLogRoot{}, store.NoVersion, fmt.Errorf("%w: %q holds track %s, expected %s",
+			ErrManifestMismatch, epochLogKey(track, epoch), root.Track, track)
+	}
+	if root.Epoch != epoch {
+		return epochLogRoot{}, store.NoVersion, fmt.Errorf("%w: %q holds epoch %d, expected %d",
+			ErrManifestMismatch, epochLogKey(track, epoch), root.Epoch, epoch)
+	}
+
+	return root, version, nil
+}
+
+func fetchHead(ctx context.Context, objects store.Store, track TrackPath, epoch uint64) (head, store.Version, error) {
+	data, version, err := objects.Get(ctx, headKey(track, epoch))
 	if err != nil {
 		return head{}, store.NoVersion, err
 	}

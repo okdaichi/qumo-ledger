@@ -7,92 +7,107 @@ import (
 	"strings"
 )
 
-// GroupRef identifies a group within a track.
+// A GroupID is the identity of a group: one number that packs a producer
+// lifetime (the epoch) and the producer's own sequence within it. Treating it
+// as a single value is the point — epoch and sequence never have to be handled
+// separately, and numeric order is commit order across the whole track, since
+// the epoch occupies the high bits.
 //
-// Sequence alone is not an identity. Producers reset their numbering when they
-// restart, and because group objects are immutable a reused sequence would
-// collide rather than overwrite — leaving the track wedged. Epoch separates
-// each producer lifetime into its own keyspace, so a restart continues cleanly
-// while the producer's original sequence numbers survive intact for clients
-// aligning replay against a live relay.
+// The packing is epoch in the high 24 bits and sequence in the low 40, so a
+// GroupID from a later epoch is always larger than one from an earlier epoch,
+// however large its sequence is. The split is an internal detail: read the parts
+// through [GroupID.Epoch] and [GroupID.Sequence] only to interpret a value, and
+// let the writer build IDs (see [Writer.AppendGroup]).
 //
-// Treat [GroupRef.String] as the identifier to hold onto: it is the stable,
-// portable form, and [ParseGroupRef] recovers the ref from it. Persist that
-// string in a state file, a database column, or a log line rather than the two
-// numbers, and the pair stays an implementation detail you never have to
-// reassemble. The fields are exported because a GroupRef is embedded in
-// [GroupInfo], which is the manifest's own JSON shape; reading Epoch and
-// Sequence directly is for interpreting a ref, not for building one — the
-// writer assigns Epoch (see [Writer.AdvanceEpoch]).
-type GroupRef struct {
-	// Epoch increments each time a producer restarts its numbering.
-	Epoch uint64 `json:"epoch"`
+// Hold onto [GroupID.String] when a value leaves the process — a state file, a
+// database column, a log line — and recover it with [ParseGroupID]. The string
+// is the stable, portable form; the number is the working form.
+type GroupID uint64
 
-	// Sequence is the producer's own group sequence. Gaps are expected:
-	// groups are dropped under congestion, and the gap is real information.
-	Sequence uint64 `json:"seq"`
+const (
+	// groupSeqBits is the width of the sequence portion of a GroupID. The rest
+	// is the epoch.
+	groupSeqBits = 40
+	groupSeqMask = (uint64(1) << groupSeqBits) - 1
+)
+
+// NewGroupID composes an ID from its epoch and sequence. The common case does
+// not call it: [Writer.Append] derives IDs, and a reader takes them from the
+// rows it yields. It is for the moments a caller does build one — most often as
+// input to [Writer.AppendGroup], where passing NewGroupID(0, sequence) supplies
+// the producer's own sequence and leaves the epoch for the writer to stamp.
+func NewGroupID(epoch, sequence uint64) GroupID {
+	return GroupID(epoch<<groupSeqBits | sequence)
 }
 
-// String returns a human-readable form matching the object key layout.
-func (r GroupRef) String() string {
-	return fmt.Sprintf("e%06d-g%08d", r.Epoch, r.Sequence)
+// Epoch returns the producer lifetime the group belongs to.
+func (g GroupID) Epoch() uint64 { return uint64(g) >> groupSeqBits }
+
+// Sequence returns the producer's own group sequence within its epoch.
+func (g GroupID) Sequence() uint64 { return uint64(g) & groupSeqMask }
+
+// String returns the human-readable form, which matches the object-key layout.
+func (g GroupID) String() string {
+	return fmt.Sprintf("e%06d-g%08d", g.Epoch(), g.Sequence())
 }
 
-// Before reports whether r orders before other. Epoch dominates, since a later
-// epoch always describes later data even when its sequence numbers are lower.
-func (r GroupRef) Before(other GroupRef) bool {
-	if r.Epoch != other.Epoch {
-		return r.Epoch < other.Epoch
-	}
+// Before reports whether g orders before other. Because the epoch occupies the
+// high bits, this is ordinary numeric order: a later epoch is later in time even
+// when its sequence is lower.
+func (g GroupID) Before(other GroupID) bool { return uint64(g) < uint64(other) }
 
-	return r.Sequence < other.Sequence
-}
-
-// ParseGroupRef parses the "e<epoch>-g<sequence>" form produced by
-// [GroupRef.String], so a consumer can persist a position with String and resume
-// with ParseGroupRef. Both the zero-padded form ("e000001-g00000042") and an
-// unpadded one ("e1-g42") are accepted; the empty string is the zero GroupRef.
-//
-// It is a free function rather than an encoding.TextUnmarshaler method on
-// purpose: GroupInfo embeds GroupRef, and a TextMarshaler/TextUnmarshaler there
-// would make encoding/json serialize every manifest row as a string and corrupt
-// the wire format.
-func ParseGroupRef(s string) (GroupRef, error) {
+// ParseGroupID parses the "e<epoch>-g<sequence>" form produced by
+// [GroupID.String], so a consumer can persist a position with String and resume
+// with ParseGroupID. Both the zero-padded form ("e000001-g00000042") and an
+// unpadded one ("e1-g42") are accepted; the empty string is the zero GroupID.
+func ParseGroupID(s string) (GroupID, error) {
 	if s == "" {
-		return GroupRef{}, nil
+		return 0, nil
 	}
 
 	epochText, ok := strings.CutPrefix(s, "e")
 	if !ok {
-		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: missing epoch", s)
+		return 0, fmt.Errorf("ledger: malformed group id %q: missing epoch", s)
 	}
 	epochText, seqText, ok := strings.Cut(epochText, "-g")
 	if !ok {
-		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: missing sequence", s)
+		return 0, fmt.Errorf("ledger: malformed group id %q: missing sequence", s)
 	}
 
 	epoch, err := strconv.ParseUint(epochText, 10, 64)
 	if err != nil {
-		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: %w", s, err)
+		return 0, fmt.Errorf("ledger: malformed group id %q: %w", s, err)
 	}
 	sequence, err := strconv.ParseUint(seqText, 10, 64)
 	if err != nil {
-		return GroupRef{}, fmt.Errorf("ledger: malformed group ref %q: %w", s, err)
+		return 0, fmt.Errorf("ledger: malformed group id %q: %w", s, err)
+	}
+	if sequence > groupSeqMask {
+		return 0, fmt.Errorf("ledger: malformed group id %q: sequence %d exceeds %d bits", s, sequence, groupSeqBits)
 	}
 
-	return GroupRef{Epoch: epoch, Sequence: sequence}, nil
+	return NewGroupID(epoch, sequence), nil
 }
 
 // GroupInfo is a group's manifest row: everything a reader needs to decide
 // whether to fetch the payload, without fetching it.
 //
-// It anchors a group on two timelines rather than describing a closed interval.
-// Groups are serial within an epoch, so the start of one is the end of the last
-// — which makes [GroupInfo.MediaTime] the only time value that must always be present.
-// [GroupInfo.Duration] and [GroupInfo.Wallclock] are optional, because not every
-// producer knows them.
+// [GroupInfo.ID] is the single identity — a [GroupID] packing the epoch and
+// sequence — so a row fetched in isolation names itself. Pass a GroupInfo to
+// [Writer.AppendGroup] with the ID carrying only the producer's sequence (the
+// epoch is ignored and stamped from the writer's lifetime); the returned row
+// carries the full ID.
+//
+// A group is anchored on two timelines rather than described as a closed
+// interval. Groups are serial within an epoch, so the start of one is the end
+// of the last — which makes [GroupInfo.MediaTime] the only time value that must
+// always be present. [GroupInfo.Duration] and [GroupInfo.Wallclock] are
+// optional, because not every producer knows them.
 type GroupInfo struct {
-	GroupRef
+	// ID identifies the group. On input to AppendGroup only its sequence part
+	// is read; the writer stamps the epoch. On a row read back, both parts are
+	// the group's full identity.
+	ID GroupID `json:"id"`
 
 	// MediaTime is the group's start in media time, expressed in the track's
 	// timescale units. It is the anchor: it orders the group within its epoch
@@ -130,7 +145,7 @@ type GroupInfo struct {
 	// index be range-checked without fetching the payload.
 	ObjectCount uint64 `json:"objectCount,omitempty"`
 
-	// Object is the storage key of the payload. Readers must take it from
+	// ObjectKey is the storage key of the payload. Readers must take it from
 	// here rather than deriving it, because sequences are gappy.
 	ObjectKey string `json:"objectKey"`
 
@@ -234,7 +249,7 @@ const nanosPerSecond = 1_000_000_000
 
 func (m GroupInfo) validate() error {
 	switch {
-	case m.Epoch == 0:
+	case m.ID.Epoch() == 0:
 		return fmt.Errorf("%w: epoch must be non-zero", ErrInvalidGroup)
 	case m.Duration < 0:
 		return fmt.Errorf("%w: negative duration %d", ErrInvalidGroup, m.Duration)

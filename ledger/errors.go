@@ -42,6 +42,15 @@ var (
 	// group whose duration is known.
 	ErrGroupNotFound = errors.New("ledger: no group found")
 
+	// ErrEpochNotFound reports that no log manifest exists for the requested
+	// epoch — it was never created, or its creation did not complete.
+	ErrEpochNotFound = errors.New("ledger: epoch not found")
+
+	// ErrEpochOutOfOrder reports a Writer opened on an epoch the track does not
+	// allow: one behind the latest (backfill into a past producer lifetime is
+	// refused) or more than one ahead (epochs cannot be skipped).
+	ErrEpochOutOfOrder = errors.New("ledger: epoch out of order")
+
 	// ErrNotCommitted reports that a delta has not been written yet. It is the
 	// expected outcome of probing past the tip of a track and is how a tailing
 	// reader learns to wait rather than an error condition.

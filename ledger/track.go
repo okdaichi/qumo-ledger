@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
@@ -83,8 +84,8 @@ func (s TimeSource) valid() bool {
 // with the same schema as an existing one:
 //
 //	src, _ := ledger.Open(ctx, objects, "live/cam1/video", ledger.Config{})
-//	meta := srcReader.Root()
-//	ledger.Create(ctx, objects, "live/cam2/video", meta.TrackSchema, ledger.Config{})
+//	info := src.Root()
+//	ledger.Create(ctx, objects, "live/cam2/video", info.TrackSchema, ledger.Config{})
 //
 // Do not confuse it with [Config], which carries deployment settings — a
 // logger, a clock, the seal threshold — that belong to a process rather than to
@@ -119,14 +120,14 @@ func (c TrackSchema) validate() error {
 	return nil
 }
 
-// TrackInfo describes a track: the schema fixed at creation and the producer
-// epoch currently being written. It is what [Reader.Root] and [Writer.Root]
-// return, in place of the on-disk manifest. How the history is laid out into
-// sealed and open regions is deliberately not part of it — that is storage
-// structure, not a property of the track.
+// TrackInfo describes a track: the schema fixed at creation and the latest
+// producer epoch. It is what [Reader.Root] and [Writer.Root] return, in place
+// of the on-disk manifest. How each epoch's history is laid out into sealed and
+// open regions is deliberately not part of it — that is storage structure, not
+// a property of the track.
 //
 // It is the track-level counterpart of [GroupInfo]: each of the two domain
-// objects has an identity ([TrackPath], [GroupRef]) and a record describing it
+// objects has an identity ([TrackPath], [GroupID]) and a record describing it
 // ([TrackInfo], [GroupInfo]).
 type TrackInfo struct {
 	// TrackSchema is the schema the track was created with, embedded so its
@@ -137,9 +138,11 @@ type TrackInfo struct {
 	// Track is the path identifying the track.
 	Track TrackPath
 
-	// Epoch is the producer lifetime currently being written. It advances when
-	// a producer restarts its numbering; see [GroupRef.Epoch].
-	Epoch uint64
+	// LatestEpoch is the newest producer epoch the track has. A producer that
+	// restarts opens the next one through [Writer.NewEpoch]; see [GroupID].
+	// A [Reader] or [Writer] reports the track's LatestEpoch as it was when
+	// constructed, which a later [Track.Reload] can refresh.
+	LatestEpoch uint64
 }
 
 // Config carries the deployment-level settings for a track. The zero value is
@@ -179,7 +182,8 @@ type Config struct {
 //	reader, _ := track.Reader(ctx)
 //
 // A Track holds no resources and needs no closing. It is safe for concurrent
-// use, but must not be modified once a Writer or Reader has been built from it.
+// use: opening or advancing an epoch updates the cached track root under a
+// lock, and each [Writer] and [Reader] is self-contained once built.
 type Track struct {
 	store store.Store
 	path  TrackPath
@@ -188,10 +192,11 @@ type Track struct {
 	clock         func() time.Time
 	logger        *slog.Logger
 
-	// root is the manifest loaded by Create or Open. A Writer starts from it
-	// (and advances it as it seals); a Reader loads a fresh copy of its own so
-	// it sees the current state.
-	root        rootManifest
+	// mu guards root and rootVersion. They change only when an epoch is
+	// created; everything else a Reader or Writer touches lives in its epoch's
+	// own log, not here.
+	mu          sync.Mutex
+	root        trackRoot
 	rootVersion store.Version
 }
 
@@ -221,11 +226,14 @@ func resolveConfig(s store.Store, path TrackPath, cfg Config) *Track {
 
 // Create establishes a new track, like [os.Create]: it writes the root manifest
 // that fixes the track's schema — Timescale, TimeSource, MIME, Encoding — and
-// returns a reference to it. The schema is then immutable.
+// creates its first epoch, returning a reference. The schema is then immutable.
 //
 // A track is an immutable, append-only log rather than a writable file, so
 // where os.Create truncates an existing file, Create refuses one: it returns
-// [ErrTrackExists] if the track already has a root manifest.
+// [ErrTrackExists] if the track already has a root manifest. The first epoch's
+// log is written alongside the root, so a freshly created track is already
+// writable and readable; should that write fail, the root is still durable,
+// and the first [Track.Writer] creates the log lazily.
 func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackSchema, cfg Config) (*Track, error) {
 	if err := path.validate(); err != nil {
 		return nil, err
@@ -236,16 +244,15 @@ func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackSche
 
 	t := resolveConfig(s, path, cfg)
 
-	root := rootManifest{
-		Version:    manifestVersion,
-		Track:      path,
-		Timescale:  schema.Timescale,
-		TimeSource: schema.TimeSource,
-		MIME:       schema.MIME,
-		Encoding:   schema.Encoding,
-		Epoch:      1,
-		OpenFrom:   0,
-		CreatedAt:  t.clock().UnixNano(),
+	root := trackRoot{
+		Version:     manifestVersion,
+		Track:       path,
+		Timescale:   schema.Timescale,
+		TimeSource:  schema.TimeSource,
+		MIME:        schema.MIME,
+		Encoding:    schema.Encoding,
+		LatestEpoch: 1,
+		CreatedAt:   t.clock().UnixNano(),
 	}
 
 	data, err := encodeManifest(root)
@@ -260,8 +267,12 @@ func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackSche
 		}
 		return nil, fmt.Errorf("ledger: create track %s: %w", path, err)
 	}
-
 	t.root, t.rootVersion = root, version
+
+	if err := t.createEpochLog(ctx, 1); err != nil {
+		return nil, fmt.Errorf("ledger: create epoch 1 of %s: %w", path, err)
+	}
+
 	return t, nil
 }
 
@@ -279,11 +290,184 @@ func Open(ctx context.Context, s store.Store, path TrackPath, cfg Config) (*Trac
 
 	t := resolveConfig(s, path, cfg)
 
-	root, version, err := fetchRoot(ctx, s, path)
+	root, version, err := fetchTrackRoot(ctx, s, path)
 	if err != nil {
 		return nil, err
 	}
 
 	t.root, t.rootVersion = root, version
 	return t, nil
+}
+
+// LatestEpoch returns the newest producer epoch the track has, from the cached
+// track root. A follower that needs to notice a new epoch refreshes the cache
+// with [Track.Reload].
+func (t *Track) LatestEpoch() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.root.LatestEpoch
+}
+
+// Root returns the track's read-side metadata from the cached track root: the
+// schema fixed at creation and the latest epoch. It is the same projection
+// [Reader.Root] and [Writer.Root] make; a follower refreshes it through
+// [Track.Reload].
+func (t *Track) Root() TrackInfo {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return TrackInfo{
+		TrackSchema: t.root.schema(),
+		Track:       t.path,
+		LatestEpoch: t.root.LatestEpoch,
+	}
+}
+
+// Reload re-reads the track root, refreshing the latest epoch the cache
+// reports. A tailing consumer calls it to detect that a producer has opened a
+// new epoch.
+func (t *Track) Reload(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	root, version, err := fetchTrackRoot(ctx, t.store, t.path)
+	if err != nil {
+		return err
+	}
+	t.root, t.rootVersion = root, version
+	return nil
+}
+
+// Writer opens the track's latest epoch for appending and recovers its
+// position. A producer that restarts begins the next epoch through
+// [Writer.NewEpoch]; until then every append is written under the current one.
+//
+// Recovery reads the head pointer for a starting guess and then probes forward
+// until a delta is absent. The absent delta is the true tip: because a delta is
+// immutable and written atomically, any delta that exists is committed, whether
+// or not head knows about it. A writer that crashed mid-append therefore
+// resumes without losing committed groups and without a repair pass.
+//
+// Within an epoch the writer is single-writer by design: two concurrent writers
+// do not corrupt an epoch, but the loser's writes fail rather than interleave.
+func (t *Track) Writer(ctx context.Context) (*Writer, error) {
+	t.mu.Lock()
+	latest := t.root.LatestEpoch
+	schema := t.root.schema()
+	t.mu.Unlock()
+
+	if latest == 0 {
+		return nil, fmt.Errorf("%w: %s has no epochs", ErrEpochNotFound, t.path)
+	}
+
+	w := t.newWriter(latest, schema)
+
+	logRoot, logVersion, err := fetchEpochLog(ctx, t.store, t.path, latest)
+	if errors.Is(err, ErrEpochNotFound) {
+		// The root claims this epoch exists but its log does not: a creation
+		// that did not finish. Create it now and re-fetch.
+		if err := t.createEpochLog(ctx, latest); err != nil {
+			return nil, err
+		}
+		logRoot, logVersion, err = fetchEpochLog(ctx, t.store, t.path, latest)
+	}
+	if err != nil {
+		return nil, err
+	}
+	w.logRoot, w.logVersion = logRoot, logVersion
+
+	if err := w.recover(ctx); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// newWriter builds a writer bound to epoch, carrying the track's resolved
+// settings. The log root and recovered position are filled in by [Writer.recover]
+// after the log root has been fetched.
+func (t *Track) newWriter(epoch uint64, schema TrackSchema) *Writer {
+	return &Writer{
+		track:         t,
+		objects:       t.store,
+		path:          t.path,
+		epoch:         epoch,
+		schema:        schema,
+		sealThreshold: t.sealThreshold,
+		now:           t.clock,
+		logger:        t.logger,
+	}
+}
+
+// createEpochLog writes an epoch's log root if it does not exist and records
+// the epoch in the track root. It is idempotent: a log another writer created,
+// or an orphan left by a crashed creation, is adopted rather than treated as an
+// error. It takes the track lock itself, so it is safe to call from a
+// [Writer.NewEpoch].
+func (t *Track) createEpochLog(ctx context.Context, epoch uint64) error {
+	root := epochLogRoot{
+		Version:   manifestVersion,
+		Track:     t.path,
+		Epoch:     epoch,
+		OpenFrom:  0,
+		CreatedAt: t.clock().UnixNano(),
+	}
+	data, err := encodeManifest(root)
+	if err != nil {
+		return err
+	}
+
+	if _, err := t.store.Create(ctx, epochLogKey(t.path, epoch), data); err != nil {
+		if !errors.Is(err, store.ErrExist) {
+			return fmt.Errorf("ledger: create log of %s epoch %d: %w", t.path, epoch, err)
+		}
+		// ErrExist: another writer created it (or an orphan from a crash).
+		// Adopt it and fall through to record the epoch in the track root.
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.advanceTrackRootLocked(ctx, epoch)
+}
+
+// advanceTrackRootLocked bumps the track root's LatestEpoch to epoch,
+// idempotently. On a version mismatch another writer has moved the root; it is
+// re-read and adopted if it has reached epoch, otherwise the bump is retried
+// once. The caller must hold t.mu.
+func (t *Track) advanceTrackRootLocked(ctx context.Context, epoch uint64) error {
+	if t.root.LatestEpoch >= epoch {
+		return nil
+	}
+
+	bump := func(base trackRoot, version store.Version) (trackRoot, store.Version, error) {
+		next := base
+		next.LatestEpoch = epoch
+		data, err := encodeManifest(next)
+		if err != nil {
+			return trackRoot{}, store.NoVersion, err
+		}
+		v, err := t.store.Swap(ctx, rootKey(t.path), data, version)
+		if err != nil {
+			return trackRoot{}, store.NoVersion, err
+		}
+		return next, v, nil
+	}
+
+	next, version, err := bump(t.root, t.rootVersion)
+	if errors.Is(err, store.ErrVersionMismatch) || errors.Is(err, store.ErrNotExist) {
+		// Another writer moved the root, or (impossibly) it vanished. Re-fetch
+		// and adopt if it has reached epoch; otherwise retry the bump once.
+		current, curVersion, getErr := fetchTrackRoot(ctx, t.store, t.path)
+		if getErr != nil {
+			return getErr
+		}
+		t.root, t.rootVersion = current, curVersion
+		if current.LatestEpoch >= epoch {
+			return nil
+		}
+		next, version, err = bump(current, curVersion)
+	}
+	if err != nil {
+		return fmt.Errorf("ledger: advance track root of %s to epoch %d: %w", t.path, epoch, err)
+	}
+	t.root, t.rootVersion = next, version
+	return nil
 }

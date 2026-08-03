@@ -82,16 +82,16 @@ func inspect(ctx context.Context, args []string) error {
 		return fmt.Errorf("-track is required")
 	}
 
-	reader, err := openReader(ctx, *root, *track)
+	track_, err := openTrack(ctx, *root, *track)
 	if err != nil {
 		return err
 	}
 
-	info := reader.Root()
+	info := track_.Root()
 	fmt.Printf("track       %s\n", info.Track)
 	fmt.Printf("timescale   %d units/sec (%s)\n", info.Timescale, info.TimeSource)
 	fmt.Printf("encoding    %s %s\n", info.Encoding, info.MIME)
-	fmt.Printf("epoch       %d\n", info.Epoch)
+	fmt.Printf("epochs      %d\n", info.LatestEpoch)
 
 	if !*groups {
 		return nil
@@ -101,6 +101,11 @@ func inspect(ctx context.Context, args []string) error {
 	out := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(out, "GROUP\tMEDIA\tWALLCLOCK\tOBJECTS\tSIZE")
 
+	// A reader spans every epoch, so a single drain lists the whole track.
+	reader, err := track_.Reader(ctx)
+	if err != nil {
+		return err
+	}
 	reader.SeekStart()
 	for {
 		group, err := reader.Next(ctx)
@@ -125,7 +130,7 @@ func inspect(ctx context.Context, args []string) error {
 		}
 
 		fmt.Fprintf(out, "%s\t%s\t%s\t%d\t%d\n",
-			group.GroupRef, media, wallclock, group.ObjectCount, group.Size)
+			group.ID, media, wallclock, group.ObjectCount, group.Size)
 	}
 
 	return out.Flush()
@@ -135,7 +140,7 @@ func follow(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("follow", flag.ExitOnError)
 	root := flags.String("root", ".", "storage root directory")
 	track := flags.String("track", "", "track path, for example live/cam1/video")
-	group := flags.String("group", "", "resume after a group ref printed by an earlier run, e.g. e000001-g00000003")
+	group := flags.String("group", "", "resume after a group id printed by an earlier run, e.g. e000001-g00000003")
 	tip := flags.Bool("tip", false, "start after everything already committed")
 	interval := flags.Duration("interval", ledger.DefaultPollInterval, "poll interval")
 	if err := flags.Parse(args); err != nil {
@@ -145,19 +150,25 @@ func follow(ctx context.Context, args []string) error {
 		return fmt.Errorf("-track is required")
 	}
 
-	reader, err := openReader(ctx, *root, *track)
+	track_, err := openTrack(ctx, *root, *track)
 	if err != nil {
 		return err
 	}
 
-	// With no position flag an unflagged run replays everything and then tails.
+	reader, err := track_.Reader(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Pick the starting position. The reader spans every epoch, so a position is
+	// just a GroupID; the default replays from the start.
 	switch {
 	case *group != "":
-		from, err := ledger.ParseGroupRef(*group)
+		id, err := ledger.ParseGroupID(*group)
 		if err != nil {
 			return err
 		}
-		if err := reader.SeekAfter(ctx, from); err != nil {
+		if err := reader.SeekAfter(ctx, id); err != nil {
 			return err
 		}
 	case *tip:
@@ -169,7 +180,8 @@ func follow(ctx context.Context, args []string) error {
 	}
 
 	// Following is polling, because object stores do not push. Next is
-	// non-blocking — it returns io.EOF at the tip — so the wait lives here.
+	// non-blocking — it returns io.EOF at the tip — so the wait lives here. A
+	// reader steps into a new epoch on its own when the current one is drained.
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for {
@@ -185,21 +197,16 @@ func follow(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s  group %s  media %d+%d  %d objects  %d bytes\n",
-			reader.Position(), group.GroupRef, group.MediaTime, group.Duration,
-			group.ObjectCount, group.Size)
+		fmt.Printf("group %s  media %d+%d  %d objects  %d bytes\n",
+			group.ID, group.MediaTime, group.Duration, group.ObjectCount, group.Size)
 	}
 }
 
-func openReader(ctx context.Context, root, path string) (*ledger.Reader, error) {
+func openTrack(ctx context.Context, root, path string) (*ledger.Track, error) {
 	objects, err := fsstore.New(root)
 	if err != nil {
 		return nil, err
 	}
 
-	track, err := ledger.Open(ctx, objects, ledger.TrackPath(path), ledger.Config{})
-	if err != nil {
-		return nil, err
-	}
-	return track.Reader(ctx)
+	return ledger.Open(ctx, objects, ledger.TrackPath(path), ledger.Config{})
 }

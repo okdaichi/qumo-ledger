@@ -27,11 +27,12 @@
 //
 // There is no embedded database. Everything durable is an object:
 //
-//	<track>/root.manifest              track metadata: timescale, encoding, epoch
-//	<track>/delta/head                 pointer to the newest committed delta
-//	<track>/delta/open/00000042.manifest
-//	<track>/delta/sealed-00000001.manifest
-//	<track>/groups/e000001-g00000042   payload
+//	<track>/root.manifest              track root: schema, latest epoch
+//	<track>/e000001/log.manifest       an epoch's log root: sealed index, open region
+//	<track>/e000001/delta/head         pointer to the newest committed delta
+//	<track>/e000001/delta/open/00000042.manifest
+//	<track>/e000001/delta/sealed-00000001.manifest
+//	<track>/e000001/groups/g00000042   payload
 //
 // Every object above is immutable except head. Writes are therefore conditional
 // creates, which makes a duplicate append fail cleanly instead of corrupting,
@@ -53,17 +54,19 @@
 //
 // # Two addressing regimes
 //
-// Delta manifests are numbered by the ledger and are contiguous, so a reader
-// tails them arithmetically: hold N, request N+1, treat absence as "not yet".
-// No listing is required, which matters because listing is the most expensive
-// and least consistent operation object stores offer.
+// Delta manifests are numbered by the ledger and are contiguous within an epoch,
+// so a reader tails them arithmetically: hold N, request N+1, treat absence as
+// "not yet". No listing is required, which matters because listing is the most
+// expensive and least consistent operation object stores offer.
 //
 // Group sequences are assigned by the producer and are *not* contiguous. Groups
 // are legitimately dropped under congestion, so gaps are real data rather than
-// corruption, and a producer restart resets the sequence — which is what Epoch
-// disambiguates. Preserving the producer's numbering is deliberate: a relay
-// serving the same track live uses those sequence numbers, and a client can
-// only align live playback with replay if both agree on what group 42 is.
+// corruption, and a producer restart resets the sequence. The epoch that
+// disambiguates restarts is packed with the sequence into a single [GroupID],
+// so identity is one number — and numeric order is commit order across the whole
+// track. Preserving the producer's numbering is deliberate: a relay serving the
+// same track live uses those sequence numbers, and a client can only align live
+// playback with replay if both agree on what group 42 is.
 //
 // So: probe forward through manifests, but never derive a Group key. Read it
 // from the manifest.
@@ -124,7 +127,7 @@
 // [Reader.Next] is non-blocking and returns [io.EOF] at the current tip, so
 // tailing is a poll loop the caller owns — object stores do not push, and the
 // latency strategy (interval, signal, hybrid) is a deployment decision.
-// [Reader.Position] returns the [GroupRef] to resume from, and [ParseGroupRef]
+// [Reader.Position] returns the [GroupID] to resume from, and [ParseGroupID]
 // round-trips its text form across a restart. Concurrent consumers each open
 // their own Reader, which costs one root fetch.
 //

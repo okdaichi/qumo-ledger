@@ -56,9 +56,9 @@ writer.Append(ctx, 180000, payload) // two seconds at 90 kHz
 
 // AppendGroup is the escape hatch — a producer's own numbering, a dropped
 // group, or a media anchor that is not simply the previous group's end. The
-// writer fills Epoch (advance it with Writer.AdvanceEpoch on a restart).
+// writer stamps the epoch; advance it with Writer.NewEpoch on a restart.
 writer.AppendGroup(ctx, ledger.GroupInfo{
-    GroupRef:  ledger.GroupRef{Sequence: 42},
+    ID:        ledger.NewGroupID(0, 42), // sequence; the epoch is stamped by the writer
     MediaTime: 7560000, // media anchor, in timescale units
     Duration:  180000,  // optional: two seconds at 90 kHz
     Wallclock: w0,      // optional: wallclock anchor, Unix nanoseconds
@@ -98,7 +98,7 @@ for {
     if err != nil {
         return err
     }
-    save(reader.Position()) // survives a restart: it is the GroupRef text
+    save(reader.Position()) // survives a restart: it is the GroupID text
 }
 ```
 
