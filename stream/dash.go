@@ -1,0 +1,107 @@
+package stream
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/okdaichi/qumo-ledger/ledger"
+)
+
+// renderDASH builds a dynamic Media Presentation Description (MPD) for groups in
+// commit order.
+//
+// The presentation is dynamic — it grows as groups land, mirroring an HLS EVENT
+// playlist — and lists every committed segment, since the ledger never deletes.
+// Segments are listed explicitly by their GroupID URL (a SegmentList of
+// SegmentURL entries), so the same segment handler serves HLS and DASH; DASH
+// offers no template variable for a producer's own id, so the list is explicit
+// rather than templated. A SegmentTimeline alongside carries each segment's
+// duration and resets @t at each epoch boundary, where media time restarts.
+func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts renderOpts) ([]byte, error) {
+	for _, g := range groups {
+		if g.Duration <= 0 {
+			return nil, fmt.Errorf("stream: group %s has no duration; DASH needs an @d", g.ID)
+		}
+	}
+
+	buffer := maxSegmentSeconds(schema, groups)
+
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" ` +
+		`type="dynamic" ` +
+		`profiles="urn:mpeg:dash:profile:isoff-live:2011"`)
+	if ast := dashAvailabilityStartTime(groups); ast != "" {
+		fmt.Fprintf(&b, ` availabilityStartTime="%s"`, ast)
+	}
+	fmt.Fprintf(&b, ` minimumUpdatePeriod="%s"`, dashDuration(2))
+	fmt.Fprintf(&b, ` minBufferTime="%s"`, dashDuration(buffer))
+	fmt.Fprintf(&b, ` maxSegmentDuration="%s"`, dashDuration(buffer))
+	b.WriteString(">\n")
+
+	b.WriteString(`  <Period id="0" start="PT0S">` + "\n")
+	fmt.Fprintf(&b, `    <AdaptationSet id="0" mimeType="%s" contentType="%s" segmentAlignment="true">`+"\n",
+		schema.MIME, dashContentType(schema.MIME))
+	b.WriteString(`      <Representation id="0">` + "\n")
+	fmt.Fprintf(&b, `        <SegmentList timescale="%d">`+"\n", schema.Timescale)
+	if opts.initURI != "" {
+		fmt.Fprintf(&b, `          <Initialization sourceURL="%s"/>`+"\n", opts.initURI)
+	}
+
+	// SegmentTimeline: @t resets at each epoch boundary; otherwise the timeline
+	// continues from the previous segment's end. Entries correspond 1:1, in
+	// order, with the SegmentURL list below.
+	b.WriteString("          <SegmentTimeline>\n")
+	var prevEpoch uint64
+	for i, g := range groups {
+		if i == 0 || g.ID.Epoch() != prevEpoch {
+			fmt.Fprintf(&b, `            <S t="%d" d="%d"/>`+"\n", g.MediaTime, g.Duration)
+		} else {
+			fmt.Fprintf(&b, `            <S d="%d"/>`+"\n", g.Duration)
+		}
+		prevEpoch = g.ID.Epoch()
+	}
+	b.WriteString("          </SegmentTimeline>\n")
+
+	for _, g := range groups {
+		fmt.Fprintf(&b, `          <SegmentURL media="%s%s"/>`+"\n", g.ID, opts.segExt)
+	}
+
+	b.WriteString("        </SegmentList>\n")
+	b.WriteString("      </Representation>\n")
+	b.WriteString("    </AdaptationSet>\n")
+	b.WriteString("  </Period>\n")
+	b.WriteString("</MPD>\n")
+
+	return []byte(b.String()), nil
+}
+
+// dashAvailabilityStartTime is the wallclock the presentation began, taken from
+// the first group that carries an anchor. A dynamic MPD needs one to relate
+// media time to the wall clock; without any anchor there is none to report.
+func dashAvailabilityStartTime(groups []ledger.GroupInfo) string {
+	for _, g := range groups {
+		if g.Wallclock != 0 {
+			return time.Unix(0, g.Wallclock).UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return ""
+}
+
+// dashDuration formats a whole-second extent as an ISO 8601 period.
+func dashDuration(seconds int) string {
+	return fmt.Sprintf("PT%dS", seconds)
+}
+
+// dashContentType projects a MIME type onto DASH's coarse content classification.
+func dashContentType(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "video/"):
+		return "video"
+	case strings.HasPrefix(mime, "audio/"):
+		return "audio"
+	default:
+		return "application"
+	}
+}

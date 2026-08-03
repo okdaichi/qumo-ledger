@@ -307,6 +307,33 @@ runs, the open region, delta numbering — that a consumer has no reason to see.
 This is decision 12's opacity one layer down: the handle hides its fields, the
 package hides its format.
 
+## 14. HLS and DASH are derived views, served from the manifest
+
+The `stream` package renders a track as HLS and DASH without the core knowing
+either format — decision 3 made them derived views, and this is that view. A
+Group is one segment; `Duration` is HLS `EXTINF` and DASH `@d`; a new producer
+epoch is an HLS `#EXT-X-DISCONTINUITY` and a DASH timeline reset; a wallclock
+anchor is `#EXT-X-PROGRAM-DATE-TIME` and the MPD `availabilityStartTime`. Both
+address segments by their `GroupID`, so one segment handler serves them both.
+
+**Why a GroupID point-lookup joined the core.** Serving a segment by its id needs
+its `ObjectKey` — to proxy the bytes and to mint a signed URL — and the ledger
+forbids deriving a group key (decision 7). So `Reader.Lookup` reads the key from
+the manifest. It is the one read operation that is neither a window nor a stream,
+and it belongs on the core because every renderer and every external serving tool
+needs the same honest resolution.
+
+**Why delivery stays out of the core.** Proxying is the dev default; redirecting
+to signed object URLs is the production path (decision 10). Both are a
+`stream`-layer concern — a `SegmentResolver` — so the store stays free of a
+presigning method it could not implement uniformly, and the core never sees a
+delivery strategy.
+
+**Consequence.** The renderers reflect the whole track and regenerate per
+request, which is O(track size). Caching the output and bounding it with a
+sliding window are deliberate follow-ons; the format itself never depends on
+them.
+
 ---
 
 ## Deferred
@@ -318,7 +345,7 @@ Named so they are choices rather than oversights.
 | **Garbage collection** | Orphaned group objects are identifiable via `Lister`; no policy engine yet. |
 | **Retention** | No time- or size-based expiry. |
 | **Frame index footers** | Sealed-only writes make a per-group frame index *possible*, unlike live systems. Skipped so payloads stay byte-identical to the MoQT group stream, which keeps egress a zero-transform read. |
-| **HLS / DASH / MSF renderers** | The manifest carries what they need — `epoch` maps to `EXT-X-DISCONTINUITY`, the wallclock index to `EXT-X-PROGRAM-DATE-TIME`. |
+| **MSF renderer** | The manifest carries what a Media Source Framework presentation needs, as it does for HLS and DASH (decision 14). |
 | **MoQT adapter** | Belongs in a `moqtstore` package; the only place that parses frames. |
 | **S3 backend** | The interface is deliberately shaped around what S3 offers: conditional create and conditional overwrite. |
 | **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. A `version` field is what lets this be revisited. |

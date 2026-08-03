@@ -1,0 +1,191 @@
+package stream
+
+import (
+	"bytes"
+	"encoding/xml"
+	"errors"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/okdaichi/qumo-ledger/ledger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+var testSchema = ledger.TrackSchema{
+	Timescale: 90000,
+	MIME:      "video/mp4",
+	Encoding:  "fmp4",
+}
+
+// testBase anchors wallclock output at a fixed instant so the golden strings
+// are reproducible. RFC3339Nano of it and its even-second offsets have no
+// fractional part.
+var testBase = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+
+// wallclock returns the Unix-nano anchor secs seconds after testBase.
+func wallclock(secs int) int64 {
+	return testBase.Add(time.Duration(secs) * time.Second).UnixNano()
+}
+
+// grp builds a GroupInfo with only the fields the renderers read.
+func grp(id ledger.GroupID, media, dur, wall int64) ledger.GroupInfo {
+	return ledger.GroupInfo{ID: id, MediaTime: media, Duration: dur, Wallclock: wall}
+}
+
+func TestRenderHLS_SingleEpoch(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, 0),
+		grp(ledger.NewGroupID(1, 1), 180000, 180000, 0),
+	}
+
+	body, err := renderHLS(testSchema, groups, renderOpts{segExt: ".m4s"})
+	require.NoError(t, err)
+
+	const want = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:EVENT
+#EXTINF:2.000,
+e000001-g00000000.m4s
+#EXTINF:2.000,
+e000001-g00000001.m4s
+`
+	assert.Equal(t, want, string(body))
+}
+
+// Two epochs exercise a discontinuity before epoch 2's first segment, the init
+// map, and per-segment program-date-time — the rendering map from decision 14.
+func TestRenderHLS_TwoEpochsDiscontinuity(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, wallclock(0)),
+		grp(ledger.NewGroupID(1, 1), 180000, 180000, wallclock(2)),
+		grp(ledger.NewGroupID(2, 0), 0, 180000, wallclock(4)),
+	}
+
+	body, err := renderHLS(testSchema, groups, renderOpts{segExt: ".m4s", initURI: "init.m4s"})
+	require.NoError(t, err)
+
+	const want = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:EVENT
+#EXT-X-MAP:URI="init.m4s"
+#EXT-X-PROGRAM-DATE-TIME:2026-07-31T12:00:00Z
+#EXTINF:2.000,
+e000001-g00000000.m4s
+#EXT-X-PROGRAM-DATE-TIME:2026-07-31T12:00:02Z
+#EXTINF:2.000,
+e000001-g00000001.m4s
+#EXT-X-DISCONTINUITY
+#EXT-X-PROGRAM-DATE-TIME:2026-07-31T12:00:04Z
+#EXTINF:2.000,
+e000002-g00000000.m4s
+`
+	assert.Equal(t, want, string(body))
+}
+
+func TestRenderHLS_NoDuration(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 0, 0), // a segment with no extent
+	}
+
+	_, err := renderHLS(testSchema, groups, renderOpts{segExt: ".m4s"})
+
+	assert.Error(t, err, "a segment with no duration has no EXTINF to carry")
+}
+
+func TestRenderDASH_SingleEpoch(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, wallclock(0)),
+		grp(ledger.NewGroupID(1, 1), 180000, 180000, wallclock(2)),
+	}
+
+	body, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s"})
+	require.NoError(t, err)
+	assertXMLWellFormed(t, body)
+
+	const want = `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" availabilityStartTime="2026-07-31T12:00:00Z" minimumUpdatePeriod="PT2S" minBufferTime="PT2S" maxSegmentDuration="PT2S">
+  <Period id="0" start="PT0S">
+    <AdaptationSet id="0" mimeType="video/mp4" contentType="video" segmentAlignment="true">
+      <Representation id="0">
+        <SegmentList timescale="90000">
+          <SegmentTimeline>
+            <S t="0" d="180000"/>
+            <S d="180000"/>
+          </SegmentTimeline>
+          <SegmentURL media="e000001-g00000000.m4s"/>
+          <SegmentURL media="e000001-g00000001.m4s"/>
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+`
+	assert.Equal(t, want, string(body))
+}
+
+// The epoch boundary resets @t to the new lifetime's media origin and lists the
+// init segment, which DASH references through @initialization.
+func TestRenderDASH_TwoEpochsInit(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, wallclock(0)),
+		grp(ledger.NewGroupID(1, 1), 180000, 180000, wallclock(2)),
+		grp(ledger.NewGroupID(2, 0), 0, 180000, wallclock(4)),
+	}
+
+	body, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s", initURI: "init.m4s"})
+	require.NoError(t, err)
+	assertXMLWellFormed(t, body)
+
+	const want = `<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" availabilityStartTime="2026-07-31T12:00:00Z" minimumUpdatePeriod="PT2S" minBufferTime="PT2S" maxSegmentDuration="PT2S">
+  <Period id="0" start="PT0S">
+    <AdaptationSet id="0" mimeType="video/mp4" contentType="video" segmentAlignment="true">
+      <Representation id="0">
+        <SegmentList timescale="90000">
+          <Initialization sourceURL="init.m4s"/>
+          <SegmentTimeline>
+            <S t="0" d="180000"/>
+            <S d="180000"/>
+            <S t="0" d="180000"/>
+          </SegmentTimeline>
+          <SegmentURL media="e000001-g00000000.m4s"/>
+          <SegmentURL media="e000001-g00000001.m4s"/>
+          <SegmentURL media="e000002-g00000000.m4s"/>
+        </SegmentList>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
+`
+	assert.Equal(t, want, string(body))
+}
+
+func TestRenderDASH_NoDuration(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 0, 0),
+	}
+
+	_, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s"})
+
+	assert.Error(t, err, "a segment with no duration has no @d to carry")
+}
+
+// assertXMLWellFormed confirms the MPD parses as XML. It is not a conformance
+// check against the DASH schema, only that the renderer emits balanced markup.
+func assertXMLWellFormed(t *testing.T, body []byte) {
+	t.Helper()
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	for {
+		_, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		require.NoError(t, err)
+	}
+}

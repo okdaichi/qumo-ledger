@@ -137,6 +137,7 @@ mage build
 
 ./bin/qumo-ledger inspect -root /var/lib/qumo-ledger -track live/cam1/video -groups
 ./bin/qumo-ledger follow  -root /var/lib/qumo-ledger -track live/cam1/video
+./bin/qumo-stream    -root /var/lib/qumo-ledger -track live/cam1/video   # HLS (.m3u8) + DASH (.mpd)
 ```
 
 The CLI is a convenience, not a component: it uses the same public API any
@@ -151,6 +152,7 @@ reader would.
 | `ledger/store/memstore` | In-memory backend; also the reference implementation. |
 | `ledger/store/fsstore` | Local filesystem backend. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
+| `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
 
 ## Development
 
