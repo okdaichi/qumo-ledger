@@ -252,9 +252,9 @@ arguments it needs.
 **Why the schema is its own type.** `TrackSchema` describes content and is fixed
 at creation; `Config` carries deployment settings — a logger, a clock, the seal
 threshold — that belong to a process. Two names rather than two "Config"s in one
-call. `TrackMeta` embeds the schema rather than restating it, so the read side
+call. `TrackInfo` embeds the schema rather than restating it, so the read side
 has one definition of what a track *is*, and a schema can be handed straight back
-to `Create` to make a second track like the first. What `TrackMeta` adds beyond
+to `Create` to make a second track like the first. What `TrackInfo` adds beyond
 the schema is deliberately *not* creation input: `Track` comes from the path
 argument and `Epoch` is writer-assigned (decision 8), so neither belongs on a
 struct a caller fills in.
@@ -285,7 +285,7 @@ separate "bucket" type to explain alongside it.
 ## 13. Manifests are an internal wire format, not a public type
 
 The manifest structs (`rootManifest`, `deltaManifest`, `sealedManifest`, `head`)
-are unexported. A Go consumer reads track metadata through `TrackMeta`, the
+are unexported. A Go consumer reads track metadata through `TrackInfo`, the
 projection returned by `Reader.Root` and `Writer.Root`; a reader in any language
 reads the JSON schema documented in the object layout above. There is no
 `Reader.Head` on the public API — the head pointer is a discovery cache (decision

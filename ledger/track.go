@@ -79,7 +79,7 @@ func (s TimeSource) valid() bool {
 // groups belongs in [GroupInfo] instead.
 //
 // It is a value rather than a set of arguments so a schema can be carried
-// around — notably [TrackMeta] embeds one, so a second track can be created
+// around — notably [TrackInfo] embeds one, so a second track can be created
 // with the same schema as an existing one:
 //
 //	src, _ := ledger.Open(ctx, objects, "live/cam1/video", ledger.Config{})
@@ -119,14 +119,18 @@ func (c TrackSchema) validate() error {
 	return nil
 }
 
-// TrackMeta is a track's read-side metadata: the schema fixed at creation and
-// the producer epoch currently being written. It is the public projection of the
-// root, so [Reader.Root] and [Writer.Root] return one of these rather than the
-// on-disk manifest. How the history is laid out into sealed and open regions is
-// deliberately not part of it — that is storage structure, not track metadata.
-type TrackMeta struct {
+// TrackInfo describes a track: the schema fixed at creation and the producer
+// epoch currently being written. It is what [Reader.Root] and [Writer.Root]
+// return, in place of the on-disk manifest. How the history is laid out into
+// sealed and open regions is deliberately not part of it — that is storage
+// structure, not a property of the track.
+//
+// It is the track-level counterpart of [GroupInfo]: each of the two domain
+// objects has an identity ([TrackPath], [GroupRef]) and a record describing it
+// ([TrackInfo], [GroupInfo]).
+type TrackInfo struct {
 	// TrackSchema is the schema the track was created with, embedded so its
-	// fields read directly (meta.Timescale) and so the whole schema can be
+	// fields read directly (info.Timescale) and so the whole schema can be
 	// handed back to [Create] to make another track like this one.
 	TrackSchema
 

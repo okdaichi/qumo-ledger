@@ -86,9 +86,9 @@ func TestTrackSchema_validate(t *testing.T) {
 	}
 }
 
-// TrackMeta embeds the schema, so its fields read directly and the whole
+// TrackInfo embeds the schema, so its fields read directly and the whole
 // schema can be handed back to Create to make another track like this one.
-func TestTrackMeta_TrackSchema(t *testing.T) {
+func TestTrackInfo_TrackSchema(t *testing.T) {
 	objects := memstore.New()
 
 	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})

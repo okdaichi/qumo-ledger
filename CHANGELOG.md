@@ -33,9 +33,9 @@ once: the unit of independent decoding *and* the unit of storage.
   to a deployment rather than a track — a logger, a clock, the seal threshold —
   are passed in `Config`, whose zero value is usable.
 
-- **ledger:** `TrackMeta` — what `Reader.Root` and `Writer.Root` return — embeds
+- **ledger:** `TrackInfo` — what `Reader.Root` and `Writer.Root` return — embeds
   the `TrackSchema` the track was created with and adds the track path and the
-  current epoch. Its fields promote, so `meta.Timescale` reads directly, and the
+  current epoch. Its fields promote, so `info.Timescale` reads directly, and the
   schema is a value: `Create(ctx, objects, other, src.Root().TrackSchema, cfg)`
   makes a second track with the first one's schema instead of restating it.
 

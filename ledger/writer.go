@@ -153,9 +153,9 @@ func (w *Writer) rootManifest() rootManifest {
 
 // Root returns the track's read-side metadata. It is a projection of the
 // current root, not the root itself: how the history is laid out on disk is not
-// part of the public API. See [TrackMeta].
-func (w *Writer) Root() TrackMeta {
-	return w.rootManifest().meta()
+// part of the public API. See [TrackInfo].
+func (w *Writer) Root() TrackInfo {
+	return w.rootManifest().info()
 }
 
 // Append stores payload as the next group in sequence, deriving the values a

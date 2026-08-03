@@ -109,9 +109,9 @@ func (r *Reader) rootManifest() rootManifest {
 
 // Root returns the track's read-side metadata. It is a projection of the cached
 // root, not the root itself: how the history is laid out on disk is not part of
-// the public API. See [TrackMeta].
-func (r *Reader) Root() TrackMeta {
-	return r.rootManifest().meta()
+// the public API. See [TrackInfo].
+func (r *Reader) Root() TrackInfo {
+	return r.rootManifest().info()
 }
 
 // Refresh re-reads the root manifest, picking up history sealed since the

@@ -87,11 +87,11 @@ func inspect(ctx context.Context, args []string) error {
 		return err
 	}
 
-	meta := reader.Root()
-	fmt.Printf("track       %s\n", meta.Track)
-	fmt.Printf("timescale   %d units/sec (%s)\n", meta.Timescale, meta.TimeSource)
-	fmt.Printf("encoding    %s %s\n", meta.Encoding, meta.MIME)
-	fmt.Printf("epoch       %d\n", meta.Epoch)
+	info := reader.Root()
+	fmt.Printf("track       %s\n", info.Track)
+	fmt.Printf("timescale   %d units/sec (%s)\n", info.Timescale, info.TimeSource)
+	fmt.Printf("encoding    %s %s\n", info.Encoding, info.MIME)
+	fmt.Printf("epoch       %d\n", info.Epoch)
 
 	if !*groups {
 		return nil

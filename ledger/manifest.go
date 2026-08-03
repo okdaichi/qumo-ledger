@@ -74,7 +74,7 @@ func groupKey(track TrackPath, ref GroupRef) string {
 // the producer's epoch advances, so it is cheap to cache.
 //
 // It is the on-disk wire format and stays unexported: a Go consumer reads track
-// metadata through [TrackMeta], and a reader in any language reads the JSON
+// metadata through [TrackInfo], and a reader in any language reads the JSON
 // schema documented in docs/ARCHITECTURE.md. The layout is not part of the
 // public Go API.
 type rootManifest struct {
@@ -106,11 +106,11 @@ type rootManifest struct {
 	CreatedAt int64 `json:"createdAt"`
 }
 
-// meta projects the root onto the public [TrackMeta]: the track's content
+// info projects the root onto the public [TrackInfo]: the track's content
 // schema and current epoch, with nothing about how the history is laid out on
 // disk. Storage structure is not part of the public API.
-func (m rootManifest) meta() TrackMeta {
-	return TrackMeta{
+func (m rootManifest) info() TrackInfo {
+	return TrackInfo{
 		TrackSchema: TrackSchema{
 			Timescale:  m.Timescale,
 			TimeSource: m.TimeSource,
