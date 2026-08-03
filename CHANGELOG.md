@@ -24,14 +24,20 @@ once: the unit of independent decoding *and* the unit of storage.
 
 - **ledger:** `Create` and `Open` are the entry points, after `os.Create` and
   `os.Open`. `Create` establishes a new track by writing the root manifest that
-  fixes its schema (timescale, MIME, encoding) and returns an opaque `*Track`;
-  `Open` references an existing one. `Writer` and `Reader` are built from that
-  handle. Where `os.Create` truncates an existing file, `Create` refuses one
-  (`ErrTrackExists`) — a track is an immutable, append-only log — and unlike
-  `os.Open` the handle is both read- and write-capable, so a writer that crashed
-  mid-append resumes through `Open(...).Writer()`. Settings that belong to a
-  deployment rather than a track — a logger, a clock, the seal threshold — are
-  passed in `Config`, whose zero value is usable.
+  fixes its `TrackSchema` (timescale, time source, MIME, encoding) and returns an
+  opaque `*Track`; `Open` references an existing one. `Writer` and `Reader` are
+  built from that handle. Where `os.Create` truncates an existing file, `Create`
+  refuses one (`ErrTrackExists`) — a track is an immutable, append-only log — and
+  unlike `os.Open` the handle is both read- and write-capable, so a writer that
+  crashed mid-append resumes through `Open(...).Writer()`. Settings that belong
+  to a deployment rather than a track — a logger, a clock, the seal threshold —
+  are passed in `Config`, whose zero value is usable.
+
+- **ledger:** `TrackMeta` — what `Reader.Root` and `Writer.Root` return — embeds
+  the `TrackSchema` the track was created with and adds the track path and the
+  current epoch. Its fields promote, so `meta.Timescale` reads directly, and the
+  schema is a value: `Create(ctx, objects, other, src.Root().TrackSchema, cfg)`
+  makes a second track with the first one's schema instead of restating it.
 
 - **ledger:** A group is *anchored* on two timelines rather than described as a
   closed interval, because groups are serial within an epoch — the start of one

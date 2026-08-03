@@ -242,12 +242,22 @@ fixes its schema, and `Open` references an existing one. Both return an opaque
 type above a track.
 
 **Why os-style, not a single handle constructor.** Creation and use are different
-acts with different inputs. `Create` takes a `TrackConfig` — the schema, written
+acts with different inputs. `Create` takes a `TrackSchema` — the schema, written
 once into the root and then immutable — while `Open` takes none, because a reader
 or a resuming writer needs only the schema the track already has. Folding them
 into one constructor would mean either inventing a schema for reads or carrying
 an "is this a create?" flag; the os split lets each path take exactly the
 arguments it needs.
+
+**Why the schema is its own type.** `TrackSchema` describes content and is fixed
+at creation; `Config` carries deployment settings — a logger, a clock, the seal
+threshold — that belong to a process. Two names rather than two "Config"s in one
+call. `TrackMeta` embeds the schema rather than restating it, so the read side
+has one definition of what a track *is*, and a schema can be handed straight back
+to `Create` to make a second track like the first. What `TrackMeta` adds beyond
+the schema is deliberately *not* creation input: `Track` comes from the path
+argument and `Epoch` is writer-assigned (decision 8), so neither belongs on a
+struct a caller fills in.
 
 **Why a reference, not a container.** A track is a persistent, named thing whose
 schema is fixed at creation — a database table, not a file you own. You do not

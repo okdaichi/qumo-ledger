@@ -74,10 +74,22 @@ func (s TimeSource) valid() bool {
 	return s == TimeSourceFrame || s == TimeSourceIngest
 }
 
-// TrackConfig describes a track at creation time. It is written once into the
-// root manifest and never changes; anything that can vary between groups
-// belongs in [GroupInfo] instead.
-type TrackConfig struct {
+// TrackSchema describes a track's content at creation time. It is written once
+// into the root manifest and never changes; anything that can vary between
+// groups belongs in [GroupInfo] instead.
+//
+// It is a value rather than a set of arguments so a schema can be carried
+// around — notably [TrackMeta] embeds one, so a second track can be created
+// with the same schema as an existing one:
+//
+//	src, _ := ledger.Open(ctx, objects, "live/cam1/video", ledger.Config{})
+//	meta := srcReader.Root()
+//	ledger.Create(ctx, objects, "live/cam2/video", meta.TrackSchema, ledger.Config{})
+//
+// Do not confuse it with [Config], which carries deployment settings — a
+// logger, a clock, the seal threshold — that belong to a process rather than to
+// a track.
+type TrackSchema struct {
 	// Timescale is the number of media time units per second, following the
 	// same convention as a media container or a moq-lite track — 90000 for
 	// video, the sample rate for audio, often 1000 for everything else.
@@ -96,7 +108,7 @@ type TrackConfig struct {
 	Encoding string
 }
 
-func (c TrackConfig) validate() error {
+func (c TrackSchema) validate() error {
 	if c.Timescale == 0 {
 		return fmt.Errorf("%w: timescale must be non-zero", ErrInvalidGroup)
 	}
@@ -113,15 +125,13 @@ func (c TrackConfig) validate() error {
 // on-disk manifest. How the history is laid out into sealed and open regions is
 // deliberately not part of it — that is storage structure, not track metadata.
 type TrackMeta struct {
+	// TrackSchema is the schema the track was created with, embedded so its
+	// fields read directly (meta.Timescale) and so the whole schema can be
+	// handed back to [Create] to make another track like this one.
+	TrackSchema
+
 	// Track is the path identifying the track.
 	Track TrackPath
-
-	// Timescale, TimeSource, MIME and Encoding mirror the [TrackConfig] the
-	// track was created with.
-	Timescale  uint32
-	TimeSource TimeSource
-	MIME       string
-	Encoding   string
 
 	// Epoch is the producer lifetime currently being written. It advances when
 	// a producer restarts its numbering; see [GroupRef.Epoch].
@@ -158,7 +168,7 @@ type Config struct {
 // Obtain one with [Create] for a new track (which fixes its schema, like
 // [os.Create]) or [Open] for an existing one (like [os.Open]):
 //
-//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
 //		Timescale: 90000, TimeSource: ledger.TimeSourceFrame, MIME: "video/mp4",
 //	}, ledger.Config{})
 //	writer, _ := track.Writer(ctx)
@@ -212,7 +222,7 @@ func resolveConfig(s store.Store, path TrackPath, cfg Config) *Track {
 // A track is an immutable, append-only log rather than a writable file, so
 // where os.Create truncates an existing file, Create refuses one: it returns
 // [ErrTrackExists] if the track already has a root manifest.
-func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackConfig, cfg Config) (*Track, error) {
+func Create(ctx context.Context, s store.Store, path TrackPath, schema TrackSchema, cfg Config) (*Track, error) {
 	if err := path.validate(); err != nil {
 		return nil, err
 	}

@@ -81,7 +81,10 @@ type rootManifest struct {
 	Version int       `json:"version"`
 	Track   TrackPath `json:"track"`
 
-	// Timescale, TimeSource, MIME and Encoding mirror TrackConfig.
+	// Timescale, TimeSource, MIME and Encoding mirror [TrackSchema]. They are
+	// spelled out here rather than embedding it because these carry the wire
+	// tags: the on-disk names are the stable contract, and an embedded public
+	// type would marshal under its Go field names instead.
 	Timescale  uint32     `json:"timescale"`
 	TimeSource TimeSource `json:"timeSource"`
 	MIME       string     `json:"mime,omitempty"`
@@ -108,12 +111,14 @@ type rootManifest struct {
 // disk. Storage structure is not part of the public API.
 func (m rootManifest) meta() TrackMeta {
 	return TrackMeta{
-		Track:      m.Track,
-		Timescale:  m.Timescale,
-		TimeSource: m.TimeSource,
-		MIME:       m.MIME,
-		Encoding:   m.Encoding,
-		Epoch:      m.Epoch,
+		TrackSchema: TrackSchema{
+			Timescale:  m.Timescale,
+			TimeSource: m.TimeSource,
+			MIME:       m.MIME,
+			Encoding:   m.Encoding,
+		},
+		Track: m.Track,
+		Epoch: m.Epoch,
 	}
 }
 

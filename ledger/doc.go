@@ -5,7 +5,7 @@
 // one, after the fashion of [os.Create] and [os.Open]. Both return a [Track],
 // from which a [Writer] or [Reader] is built.
 //
-//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+//	track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
 //		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 //	}, ledger.Config{})
 //

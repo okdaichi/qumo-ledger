@@ -13,11 +13,11 @@ import (
 
 const testTrack TrackPath = "live/cam1/video"
 
-// testConfig is a video track at the usual 90 kHz timescale.
-func testConfig(tb testing.TB) TrackConfig {
+// testSchema is a video track at the usual 90 kHz timescale.
+func testSchema(tb testing.TB) TrackSchema {
 	tb.Helper()
 
-	return TrackConfig{
+	return TrackSchema{
 		Timescale:  90000,
 		TimeSource: TimeSourceFrame,
 		MIME:       "video/mp4",
@@ -66,7 +66,7 @@ func newTestWriter(tb testing.TB) (*Writer, *memstore.Store) {
 func newWriter(tb testing.TB, objects store.Store, cfg Config) *Writer {
 	tb.Helper()
 
-	track, err := Create(tb.Context(), objects, testTrack, testConfig(tb), cfg)
+	track, err := Create(tb.Context(), objects, testTrack, testSchema(tb), cfg)
 	require.NoError(tb, err)
 
 	w, err := track.Writer(tb.Context())
@@ -78,7 +78,7 @@ func newWriter(tb testing.TB, objects store.Store, cfg Config) *Writer {
 func TestCreate(t *testing.T) {
 	objects := memstore.New()
 
-	track, err := Create(t.Context(), objects, testTrack, testConfig(t), Config{})
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
 	root := track.root
@@ -97,17 +97,17 @@ func TestCreate(t *testing.T) {
 func TestCreate_AlreadyExists(t *testing.T) {
 	objects := memstore.New()
 
-	_, err := Create(t.Context(), objects, testTrack, testConfig(t), Config{})
+	_, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
-	_, err = Create(t.Context(), objects, testTrack, testConfig(t), Config{})
+	_, err = Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	assert.ErrorIs(t, err, ErrTrackExists)
 }
 
 // Every Config field means a documented default when left zero, so the smallest
 // usable track is an empty Config.
 func TestCreate_Defaults(t *testing.T) {
-	track, err := Create(t.Context(), memstore.New(), testTrack, testConfig(t), Config{})
+	track, err := Create(t.Context(), memstore.New(), testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(DefaultSealThreshold), track.sealThreshold)
@@ -118,11 +118,11 @@ func TestCreate_Defaults(t *testing.T) {
 func TestCreate_InvalidInput(t *testing.T) {
 	tests := map[string]struct {
 		track   TrackPath
-		config  TrackConfig
+		config  TrackSchema
 		wantErr error
 	}{
-		"bad path":   {track: "/live/cam1", config: testConfig(t), wantErr: ErrInvalidTrackPath},
-		"bad config": {track: testTrack, config: TrackConfig{}, wantErr: ErrInvalidGroup},
+		"bad path":   {track: "/live/cam1", config: testSchema(t), wantErr: ErrInvalidTrackPath},
+		"bad config": {track: testTrack, config: TrackSchema{}, wantErr: ErrInvalidGroup},
 	}
 
 	for name, tt := range tests {
@@ -139,7 +139,7 @@ func TestWriter_Append(t *testing.T) {
 	objects := memstore.New()
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
-	track, err := Create(t.Context(), objects, testTrack, testConfig(t), Config{Clock: func() time.Time { return now }})
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{Clock: func() time.Time { return now }})
 	require.NoError(t, err)
 	w, err := track.Writer(t.Context())
 	require.NoError(t, err)
@@ -308,7 +308,7 @@ func TestWriter_AppendGroup_OrderingResetsWithEpoch(t *testing.T) {
 // sequence under it lands in a fresh keyspace.
 func TestWriter_AdvanceEpoch(t *testing.T) {
 	objects := memstore.New()
-	track, err := Create(t.Context(), objects, testTrack, testConfig(t), Config{})
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 	w, err := track.Writer(t.Context())
 	require.NoError(t, err)
@@ -358,7 +358,7 @@ func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
 	objects := memstore.New()
 	stamped := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
-	config := testConfig(t)
+	config := testSchema(t)
 	config.TimeSource = TimeSourceIngest
 
 	track, err := Create(t.Context(), objects, testTrack, config, Config{Clock: func() time.Time { return stamped }})

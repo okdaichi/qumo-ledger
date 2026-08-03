@@ -41,7 +41,7 @@ objects, _ := fsstore.New("/var/lib/qumo-ledger")
 // it — a track is an immutable, append-only log. The empty Config is the common
 // case: every setting has a documented default and belongs to a deployment, not
 // a track.
-track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+track, _ := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
     Timescale:  90000,                  // 90 kHz, the usual video timescale
     TimeSource: ledger.TimeSourceFrame, // timestamps came from the data itself
     MIME:       "video/mp4",

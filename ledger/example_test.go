@@ -29,7 +29,7 @@ var exampleStart = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 func Example() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackConfig{
+	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 		MIME:       "video/mp4",
@@ -162,7 +162,7 @@ func ExampleReader_RangeMedia() {
 func ExampleReader_SeekMedia() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackConfig{
+	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})
@@ -292,7 +292,7 @@ func ExampleReader_Next() {
 func ExampleWriter_AppendGroup() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackConfig{
+	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})
@@ -360,7 +360,7 @@ func ExampleTrack_Writer() {
 	// behind the ledger's back.
 	objects := memstore.New()
 
-	track, err := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackConfig{
+	track, err := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})
@@ -434,7 +434,7 @@ func ExampleTrack_Writer() {
 // writeTrack creates a track and appends count groups of the given wallclock
 // duration, with media time in the track's own timescale.
 func writeTrack(ctx context.Context, store *memstore.Store, track ledger.TrackPath, timescale uint32, every time.Duration, count uint64) {
-	created, err := ledger.Create(ctx, store, track, ledger.TrackConfig{
+	created, err := ledger.Create(ctx, store, track, ledger.TrackSchema{
 		Timescale:  timescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})

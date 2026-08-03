@@ -3,7 +3,9 @@ package ledger
 import (
 	"testing"
 
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTrackPath_validate(t *testing.T) {
@@ -53,21 +55,21 @@ func TestTimeSource_valid(t *testing.T) {
 	}
 }
 
-func TestTrackConfig_validate(t *testing.T) {
+func TestTrackSchema_validate(t *testing.T) {
 	tests := map[string]struct {
-		config  TrackConfig
+		config  TrackSchema
 		wantErr bool
 	}{
 		"video": {
-			config:  TrackConfig{Timescale: 90000, TimeSource: TimeSourceFrame},
+			config:  TrackSchema{Timescale: 90000, TimeSource: TimeSourceFrame},
 			wantErr: false,
 		},
 		"zero timescale leaves timestamps dimensionless": {
-			config:  TrackConfig{Timescale: 0, TimeSource: TimeSourceFrame},
+			config:  TrackSchema{Timescale: 0, TimeSource: TimeSourceFrame},
 			wantErr: true,
 		},
 		"unknown time source": {
-			config:  TrackConfig{Timescale: 1000, TimeSource: "guess"},
+			config:  TrackSchema{Timescale: 1000, TimeSource: "guess"},
 			wantErr: true,
 		},
 	}
@@ -82,4 +84,35 @@ func TestTrackConfig_validate(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+// TrackMeta embeds the schema, so its fields read directly and the whole
+// schema can be handed back to Create to make another track like this one.
+func TestTrackMeta_TrackSchema(t *testing.T) {
+	objects := memstore.New()
+
+	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})
+	require.NoError(t, err)
+
+	source := openReader(t, objects).Root()
+
+	// Embedding promotes the schema's fields, so a reader still reads them
+	// straight off the meta.
+	assert.Equal(t, uint32(90000), source.Timescale)
+	assert.Equal(t, TimeSourceFrame, source.TimeSource)
+	assert.Equal(t, TrackPath("live/cam1/video"), source.Track)
+	assert.Equal(t, uint64(1), source.Epoch)
+
+	// The schema is a value, so a second track can be created with the first
+	// one's schema rather than restating it.
+	clone, err := Create(t.Context(), objects, "live/cam2/video", source.TrackSchema, Config{})
+	require.NoError(t, err)
+
+	cloned, err := clone.Reader(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, source.TrackSchema, cloned.Root().TrackSchema,
+		"a track created from another's schema must match it exactly")
+	assert.Equal(t, TrackPath("live/cam2/video"), cloned.Root().Track,
+		"only the path differs — it comes from the argument, not the schema")
 }

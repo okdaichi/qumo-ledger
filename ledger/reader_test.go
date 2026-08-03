@@ -351,7 +351,7 @@ func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 func TestOpen_RejectsManifestForAnotherTrack(t *testing.T) {
 	objects := memstore.New()
 
-	_, err := Create(t.Context(), objects, "live/cam1/video", testConfig(t), Config{})
+	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})
 	require.NoError(t, err)
 
 	// Copy cam1's root manifest under cam2's key, as a misfiled object would be.
