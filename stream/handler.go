@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -353,7 +354,7 @@ func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 	// at the write cursor.
 	ordered := ring
 	if h.window > 0 && len(ring) == h.window {
-		ordered = append(ring[next:len(ring):len(ring)], ring[:next]...)
+		ordered = slices.Concat(ring[next:], ring[:next])
 	}
 
 	// Lifetimes past the epoch window are sessions that have already ended, so

@@ -22,17 +22,9 @@ func box(typ string, payload ...[]byte) []byte {
 	return append(out, body...)
 }
 
-func u32(v uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	return b
-}
+func u32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
 
-func u64(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
-}
+func u64(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
 
 // mdhdV0 is a version-0 media header carrying timescale.
 func mdhdV0(timescale uint32) []byte {
@@ -175,6 +167,67 @@ func TestFragmentDuration_ImplausibleSampleCount(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint64(30*1920), got)
 	})
+}
+
+// A box may declare a size of 0, meaning it runs to the end of its parent. The
+// scan has to honor that rather than treat it as a malformed length, or a
+// perfectly valid init reads as having no boxes at all.
+func TestTimescale_BoxRunsToEndOfParent(t *testing.T) {
+	moov := box("moov", box("trak", box("mdia", mdhdV0(48000))))
+	binary.BigEndian.PutUint32(moov[0:4], 0) // "to the end of the enclosing box"
+
+	got, err := fmp4.Timescale(moov)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(48000), got)
+}
+
+// The tfhd's default-sample-duration sits after whichever optional fields the
+// flags announce, so the offset is computed rather than fixed. Getting that walk
+// wrong reads an adjacent field as the duration — a plausible-looking number
+// that would scale the whole manifest.
+func TestFragmentDuration_TfhdOptionalFieldsShiftTheDefault(t *testing.T) {
+	const samples, perSample = 25, 3600
+
+	// flags 0x0b: base-data-offset (8 bytes), sample-description-index (4), and
+	// default-sample-duration all present.
+	tfhd := box("tfhd",
+		[]byte{0, 0, 0, 0x0b},
+		u32(1),    // track_ID
+		u64(4096), // base_data_offset
+		u32(1),    // sample_description_index
+		u32(perSample),
+	)
+	trun := box("trun", []byte{0, 0, 0, 0x01}, u32(samples), u32(0))
+	fragment := box("moof", box("traf", tfhd, trun))
+
+	got, err := fmp4.FragmentDuration(fragment)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(samples*perSample), got,
+		"the default is read past base_data_offset and sample_description_index")
+}
+
+// first-sample-flags sits between the trun header and its entries, so the first
+// per-sample duration is 4 bytes further in than it would otherwise be.
+func TestFragmentDuration_TrunFirstSampleFlagsShiftTheEntries(t *testing.T) {
+	durations := []uint32{900, 1000, 1100}
+	var entries []byte
+	for _, d := range durations {
+		entries = append(entries, u32(d)...)
+	}
+
+	// flags 0x105: data-offset, first-sample-flags, and sample-duration present.
+	trun := box("trun",
+		[]byte{0, 0, 0x01, 0x05},
+		u32(uint32(len(durations))),
+		u32(0),          // data_offset
+		u32(0x02000000), // first_sample_flags
+		entries,
+	)
+	fragment := box("moof", box("traf", box("tfhd", []byte{0, 0, 0, 0}, u32(1)), trun))
+
+	got, err := fmp4.FragmentDuration(fragment)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(900+1000+1100), got)
 }
 
 // A fixed-framerate encoder states the duration once in the tfhd and omits it

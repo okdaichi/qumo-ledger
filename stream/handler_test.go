@@ -196,16 +196,14 @@ func TestHandler_ConcurrentSegments(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
 			if !assert.NoError(t, err) {
 				return
 			}
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -483,6 +481,161 @@ func TestHandler_EpochWindow(t *testing.T) {
 		listed(t, got, append(ended, live...), nil)
 		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:0")
 	})
+}
+
+// newEpochFixture builds a track of three producer lifetimes, returning the
+// groups of each in order.
+func newEpochFixture(tb testing.TB, perEpoch ...int64) (*ledger.Track, [][]ledger.GroupInfo) {
+	tb.Helper()
+	ctx := context.Background()
+
+	store := memstore.New()
+	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
+		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+		MIME: "video/mp4", Encoding: "fmp4",
+	}, ledger.Config{})
+	require.NoError(tb, err)
+
+	writer, err := track.Writer(ctx)
+	require.NoError(tb, err)
+
+	var epochs [][]ledger.GroupInfo
+	for lifetime, n := range perEpoch {
+		if lifetime > 0 {
+			require.NoError(tb, writer.NewEpoch(ctx))
+		}
+		var groups []ledger.GroupInfo
+		for i := range n {
+			meta, err := writer.AppendGroup(ctx, ledger.GroupInfo{
+				ID:        ledger.NewGroupID(0, uint64(i)),
+				MediaTime: i * 180000,
+				Duration:  180000,
+				Wallclock: fixtureEpoch.Add(time.Duration(i) * 2 * time.Second).UnixNano(),
+			}, []byte("frames"))
+			require.NoError(tb, err)
+			groups = append(groups, meta)
+		}
+		epochs = append(epochs, groups)
+	}
+	return track, epochs
+}
+
+// renderManifest serves one manifest through a handler built with opts.
+func renderManifest(tb testing.TB, track *ledger.Track, name string, opts stream.Options) string {
+	tb.Helper()
+
+	if opts.InitSegment.Bytes == nil && opts.InitSegment.URL == "" {
+		opts.InitSegment = testInit
+	}
+	handler, err := stream.NewHandler(track, opts)
+	require.NoError(tb, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + name)
+	require.NoError(tb, err)
+	defer resp.Body.Close()
+	require.Equal(tb, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(tb, err)
+	return string(body)
+}
+
+// The two windows bound different axes and have to compose. A segment window can
+// already have trimmed a lifetime away, and the epoch window counts what the
+// manifest still lists rather than epoch numbers — so it must not evict a
+// session that is on screen, nor keep one that is not.
+func TestHandler_WindowAndEpochWindow(t *testing.T) {
+	// Three lifetimes of 3, 4 and 2 segments. A window of 3 reaches back exactly
+	// one segment into the middle lifetime.
+	track, epochs := newEpochFixture(t, 3, 4, 2)
+	middle, live := epochs[1], epochs[2]
+
+	t.Run("two lifetimes keeps the segment reaching back", func(t *testing.T) {
+		got := renderManifest(t, track, "playlist.m3u8", stream.Options{Window: 3, EpochWindow: 2})
+
+		assert.Contains(t, got, middle[len(middle)-1].ID.String()+".m4s",
+			"the middle lifetime is still listed, so its segment in the window stays")
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:6")
+	})
+
+	t.Run("one lifetime drops it", func(t *testing.T) {
+		got := renderManifest(t, track, "playlist.m3u8", stream.Options{Window: 3, EpochWindow: 1})
+
+		assert.NotContains(t, got, middle[len(middle)-1].ID.String()+".m4s")
+		for _, meta := range live {
+			assert.Contains(t, got, meta.ID.String()+".m4s")
+		}
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:7",
+			"the segment from the ended lifetime is behind the manifest too")
+	})
+
+	// The epoch window counts listed lifetimes, so asking for more than the
+	// window shows cannot reach back past it.
+	t.Run("more lifetimes than the window shows", func(t *testing.T) {
+		got := renderManifest(t, track, "playlist.m3u8", stream.Options{Window: 3, EpochWindow: 3})
+
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:6",
+			"the segment window still bounds the manifest")
+		assert.NotContains(t, got, epochs[0][0].ID.String()+".m4s",
+			"a lifetime the segment window already trimmed is not pulled back in")
+	})
+}
+
+// Epoch scoping is a property of the manifest, not of HLS: the MPD lists the
+// same segments and must drop an ended lifetime the same way.
+func TestHandler_EpochWindowDASH(t *testing.T) {
+	track, epochs := newEpochFixture(t, 3, 2)
+	ended, live := epochs[0], epochs[1]
+
+	got := renderManifest(t, track, "manifest.mpd", stream.Options{EpochWindow: 1})
+
+	for _, meta := range ended {
+		assert.NotContains(t, got, `media="`+meta.ID.String()+`.m4s"`,
+			"a segment from the finished lifetime is not listed")
+	}
+	for _, meta := range live {
+		assert.Contains(t, got, `media="`+meta.ID.String()+`.m4s"`)
+	}
+	assert.Contains(t, got, `<S t="0"`,
+		"the first listed segment anchors the timeline, since media time resets per epoch")
+}
+
+// The smallest window is one segment, where the ring wraps on every group.
+func TestHandler_WindowOfOne(t *testing.T) {
+	fix := newTrackFixtureGroups(t, "fmp4", 5)
+
+	got := renderManifest(t, fix.track, "playlist.m3u8", stream.Options{Window: 1})
+
+	assert.Contains(t, got, fix.metas[4].ID.String()+".m4s", "only the newest segment")
+	for _, meta := range fix.metas[:4] {
+		assert.NotContains(t, got, meta.ID.String()+".m4s")
+	}
+	assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:4")
+}
+
+// An init segment given as a URL is referenced by both manifests and is not
+// served by the handler: it already lives somewhere the client can reach.
+func TestHandler_InitSegmentURL(t *testing.T) {
+	fix := newTrackFixture(t)
+	const url = "https://objects.example/live/cam1/init.m4s"
+	opts := stream.Options{InitSegment: stream.InitSegment{URL: url}}
+
+	assert.Contains(t, renderManifest(t, fix.track, "playlist.m3u8", opts),
+		`#EXT-X-MAP:URI="`+url+`"`)
+	assert.Contains(t, renderManifest(t, fix.track, "manifest.mpd", opts),
+		`<Initialization sourceURL="`+url+`"/>`)
+
+	handler, err := stream.NewHandler(fix.track, opts)
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/init.m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"the handler holds no bytes to serve for a URL-referenced init")
 }
 
 // playlistFor renders the HLS playlist for a track through a windowed handler.

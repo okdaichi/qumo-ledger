@@ -31,6 +31,10 @@ var ErrNotFound = errors.New("fmp4: box not found")
 // boxHeaderSize is a box's 32-bit size followed by its 4-character type.
 const boxHeaderSize = 8
 
+// fullBoxFlagMask selects the three flag bytes of a FullBox header, dropping the
+// version byte above them.
+const fullBoxFlagMask = 0x00ffffff
+
 // ErrAmbiguousTrack reports that an initialization segment describes more than
 // one track, so there is no single timescale to return. Use [TimescaleForTrack]
 // to name which one. Guessing here would scale every duration the caller
@@ -175,7 +179,9 @@ func tfhdDefaultSampleDuration(tfhd []byte) uint32 {
 	if len(tfhd) < 8 {
 		return 0
 	}
-	flags := uint32(tfhd[1])<<16 | uint32(tfhd[2])<<8 | uint32(tfhd[3])
+	// A FullBox opens with a version byte and three flag bytes; masking the
+	// version off the leading word is the same read.
+	flags := binary.BigEndian.Uint32(tfhd[:4]) & fullBoxFlagMask
 
 	const (
 		baseDataOffsetPresent         = 0x000001
@@ -206,7 +212,7 @@ func trunDuration(trun []byte, defaultDuration uint32, maxSamples uint64) (uint6
 	if len(trun) < 8 {
 		return 0, errors.New("fmp4: trun truncated")
 	}
-	flags := uint32(trun[1])<<16 | uint32(trun[2])<<8 | uint32(trun[3])
+	flags := binary.BigEndian.Uint32(trun[:4]) & fullBoxFlagMask
 	count := uint64(binary.BigEndian.Uint32(trun[4:8]))
 
 	const (
