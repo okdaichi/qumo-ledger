@@ -31,14 +31,75 @@ var ErrNotFound = errors.New("fmp4: box not found")
 // boxHeaderSize is a box's 32-bit size followed by its 4-character type.
 const boxHeaderSize = 8
 
-// Timescale reads the media timescale from an initialization segment — the
-// number of units per second that a fragment's durations are expressed in.
+// ErrAmbiguousTrack reports that an initialization segment describes more than
+// one track, so there is no single timescale to return. Use [TimescaleForTrack]
+// to name which one. Guessing here would scale every duration the caller
+// computes by the ratio between two tracks' timescales, silently.
+var ErrAmbiguousTrack = errors.New("fmp4: init describes more than one track")
+
+// Timescale reads the media timescale from a single-track initialization
+// segment — the number of units per second that a fragment's durations are
+// expressed in.
 //
-// It is taken from the first track's mdhd (moov > trak > mdia > mdhd) rather
-// than the movie-wide mvhd, because sample durations are in the media timescale
-// and the two commonly differ.
+// It is taken from the track's mdhd (moov > trak > mdia > mdhd) rather than the
+// movie-wide mvhd, because sample durations are in the media timescale and the
+// two commonly differ. An init describing several tracks returns
+// [ErrAmbiguousTrack].
 func Timescale(init []byte) (uint32, error) {
-	mdhd, err := find(init, "moov", "trak", "mdia", "mdhd")
+	moov, err := find(init, "moov")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: timescale: %w", err)
+	}
+
+	traks := children(moov, "trak")
+	switch len(traks) {
+	case 0:
+		return 0, fmt.Errorf("fmp4: timescale: %w: trak", ErrNotFound)
+	case 1:
+		return trackTimescale(traks[0])
+	default:
+		return 0, fmt.Errorf("fmp4: timescale: %w (%d tracks)", ErrAmbiguousTrack, len(traks))
+	}
+}
+
+// TimescaleForTrack reads the media timescale of the track with the given
+// track_ID, for an initialization segment describing more than one.
+func TimescaleForTrack(init []byte, trackID uint32) (uint32, error) {
+	moov, err := find(init, "moov")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: timescale: %w", err)
+	}
+
+	for _, trak := range children(moov, "trak") {
+		id, ok := trackHeaderID(trak)
+		if !ok || id != trackID {
+			continue
+		}
+		return trackTimescale(trak)
+	}
+	return 0, fmt.Errorf("fmp4: timescale: %w: track_ID %d", ErrNotFound, trackID)
+}
+
+// trackHeaderID reads a trak's track_ID from its tkhd. The field sits after the
+// creation and modification times, which version 1 widens to 64 bits.
+func trackHeaderID(trak []byte) (uint32, bool) {
+	tkhd, ok := child(trak, "tkhd")
+	if !ok || len(tkhd) < 4 {
+		return 0, false
+	}
+	at := 12 // version(1) flags(3) creation(4) modification(4)
+	if tkhd[0] == 1 {
+		at = 20 // version(1) flags(3) creation(8) modification(8)
+	}
+	if at+4 > len(tkhd) {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(tkhd[at : at+4]), true
+}
+
+// trackTimescale reads one trak's media timescale from its mdhd.
+func trackTimescale(trak []byte) (uint32, error) {
+	mdhd, err := find(trak, "mdia", "mdhd")
 	if err != nil {
 		return 0, fmt.Errorf("fmp4: timescale: %w", err)
 	}
@@ -93,7 +154,18 @@ func FragmentDuration(fragment []byte) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("fmp4: fragment duration: %w", err)
 	}
-	return trunDuration(trun, defaultDuration)
+
+	// A sample occupies at least one byte of media data, so the mdat bounds how
+	// many samples the run can legitimately declare. Without it a run that
+	// carries no per-sample entries — nothing whose length contradicts the
+	// count — could claim any sample_count it liked and have it multiplied into
+	// a duration that becomes an EXTINF and a place on the ledger's timeline.
+	var maxSamples uint64
+	if mdat, ok := child(fragment, "mdat"); ok {
+		maxSamples = uint64(len(mdat))
+	}
+
+	return trunDuration(trun, defaultDuration, maxSamples)
 }
 
 // tfhdDefaultSampleDuration returns the tfhd's default-sample-duration, or zero
@@ -128,13 +200,14 @@ func tfhdDefaultSampleDuration(tfhd []byte) uint32 {
 }
 
 // trunDuration sums the run's sample durations, using defaultDuration for
-// samples whose duration the run omits.
-func trunDuration(trun []byte, defaultDuration uint32) (uint64, error) {
+// samples whose duration the run omits. maxSamples bounds a plausible
+// sample_count, or is zero when nothing bounds it.
+func trunDuration(trun []byte, defaultDuration uint32, maxSamples uint64) (uint64, error) {
 	if len(trun) < 8 {
 		return 0, errors.New("fmp4: trun truncated")
 	}
 	flags := uint32(trun[1])<<16 | uint32(trun[2])<<8 | uint32(trun[3])
-	count := binary.BigEndian.Uint32(trun[4:8])
+	count := uint64(binary.BigEndian.Uint32(trun[4:8]))
 
 	const (
 		dataOffsetPresent        = 0x000001
@@ -145,15 +218,6 @@ func trunDuration(trun []byte, defaultDuration uint32) (uint64, error) {
 		sampleCompositionPresent = 0x000800
 	)
 
-	// Without per-sample durations the whole run is count × the tfhd default.
-	if flags&sampleDurationPresent == 0 {
-		if defaultDuration == 0 {
-			return 0, fmt.Errorf(
-				"fmp4: trun has no sample durations and tfhd has no default: %w", ErrNotFound)
-		}
-		return uint64(count) * uint64(defaultDuration), nil
-	}
-
 	at := 8 // version(1) flags(3) sample_count(4)
 	if flags&dataOffsetPresent != 0 {
 		at += 4
@@ -162,22 +226,48 @@ func trunDuration(trun []byte, defaultDuration uint32) (uint64, error) {
 		at += 4
 	}
 
-	// Sample duration leads each entry; the other optional fields only affect
-	// the stride between entries.
-	stride := 4
-	for _, present := range []uint32{sampleSizePresent, sampleFlagsPresent, sampleCompositionPresent} {
+	// Every optional per-sample field contributes 4 bytes to each entry, so the
+	// entries are what the declared count can be checked against.
+	var stride uint64
+	for _, present := range []uint32{
+		sampleDurationPresent, sampleSizePresent, sampleFlagsPresent, sampleCompositionPresent,
+	} {
 		if flags&present != 0 {
 			stride += 4
 		}
 	}
 
+	// The count is read off the wire, so it is checked before it is multiplied
+	// into a duration or used to walk the box. Entries give the stronger bound;
+	// with none, the media data is all that constrains it.
+	switch {
+	case stride > 0:
+		if available := uint64(len(trun) - at); count*stride > available {
+			return 0, fmt.Errorf(
+				"fmp4: trun declares %d samples but holds %d bytes of entries", count, available)
+		}
+	case maxSamples > 0 && count > maxSamples:
+		return 0, fmt.Errorf(
+			"fmp4: trun declares %d samples for %d bytes of media data", count, maxSamples)
+	}
+
+	// Without per-sample durations the whole run is count × the tfhd default.
+	if flags&sampleDurationPresent == 0 {
+		if defaultDuration == 0 {
+			return 0, fmt.Errorf(
+				"fmp4: trun has no sample durations and tfhd has no default: %w", ErrNotFound)
+		}
+		return count * uint64(defaultDuration), nil
+	}
+
+	// Sample duration leads each entry; the remaining fields only affect stride.
 	var total uint64
 	for range count {
 		if at+4 > len(trun) {
 			return 0, fmt.Errorf("fmp4: trun truncated at sample offset %d", at)
 		}
 		total += uint64(binary.BigEndian.Uint32(trun[at : at+4]))
-		at += stride
+		at += int(stride)
 	}
 	return total, nil
 }
@@ -197,8 +287,34 @@ func find(data []byte, path ...string) ([]byte, error) {
 	return current, nil
 }
 
+// children scans one level of boxes and returns every matching payload, for the
+// containers that legitimately repeat — a moov holds one trak per track.
+func children(data []byte, name string) [][]byte {
+	var out [][]byte
+	eachBox(data, func(typ string, payload []byte) {
+		if typ == name {
+			out = append(out, payload)
+		}
+	})
+	return out
+}
+
 // child scans one level of boxes for name, returning its payload.
 func child(data []byte, name string) ([]byte, bool) {
+	var found []byte
+	var ok bool
+	eachBox(data, func(typ string, payload []byte) {
+		if !ok && typ == name {
+			found, ok = payload, true
+		}
+	})
+	return found, ok
+}
+
+// eachBox walks one level of boxes, calling visit with each one's type and
+// payload. A malformed length ends the walk rather than resynchronizing on a
+// guess: past that point the offsets mean nothing.
+func eachBox(data []byte, visit func(typ string, payload []byte)) {
 	for at := 0; at+boxHeaderSize <= len(data); {
 		size := int(binary.BigEndian.Uint32(data[at : at+4]))
 		typ := string(data[at+4 : at+8])
@@ -213,13 +329,10 @@ func child(data []byte, name string) ([]byte, bool) {
 		case size == 0:
 			size = len(data) - at
 		case size < boxHeaderSize || at+size > len(data):
-			return nil, false
+			return
 		}
 
-		if typ == name {
-			return data[at+boxHeaderSize : at+size], true
-		}
+		visit(typ, data[at+boxHeaderSize:at+size])
 		at += size
 	}
-	return nil, false
 }

@@ -87,6 +87,96 @@ func TestTimescale(t *testing.T) {
 	}
 }
 
+// trak builds a track with the given track_ID and media timescale.
+func trak(trackID, timescale uint32) []byte {
+	tkhd := box("tkhd",
+		[]byte{0, 0, 0, 0}, // version 0, flags
+		u32(0), u32(0),     // creation, modification
+		u32(trackID),
+	)
+	return box("trak", tkhd, box("mdia", mdhdV0(timescale)))
+}
+
+// An init describing several tracks has no single timescale, and picking one
+// would silently scale every duration the caller computes by the ratio between
+// two tracks' clocks.
+func TestTimescale_MultipleTracks(t *testing.T) {
+	init := box("moov", trak(1, 57600), trak(2, 48000))
+
+	_, err := fmp4.Timescale(init)
+	assert.ErrorIs(t, err, fmp4.ErrAmbiguousTrack)
+}
+
+func TestTimescaleForTrack(t *testing.T) {
+	init := box("moov", trak(1, 57600), trak(2, 48000))
+
+	tests := map[string]struct {
+		trackID  uint32
+		expected uint32
+		wantErr  error
+	}{
+		"first track":  {trackID: 1, expected: 57600},
+		"second track": {trackID: 2, expected: 48000},
+		"absent track": {trackID: 9, wantErr: fmp4.ErrNotFound},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := fmp4.TimescaleForTrack(init, tt.trackID)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// sample_count arrives off the wire, so a run that claims more samples than it
+// could hold is rejected rather than multiplied into a duration that would
+// become an EXTINF and a place on the ledger's timeline.
+func TestFragmentDuration_ImplausibleSampleCount(t *testing.T) {
+	t.Run("more entries than the trun holds", func(t *testing.T) {
+		// flags 0x0301: data-offset, sample-duration and sample-size present, so
+		// each entry is 8 bytes — but only one entry's worth follows.
+		trun := box("trun", []byte{0, 0, 0x03, 0x01}, u32(1000), u32(0), u32(100), u32(500))
+		fragment := box("moof", box("traf", box("tfhd", []byte{0, 0, 0, 0}, u32(1)), trun))
+
+		_, err := fmp4.FragmentDuration(fragment)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "1000 samples")
+	})
+
+	t.Run("more samples than the media data could hold", func(t *testing.T) {
+		// No per-sample entries at all, so only the mdat contradicts the count:
+		// a sample occupies at least one byte.
+		tfhd := box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920))
+		trun := box("trun", []byte{0, 0, 0, 0x01}, u32(1_000_000), u32(0))
+		fragment := append(
+			box("moof", box("traf", tfhd, trun)),
+			box("mdat", make([]byte, 4096))...,
+		)
+
+		_, err := fmp4.FragmentDuration(fragment)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "bytes of media data")
+	})
+
+	t.Run("a plausible count is accepted", func(t *testing.T) {
+		tfhd := box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920))
+		trun := box("trun", []byte{0, 0, 0, 0x01}, u32(30), u32(0))
+		fragment := append(
+			box("moof", box("traf", tfhd, trun)),
+			box("mdat", make([]byte, 4096))...,
+		)
+
+		got, err := fmp4.FragmentDuration(fragment)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(30*1920), got)
+	})
+}
+
 // A fixed-framerate encoder states the duration once in the tfhd and omits it
 // per sample, so the run's extent is the sample count times that default.
 func TestFragmentDuration_TfhdDefault(t *testing.T) {
