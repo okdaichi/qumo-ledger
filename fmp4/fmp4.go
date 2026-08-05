@@ -1,0 +1,223 @@
+// Package fmp4 reads the few facts a ledger writer needs out of fragmented-MP4
+// bytes: how long a fragment runs, and in what timescale.
+//
+// A writer must supply [ledger.GroupInfo.Duration], and the manifest renderers
+// require it — an HLS EXTINF and a DASH @d have nowhere else to come from. A
+// fragment already carries its own duration, so an ingester that instead assumes
+// one from configuration is stating something it did not measure: when the
+// assumed value and the encoder's real GOP disagree, the manifest advertises the
+// wrong extent and players drift or stall, with nothing in the pipeline
+// contradicting it.
+//
+// This package is deliberately small and read-only. The ledger core stores
+// opaque bytes and takes no interest in containers; this is the ingest-side
+// helper that lets a fragmented-MP4 producer fill in a truthful GroupInfo, and
+// it lives here rather than in one ingester because every fragmented-MP4
+// producer needs exactly the same computation.
+package fmp4
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+)
+
+// ErrNotFound reports that a box the caller asked about is absent — an init
+// segment with no mdhd, or a fragment with no trun. It is returned rather than
+// guessed at: a duration invented here would be indistinguishable from a
+// measured one downstream.
+var ErrNotFound = errors.New("fmp4: box not found")
+
+// boxHeaderSize is a box's 32-bit size followed by its 4-character type.
+const boxHeaderSize = 8
+
+// Timescale reads the media timescale from an initialization segment — the
+// number of units per second that a fragment's durations are expressed in.
+//
+// It is taken from the first track's mdhd (moov > trak > mdia > mdhd) rather
+// than the movie-wide mvhd, because sample durations are in the media timescale
+// and the two commonly differ.
+func Timescale(init []byte) (uint32, error) {
+	mdhd, err := find(init, "moov", "trak", "mdia", "mdhd")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: timescale: %w", err)
+	}
+	if len(mdhd) < 4 {
+		return 0, fmt.Errorf("fmp4: mdhd truncated")
+	}
+
+	// mdhd is a FullBox: one version byte, three flag bytes, then version-
+	// dependent fields. Version 1 widens creation/modification time and
+	// duration to 64 bits, which moves timescale.
+	switch version := mdhd[0]; version {
+	case 0:
+		// version(1) flags(3) creation(4) modification(4) timescale(4)
+		if len(mdhd) < 20 {
+			return 0, fmt.Errorf("fmp4: mdhd v0 truncated")
+		}
+		return binary.BigEndian.Uint32(mdhd[12:16]), nil
+	case 1:
+		// version(1) flags(3) creation(8) modification(8) timescale(4)
+		if len(mdhd) < 28 {
+			return 0, fmt.Errorf("fmp4: mdhd v1 truncated")
+		}
+		return binary.BigEndian.Uint32(mdhd[20:24]), nil
+	default:
+		return 0, fmt.Errorf("fmp4: unsupported mdhd version %d", version)
+	}
+}
+
+// FragmentDuration sums a fragment's sample durations, in the media timescale
+// returned by [Timescale].
+//
+// Durations come from the fragment's trun, falling back per-sample to the tfhd's
+// default-sample-duration — the common case, since a fixed-framerate encoder
+// states the duration once in the tfhd rather than repeating it per sample.
+func FragmentDuration(fragment []byte) (uint64, error) {
+	moof, err := find(fragment, "moof")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: fragment duration: %w", err)
+	}
+	traf, err := find(moof, "traf")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: fragment duration: %w", err)
+	}
+
+	// The tfhd default applies to every sample whose trun omits a duration.
+	var defaultDuration uint32
+	if tfhd, err := find(traf, "tfhd"); err == nil {
+		defaultDuration = tfhdDefaultSampleDuration(tfhd)
+	}
+
+	trun, err := find(traf, "trun")
+	if err != nil {
+		return 0, fmt.Errorf("fmp4: fragment duration: %w", err)
+	}
+	return trunDuration(trun, defaultDuration)
+}
+
+// tfhdDefaultSampleDuration returns the tfhd's default-sample-duration, or zero
+// when the box does not carry one. The field is optional and its offset depends
+// on which earlier optional fields are present, so the flags drive the walk.
+func tfhdDefaultSampleDuration(tfhd []byte) uint32 {
+	if len(tfhd) < 8 {
+		return 0
+	}
+	flags := uint32(tfhd[1])<<16 | uint32(tfhd[2])<<8 | uint32(tfhd[3])
+
+	const (
+		baseDataOffsetPresent         = 0x000001
+		sampleDescriptionIndexPresent = 0x000002
+		defaultSampleDurationPresent  = 0x000008
+	)
+	if flags&defaultSampleDurationPresent == 0 {
+		return 0
+	}
+
+	at := 8 // version(1) flags(3) track_ID(4)
+	if flags&baseDataOffsetPresent != 0 {
+		at += 8
+	}
+	if flags&sampleDescriptionIndexPresent != 0 {
+		at += 4
+	}
+	if at+4 > len(tfhd) {
+		return 0
+	}
+	return binary.BigEndian.Uint32(tfhd[at : at+4])
+}
+
+// trunDuration sums the run's sample durations, using defaultDuration for
+// samples whose duration the run omits.
+func trunDuration(trun []byte, defaultDuration uint32) (uint64, error) {
+	if len(trun) < 8 {
+		return 0, fmt.Errorf("fmp4: trun truncated")
+	}
+	flags := uint32(trun[1])<<16 | uint32(trun[2])<<8 | uint32(trun[3])
+	count := binary.BigEndian.Uint32(trun[4:8])
+
+	const (
+		dataOffsetPresent        = 0x000001
+		firstSampleFlagsPresent  = 0x000004
+		sampleDurationPresent    = 0x000100
+		sampleSizePresent        = 0x000200
+		sampleFlagsPresent       = 0x000400
+		sampleCompositionPresent = 0x000800
+	)
+
+	// Without per-sample durations the whole run is count × the tfhd default.
+	if flags&sampleDurationPresent == 0 {
+		if defaultDuration == 0 {
+			return 0, fmt.Errorf(
+				"fmp4: trun has no sample durations and tfhd has no default: %w", ErrNotFound)
+		}
+		return uint64(count) * uint64(defaultDuration), nil
+	}
+
+	at := 8 // version(1) flags(3) sample_count(4)
+	if flags&dataOffsetPresent != 0 {
+		at += 4
+	}
+	if flags&firstSampleFlagsPresent != 0 {
+		at += 4
+	}
+
+	// Sample duration leads each entry; the other optional fields only affect
+	// the stride between entries.
+	stride := 4
+	for _, present := range []uint32{sampleSizePresent, sampleFlagsPresent, sampleCompositionPresent} {
+		if flags&present != 0 {
+			stride += 4
+		}
+	}
+
+	var total uint64
+	for range count {
+		if at+4 > len(trun) {
+			return 0, fmt.Errorf("fmp4: trun truncated at sample offset %d", at)
+		}
+		total += uint64(binary.BigEndian.Uint32(trun[at : at+4]))
+		at += stride
+	}
+	return total, nil
+}
+
+// find walks a box path, returning the payload of the last element. Each name
+// is searched among the children of the previous one, so find(b, "moov",
+// "trak", "mdia", "mdhd") descends that nesting.
+func find(data []byte, path ...string) ([]byte, error) {
+	current := data
+	for _, name := range path {
+		payload, ok := child(current, name)
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+		}
+		current = payload
+	}
+	return current, nil
+}
+
+// child scans one level of boxes for name, returning its payload.
+func child(data []byte, name string) ([]byte, bool) {
+	for at := 0; at+boxHeaderSize <= len(data); {
+		size := int(binary.BigEndian.Uint32(data[at : at+4]))
+		typ := string(data[at+4 : at+8])
+
+		// size 0 means "to the end of the enclosing box"; size 1 means the real
+		// size is a 64-bit largesize after the header. Neither appears in the
+		// boxes this package reads, and mistaking one for a length would
+		// desynchronize the scan.
+		switch {
+		case size == 0:
+			size = len(data) - at
+		case size < boxHeaderSize || at+size > len(data):
+			return nil, false
+		}
+
+		if typ == name {
+			return data[at+boxHeaderSize : at+size], true
+		}
+		at += size
+	}
+	return nil, false
+}

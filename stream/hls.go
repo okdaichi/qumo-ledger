@@ -15,16 +15,29 @@ import (
 type renderOpts struct {
 	segExt  string // e.g. ".m4s"
 	initURI string // relative init URI, "" when there is none
+
+	// sliding reports that the groups are a window over the track rather than
+	// the whole of it, so the manifest describes a rolling live presentation
+	// instead of an append-only one.
+	sliding bool
+
+	// mediaSequence is the media sequence number of the first listed segment —
+	// the count of segments that have rolled out of the window.
+	mediaSequence uint64
 }
 
-// renderHLS builds an EVENT media playlist for groups in commit order.
+// renderHLS builds a media playlist for groups in commit order.
 //
-// The playlist is the whole track and grows as groups land: EVENT means segments
-// are only ever appended, never removed, and there is no #EXT-X-ENDLIST because
-// the ledger has no notion of a finished track. The producer's own — gappy,
-// epoch-resetting — sequence is not the media sequence: HLS requires consecutive
-// media sequence numbers, so the sequence is synthetic (the segment's ordinal),
-// and the stable per-segment address is the GroupID carried in the URL.
+// Unwindowed, the playlist is the whole track and grows as groups land: EVENT
+// means segments are only ever appended, never removed. Windowed, it is a
+// sliding live playlist — no EXT-X-PLAYLIST-TYPE, because segments leave the
+// playlist as it rolls, which EVENT forbids. Neither carries EXT-X-ENDLIST: the
+// ledger has no notion of a finished track.
+//
+// The producer's own — gappy, epoch-resetting — sequence is not the media
+// sequence: HLS requires consecutive media sequence numbers, so the sequence is
+// synthetic (the segment's ordinal), and the stable per-segment address is the
+// GroupID carried in the URL.
 func renderHLS(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts renderOpts) ([]byte, error) {
 	for _, g := range groups {
 		if g.Duration <= 0 {
@@ -36,8 +49,10 @@ func renderHLS(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts render
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:6\n")
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", maxSegmentSeconds(schema, groups))
-	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
-	b.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
+	fmt.Fprintf(&b, "#EXT-X-MEDIA-SEQUENCE:%d\n", opts.mediaSequence)
+	if !opts.sliding {
+		b.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
+	}
 	if opts.initURI != "" {
 		fmt.Fprintf(&b, "#EXT-X-MAP:URI=\"%s\"\n", opts.initURI)
 	}
@@ -73,6 +88,18 @@ func maxSegmentSeconds(schema ledger.TrackSchema, groups []ledger.GroupInfo) int
 		}
 	}
 	return int(math.Ceil(max))
+}
+
+// windowSeconds is the total media extent of the listed groups, in whole
+// seconds, rounded up — how far back a client can seek in a windowed manifest.
+func windowSeconds(schema ledger.TrackSchema, groups []ledger.GroupInfo) int {
+	var total int64
+	for _, g := range groups {
+		if g.Duration > 0 {
+			total += g.Duration
+		}
+	}
+	return int(math.Ceil(float64(total) / float64(schema.Timescale)))
 }
 
 // extinfSeconds formats a media extent as the decimal seconds HLS carries in

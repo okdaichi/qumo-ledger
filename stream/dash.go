@@ -38,6 +38,12 @@ func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts rende
 	fmt.Fprintf(&b, ` minimumUpdatePeriod="%s"`, dashDuration(2))
 	fmt.Fprintf(&b, ` minBufferTime="%s"`, dashDuration(buffer))
 	fmt.Fprintf(&b, ` maxSegmentDuration="%s"`, dashDuration(buffer))
+	// A windowed presentation only lists its most recent segments, which is
+	// exactly what timeShiftBufferDepth describes: how far back a client may
+	// seek. Without it a client may assume the whole presentation is listed.
+	if opts.sliding {
+		fmt.Fprintf(&b, ` timeShiftBufferDepth="%s"`, dashDuration(windowSeconds(schema, groups)))
+	}
 	b.WriteString(">\n")
 
 	b.WriteString(`  <Period id="0" start="PT0S">` + "\n")
