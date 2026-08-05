@@ -371,10 +371,10 @@ func TestHandler_WindowAcrossEpochs(t *testing.T) {
 	})
 }
 
-// A producer that restarts opens a new epoch, and the lifetime before it has
-// ended. LatestEpochOnly drops it from the manifest at once, rather than leaving
-// a player to open the stream on a finished session and watch it through.
-func TestHandler_LatestEpochOnly(t *testing.T) {
+// A producer that restarts opens a new epoch, and the lifetimes before it have
+// ended. EpochWindow caps how many a manifest lists, so a player is not left to
+// open the stream on a finished session and watch it through.
+func TestHandler_EpochWindow(t *testing.T) {
 	ctx := context.Background()
 	store := memstore.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
@@ -401,10 +401,14 @@ func TestHandler_LatestEpochOnly(t *testing.T) {
 		return out
 	}
 
-	// A finished session of four segments, then a restart that has produced two.
-	ended := appendGroups(4)
+	// Three lifetimes: two that have ended, then the one currently running.
+	oldest := appendGroups(3)
+	require.NoError(t, writer.NewEpoch(ctx))
+	previous := appendGroups(4)
 	require.NoError(t, writer.NewEpoch(ctx))
 	live := appendGroups(2)
+
+	ended := append(append([]ledger.GroupInfo{}, oldest...), previous...)
 
 	render := func(opts stream.Options) string {
 		opts.InitSegment = testInit
@@ -421,37 +425,63 @@ func TestHandler_LatestEpochOnly(t *testing.T) {
 		return string(body)
 	}
 
-	assertOnlyLive := func(t *testing.T, got string) {
+	listed := func(t *testing.T, got string, want []ledger.GroupInfo, unwanted []ledger.GroupInfo) {
 		t.Helper()
-		for _, meta := range ended {
+		for _, meta := range unwanted {
 			assert.NotContains(t, got, meta.ID.String()+".m4s",
-				"a segment from the finished lifetime is not listed")
+				"a segment from a lifetime outside the epoch window is not listed")
 		}
-		for _, meta := range live {
+		for _, meta := range want {
 			assert.Contains(t, got, meta.ID.String()+".m4s")
 		}
-		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:4",
-			"the four segments of the previous lifetime are behind the manifest")
-		assert.Contains(t, got, "#EXT-X-DISCONTINUITY",
-			"a client polling across the restart is told the timeline reset")
 	}
 
-	// The window is a separate concern: scoping to the newest lifetime has to
-	// hold whether or not one is set, and a window wide enough to reach back
-	// into the old epoch must not drag it in.
-	t.Run("unwindowed", func(t *testing.T) {
-		assertOnlyLive(t, render(stream.Options{LatestEpochOnly: true}))
+	// Only the current session. The segment window is a separate concern, so
+	// this has to hold with and without one — and a window wide enough to reach
+	// back into an ended lifetime must not drag it in.
+	for name, opts := range map[string]stream.Options{
+		"unwindowed":               {EpochWindow: 1},
+		"window spans the restart": {EpochWindow: 1, Window: 8},
+	} {
+		t.Run("one lifetime, "+name, func(t *testing.T) {
+			got := render(opts)
+			listed(t, got, live, ended)
+			assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:7",
+				"the seven segments of the two ended lifetimes are behind the manifest")
+			assert.Contains(t, got, "#EXT-X-DISCONTINUITY",
+				"a client polling across the restart is told the timeline reset")
+			// A discontinuity belongs to the segment after it, so only the reset
+			// opening the middle lifetime has left; the one opening the listed
+			// lifetime is still in the manifest, above its first segment.
+			assert.Contains(t, got, "#EXT-X-DISCONTINUITY-SEQUENCE:1")
+		})
+	}
+
+	// Two keeps the session before the restart, so a viewer already playing it
+	// reaches the new one across a discontinuity instead of losing its segments.
+	t.Run("two lifetimes", func(t *testing.T) {
+		got := render(stream.Options{EpochWindow: 2})
+		listed(t, got, append(append([]ledger.GroupInfo{}, previous...), live...), oldest)
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:3",
+			"only the oldest lifetime is behind the manifest")
+		// The oldest lifetime opened the track, so it carried no reset, and both
+		// resets that exist still sit above segments the manifest lists.
+		assert.NotContains(t, got, "#EXT-X-DISCONTINUITY-SEQUENCE")
+		assert.Equal(t, 2, strings.Count(got, "#EXT-X-DISCONTINUITY\n"),
+			"each listed lifetime after the first opens with a reset")
 	})
 
-	t.Run("window spans the restart", func(t *testing.T) {
-		assertOnlyLive(t, render(stream.Options{LatestEpochOnly: true, Window: 5}))
+	// More lifetimes than exist lists them all, the same as no epoch window.
+	t.Run("more than the track has", func(t *testing.T) {
+		listed(t, render(stream.Options{EpochWindow: 9}), append(ended, live...), nil)
 	})
 
-	// Without it, the finished lifetime is still listed — which is the stale
-	// session a player would otherwise start on.
-	t.Run("off by default", func(t *testing.T) {
+	// Zero is off, which is the previous behaviour: every lifetime is listed,
+	// and the oldest is what a player would start on.
+	t.Run("zero lists every lifetime", func(t *testing.T) {
 		got := render(stream.Options{})
-		assert.Contains(t, got, ended[0].ID.String()+".m4s")
+		listed(t, got, append(ended, live...), nil)
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:0")
 	})
 }
 

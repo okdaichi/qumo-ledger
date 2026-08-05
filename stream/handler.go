@@ -37,7 +37,7 @@ type Handler struct {
 	segMIME  string
 	window   int
 
-	latestEpochOnly bool
+	epochWindow int
 }
 
 // ErrInitRequired reports that the track's container cannot be played without an
@@ -84,19 +84,24 @@ type Options struct {
 	// still fetch it.
 	Window int
 
-	// LatestEpochOnly limits a manifest to the newest producer lifetime.
+	// EpochWindow caps how many producer lifetimes a manifest lists, newest
+	// first. Zero lists every one; 1 lists only the current session.
 	//
-	// A producer that restarts opens a new epoch, and everything before it is a
-	// different lifetime — media from a session that has already ended. Left
-	// listed, those segments are what a player opening the stream starts on: it
-	// plays the previous session through before reaching the current one, and a
-	// window only clears them once enough new segments have pushed them out.
+	// A producer that restarts opens a new epoch, and everything before it is
+	// media from a session that has ended. Left listed, those segments are what
+	// a player opening the stream starts on — it plays the previous session
+	// through before reaching the current one — and [Options.Window] only
+	// clears them once enough new segments have pushed them out.
 	//
-	// The lifetime is resolved per request, from the newest group the walk
-	// finds, so a restart takes effect on the next manifest rather than when a
-	// handler is next built. Earlier epochs stay addressable; they are only
-	// absent from the manifest.
-	LatestEpochOnly bool
+	// Above 1 keeps recent lifetimes listed, which suits a producer that
+	// restarts briefly: a viewer already playing the old epoch reaches the
+	// restart across a discontinuity instead of finding its segments gone.
+	//
+	// Lifetimes are counted per request from the newest group the walk finds,
+	// so a restart takes effect on the next manifest rather than when a handler
+	// is next built. Earlier epochs stay addressable; they are only absent from
+	// the manifest.
+	EpochWindow int
 }
 
 // InitSegment is the fMP4 initialization segment (ftyp + moov). Supply Bytes —
@@ -154,7 +159,7 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		segMIME:  segMIME,
 		window:   opts.Window,
 
-		latestEpochOnly: opts.LatestEpochOnly,
+		epochWindow: opts.EpochWindow,
 	}, nil
 }
 
@@ -351,16 +356,13 @@ func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 		ordered = append(ring[next:len(ring):len(ring)], ring[:next]...)
 	}
 
-	// Everything before the newest lifetime is a session that has already
-	// ended, so it leaves the manifest the same way a windowed-out segment
-	// does: still addressable, just not listed, and counted as preceding the
-	// first one that is.
-	if h.latestEpochOnly && len(ordered) > 0 {
-		latest := ordered[len(ordered)-1].info.ID.Epoch()
-		for len(ordered) > 0 && ordered[0].info.ID.Epoch() != latest {
-			out.evict(ordered[0])
-			ordered = ordered[1:]
-		}
+	// Lifetimes past the epoch window are sessions that have already ended, so
+	// they leave the manifest the same way a windowed-out segment does: still
+	// addressable, just not listed, and counted as preceding the first one that
+	// is.
+	for range h.epochsToDrop(ordered) {
+		out.evict(ordered[0])
+		ordered = ordered[1:]
 	}
 
 	out.groups = make([]ledger.GroupInfo, len(ordered))
@@ -368,6 +370,36 @@ func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 		out.groups[i] = e.info
 	}
 	return out, nil
+}
+
+// epochsToDrop counts the leading entries that fall outside the epoch window —
+// those belonging to a lifetime older than the newest h.epochWindow.
+//
+// Lifetimes are counted backwards from the newest group rather than by
+// subtracting from the latest epoch number, so the answer depends only on what
+// is actually listed. Epochs the segment window has already trimmed away are
+// not lifetimes this manifest still shows, and counting them would evict a
+// session that is genuinely on screen.
+func (h *Handler) epochsToDrop(ordered []entry) int {
+	if h.epochWindow <= 0 || len(ordered) == 0 {
+		return 0
+	}
+
+	lifetimes := 1
+	epoch := ordered[len(ordered)-1].info.ID.Epoch()
+	for i := len(ordered) - 1; i >= 0; i-- {
+		if ordered[i].info.ID.Epoch() == epoch {
+			continue
+		}
+		epoch = ordered[i].info.ID.Epoch()
+		lifetimes++
+		if lifetimes > h.epochWindow {
+			// Entry i opens the first lifetime past the window, so it and
+			// everything before it goes.
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // entry is a group together with what its position implies for the manifest. A
