@@ -1,4 +1,4 @@
-package fmp4
+package fmp4_test
 
 import (
 	"encoding/binary"
@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/okdaichi/qumo-ledger/fmp4"
 )
 
 // box builds an ISO-BMFF box: a 32-bit size, a 4-character type, then payload.
@@ -74,7 +76,7 @@ func TestTimescale(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			got, err := Timescale(tt.init)
+			got, err := fmp4.Timescale(tt.init)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -99,7 +101,7 @@ func TestFragmentDuration_TfhdDefault(t *testing.T) {
 		),
 	)
 
-	got, err := FragmentDuration(fragment)
+	got, err := fmp4.FragmentDuration(fragment)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(samples*perSample), got)
 }
@@ -123,7 +125,7 @@ func TestFragmentDuration_PerSample(t *testing.T) {
 		),
 	)
 
-	got, err := FragmentDuration(fragment)
+	got, err := fmp4.FragmentDuration(fragment)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000+1500+900+1100), got)
 }
@@ -137,7 +139,7 @@ func TestFragmentDuration_PerSampleOverridesDefault(t *testing.T) {
 		),
 	)
 
-	got, err := FragmentDuration(fragment)
+	got, err := fmp4.FragmentDuration(fragment)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(300), got)
 }
@@ -153,8 +155,8 @@ func TestFragmentDuration_NoDurationAvailable(t *testing.T) {
 		),
 	)
 
-	_, err := FragmentDuration(fragment)
-	assert.ErrorIs(t, err, ErrNotFound)
+	_, err := fmp4.FragmentDuration(fragment)
+	assert.ErrorIs(t, err, fmp4.ErrNotFound)
 }
 
 func TestFragmentDuration_MissingBoxes(t *testing.T) {
@@ -169,8 +171,8 @@ func TestFragmentDuration_MissingBoxes(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := FragmentDuration(tt.fragment)
-			assert.ErrorIs(t, err, ErrNotFound)
+			_, err := fmp4.FragmentDuration(tt.fragment)
+			assert.ErrorIs(t, err, fmp4.ErrNotFound)
 		})
 	}
 }
@@ -182,6 +184,6 @@ func TestFragmentDuration_MalformedSize(t *testing.T) {
 	// Overwrite the moof size with one that overruns the buffer.
 	binary.BigEndian.PutUint32(fragment[0:4], 1<<30)
 
-	_, err := FragmentDuration(fragment)
-	assert.ErrorIs(t, err, ErrNotFound)
+	_, err := fmp4.FragmentDuration(fragment)
+	assert.ErrorIs(t, err, fmp4.ErrNotFound)
 }

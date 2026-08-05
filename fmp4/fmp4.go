@@ -1,8 +1,8 @@
 // Package fmp4 reads the few facts a ledger writer needs out of fragmented-MP4
 // bytes: how long a fragment runs, and in what timescale.
 //
-// A writer must supply [ledger.GroupInfo.Duration], and the manifest renderers
-// require it — an HLS EXTINF and a DASH @d have nowhere else to come from. A
+// A writer must supply a group's Duration, and the manifest renderers require
+// it — an HLS EXTINF and a DASH @d have nowhere else to come from. A
 // fragment already carries its own duration, so an ingester that instead assumes
 // one from configuration is stating something it did not measure: when the
 // assumed value and the encoder's real GOP disagree, the manifest advertises the
@@ -43,7 +43,7 @@ func Timescale(init []byte) (uint32, error) {
 		return 0, fmt.Errorf("fmp4: timescale: %w", err)
 	}
 	if len(mdhd) < 4 {
-		return 0, fmt.Errorf("fmp4: mdhd truncated")
+		return 0, errors.New("fmp4: mdhd truncated")
 	}
 
 	// mdhd is a FullBox: one version byte, three flag bytes, then version-
@@ -53,13 +53,13 @@ func Timescale(init []byte) (uint32, error) {
 	case 0:
 		// version(1) flags(3) creation(4) modification(4) timescale(4)
 		if len(mdhd) < 20 {
-			return 0, fmt.Errorf("fmp4: mdhd v0 truncated")
+			return 0, errors.New("fmp4: mdhd v0 truncated")
 		}
 		return binary.BigEndian.Uint32(mdhd[12:16]), nil
 	case 1:
 		// version(1) flags(3) creation(8) modification(8) timescale(4)
 		if len(mdhd) < 28 {
-			return 0, fmt.Errorf("fmp4: mdhd v1 truncated")
+			return 0, errors.New("fmp4: mdhd v1 truncated")
 		}
 		return binary.BigEndian.Uint32(mdhd[20:24]), nil
 	default:
@@ -131,7 +131,7 @@ func tfhdDefaultSampleDuration(tfhd []byte) uint32 {
 // samples whose duration the run omits.
 func trunDuration(trun []byte, defaultDuration uint32) (uint64, error) {
 	if len(trun) < 8 {
-		return 0, fmt.Errorf("fmp4: trun truncated")
+		return 0, errors.New("fmp4: trun truncated")
 	}
 	flags := uint32(trun[1])<<16 | uint32(trun[2])<<8 | uint32(trun[3])
 	count := binary.BigEndian.Uint32(trun[4:8])
@@ -203,10 +203,12 @@ func child(data []byte, name string) ([]byte, bool) {
 		size := int(binary.BigEndian.Uint32(data[at : at+4]))
 		typ := string(data[at+4 : at+8])
 
-		// size 0 means "to the end of the enclosing box"; size 1 means the real
-		// size is a 64-bit largesize after the header. Neither appears in the
-		// boxes this package reads, and mistaking one for a length would
-		// desynchronize the scan.
+		// A size of 0 means the box runs to the end of its parent, which is a
+		// length this scan can honor. A size of 1 means the real length is a
+		// 64-bit largesize after the header — only seen on a very large mdat,
+		// which is a sibling of the boxes read here rather than one of them —
+		// and reading the 1 as a length would desynchronize the scan, so the
+		// scan stops instead. Any size that overruns the buffer is malformed.
 		switch {
 		case size == 0:
 			size = len(data) - at

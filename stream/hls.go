@@ -24,6 +24,17 @@ type renderOpts struct {
 	// mediaSequence is the media sequence number of the first listed segment —
 	// the count of segments that have rolled out of the window.
 	mediaSequence uint64
+
+	// discontinuitySequence is the count of timeline resets that have rolled out
+	// of the window, which a sliding playlist states so a client's discontinuity
+	// numbering survives segments leaving.
+	discontinuitySequence uint64
+
+	// precedingEpoch is the epoch of the segment just before the window, or zero
+	// when nothing precedes it. A window can open exactly on an epoch change,
+	// where the reset belongs to the first listed segment and is invisible from
+	// the listed groups alone.
+	precedingEpoch uint64
 }
 
 // renderHLS builds a media playlist for groups in commit order.
@@ -50,6 +61,11 @@ func renderHLS(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts render
 	b.WriteString("#EXT-X-VERSION:6\n")
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", maxSegmentSeconds(schema, groups))
 	fmt.Fprintf(&b, "#EXT-X-MEDIA-SEQUENCE:%d\n", opts.mediaSequence)
+	if opts.discontinuitySequence > 0 {
+		// Without this, a client numbers discontinuities from zero and
+		// mis-associates them once a reset has rolled out of the playlist.
+		fmt.Fprintf(&b, "#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", opts.discontinuitySequence)
+	}
 	if !opts.sliding {
 		b.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
 	}
@@ -57,10 +73,14 @@ func renderHLS(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts render
 		fmt.Fprintf(&b, "#EXT-X-MAP:URI=\"%s\"\n", opts.initURI)
 	}
 
-	var prevEpoch uint64
+	// A window can begin exactly where a producer lifetime did, in which case the
+	// reset belongs to the first listed segment. Seeding from what precedes the
+	// window states it; unwindowed, nothing precedes the first segment and there
+	// is no reset to announce.
+	prevEpoch := opts.precedingEpoch
 	for i, g := range groups {
 		// A new producer lifetime is a discontinuity: the timeline reset.
-		if i > 0 && g.ID.Epoch() != prevEpoch {
+		if (i > 0 || prevEpoch != 0) && g.ID.Epoch() != prevEpoch {
 			b.WriteString("#EXT-X-DISCONTINUITY\n")
 		}
 		if g.Wallclock != 0 {

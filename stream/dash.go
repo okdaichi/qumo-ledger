@@ -32,7 +32,7 @@ func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts rende
 	b.WriteString(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" ` +
 		`type="dynamic" ` +
 		`profiles="urn:mpeg:dash:profile:isoff-live:2011"`)
-	if ast := dashAvailabilityStartTime(groups); ast != "" {
+	if ast := dashAvailabilityStartTime(schema, groups); ast != "" {
 		fmt.Fprintf(&b, ` availabilityStartTime="%s"`, ast)
 	}
 	fmt.Fprintf(&b, ` minimumUpdatePeriod="%s"`, dashDuration(2))
@@ -83,16 +83,39 @@ func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts rende
 	return []byte(b.String()), nil
 }
 
-// dashAvailabilityStartTime is the wallclock the presentation began, taken from
-// the first group that carries an anchor. A dynamic MPD needs one to relate
-// media time to the wall clock; without any anchor there is none to report.
-func dashAvailabilityStartTime(groups []ledger.GroupInfo) string {
+// dashAvailabilityStartTime is the wallclock the presentation began: the first
+// anchored group's wallclock, less its own offset along the media timeline. A
+// dynamic MPD needs one to relate media time to the wall clock; without any
+// anchor there is none to report.
+//
+// Subtracting the media time is what keeps it stable. Reporting the anchor
+// itself names when the *window* began, which for a windowed manifest moves
+// every time the window rolls — and a moving availabilityStartTime shifts the
+// whole timeline under a client on each refresh. Any group in an epoch yields
+// the same answer, so the value holds as segments come and go.
+func dashAvailabilityStartTime(schema ledger.TrackSchema, groups []ledger.GroupInfo) string {
 	for _, g := range groups {
-		if g.Wallclock != 0 {
-			return time.Unix(0, g.Wallclock).UTC().Format(time.RFC3339Nano)
+		if g.Wallclock == 0 {
+			continue
 		}
+		start := time.Unix(0, g.Wallclock).Add(-mediaOffset(g.MediaTime, schema.Timescale))
+		return start.UTC().Format(time.RFC3339Nano)
 	}
 	return ""
+}
+
+// mediaOffset converts a media-time extent into a duration. Seconds and
+// remainder are converted separately so a long presentation cannot overflow the
+// nanosecond multiply.
+func mediaOffset(mediaTime int64, timescale uint32) time.Duration {
+	if timescale == 0 {
+		return 0
+	}
+	ts := int64(timescale)
+	seconds := mediaTime / ts
+	remainder := mediaTime % ts
+	return time.Duration(seconds)*time.Second +
+		time.Duration(remainder*int64(time.Second)/ts)
 }
 
 // dashDuration formats a whole-second extent as an ISO 8601 period.

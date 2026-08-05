@@ -157,12 +157,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveHLS renders and writes the HLS media playlist.
 func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
-	groups, dropped, err := h.gather(r.Context())
+	window, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderHLS(h.schema, groups, h.renderOpts(dropped))
+	body, err := renderHLS(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -173,12 +173,12 @@ func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
 
 // serveDASH renders and writes the DASH MPD.
 func (h *Handler) serveDASH(w http.ResponseWriter, r *http.Request) {
-	groups, dropped, err := h.gather(r.Context())
+	window, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderDASH(h.schema, groups, h.renderOpts(dropped))
+	body, err := renderDASH(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -247,28 +247,65 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data) // not actionable: once the body write fails the client is gone
 }
 
+// manifestWindow is what the renderers need about a track: the groups to list,
+// and what the groups before them imply for the numbering a sliding manifest has
+// to carry.
+type manifestWindow struct {
+	// groups are the segments to list, in commit order.
+	groups []ledger.GroupInfo
+
+	// dropped is how many segments preceded the window — the first listed
+	// segment's media sequence.
+	dropped uint64
+
+	// discontinuities is how many epoch changes preceded the window: the
+	// discontinuity sequence the first listed segment continues from.
+	discontinuities uint64
+
+	// precedingEpoch is the epoch of the segment immediately before the window,
+	// or zero when the window starts at the track's beginning. A window that
+	// opens on a new epoch has a timeline reset at its very first segment, and
+	// nothing in the listed groups themselves reveals it.
+	precedingEpoch uint64
+}
+
 // gather opens a Reader, rewinds to the start, and drains every committed group
 // in commit order. It is the shared input to both renderers.
 //
-// With a window configured it keeps only the newest Window groups, in a ring, and
-// reports how many it dropped. The drop count is the first listed segment's
-// media sequence, which a sliding playlist must state exactly and consistently
-// across reloads — hence the full walk even when the output is short. The walk
-// reads manifests, not segment payloads.
-func (h *Handler) gather(ctx context.Context) (groups []ledger.GroupInfo, dropped uint64, err error) {
+// With a window configured it keeps only the newest Window groups, in a ring,
+// and accumulates what the dropped groups imply for the manifest's numbering. A
+// sliding playlist must state its media and discontinuity sequences exactly and
+// consistently across reloads, which is what the full walk buys — the output is
+// short but the counts are not derivable from it. The walk reads manifests, not
+// segment payloads.
+func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 	reader, err := h.track.Reader(ctx)
 	if err != nil {
-		return nil, 0, err
+		return manifestWindow{}, err
 	}
 	reader.SeekStart()
 
-	// ring holds the last h.window groups when windowing; next is where the
-	// following group lands, wrapping once the ring is full.
-	var ring []ledger.GroupInfo
+	var out manifestWindow
+
+	// A discontinuity belongs to the segment that opens a new epoch, so it
+	// rolls off the manifest when that segment does — the ring carries the flag
+	// alongside the group rather than recomputing it from a window that no
+	// longer contains the boundary.
+	type entry struct {
+		info          ledger.GroupInfo
+		discontinuity bool
+	}
+
+	// ring holds the last h.window entries when windowing; next is where the
+	// following one lands, wrapping once the ring is full.
+	var ring []entry
 	var next int
 	if h.window > 0 {
-		ring = make([]ledger.GroupInfo, 0, h.window)
+		ring = make([]entry, 0, h.window)
 	}
+
+	var prevEpoch uint64
+	var seen uint64
 
 	for {
 		g, err := reader.Next(ctx)
@@ -276,40 +313,63 @@ func (h *Handler) gather(ctx context.Context) (groups []ledger.GroupInfo, droppe
 			break
 		}
 		if err != nil {
-			return nil, 0, err
+			return manifestWindow{}, err
 		}
 
+		epoch := g.ID.Epoch()
+		e := entry{info: g, discontinuity: seen > 0 && epoch != prevEpoch}
+		prevEpoch = epoch
+		seen++
+
 		if h.window <= 0 {
-			groups = append(groups, g)
+			out.groups = append(out.groups, g)
 			continue
 		}
 		if len(ring) < h.window {
-			ring = append(ring, g)
+			ring = append(ring, e)
 			continue
 		}
-		ring[next] = g
+
+		// The evicted entry is now behind the window: it becomes what precedes
+		// the first listed segment, and its own discontinuity has rolled off.
+		evicted := ring[next]
+		out.precedingEpoch = evicted.info.ID.Epoch()
+		if evicted.discontinuity {
+			out.discontinuities++
+		}
+
+		ring[next] = e
 		next = (next + 1) % h.window
-		dropped++
+		out.dropped++
 	}
 
 	if h.window <= 0 {
-		return groups, 0, nil
+		return out, nil
 	}
+
 	// Unroll the ring back into commit order: once full, the oldest entry sits
 	// at the write cursor.
-	if len(ring) < h.window {
-		return ring, dropped, nil
+	ordered := ring
+	if len(ring) == h.window {
+		ordered = append(ring[next:len(ring):len(ring)], ring[:next]...)
 	}
-	return append(ring[next:len(ring):len(ring)], ring[:next]...), dropped, nil
+	out.groups = make([]ledger.GroupInfo, len(ordered))
+	for i, e := range ordered {
+		out.groups[i] = e.info
+	}
+	return out, nil
 }
 
-// renderOpts is the renderers' input projected from the handler's resolved state.
-func (h *Handler) renderOpts(dropped uint64) renderOpts {
+// renderOpts is the renderers' input projected from the handler's resolved state
+// and the window it just gathered.
+func (h *Handler) renderOpts(window manifestWindow) renderOpts {
 	return renderOpts{
-		segExt:        h.segExt,
-		initURI:       h.initURI(),
-		sliding:       h.window > 0,
-		mediaSequence: dropped,
+		segExt:                h.segExt,
+		initURI:               h.initURI(),
+		sliding:               h.window > 0,
+		mediaSequence:         window.dropped,
+		discontinuitySequence: window.discontinuities,
+		precedingEpoch:        window.precedingEpoch,
 	}
 }
 

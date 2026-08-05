@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
@@ -19,6 +21,9 @@ import (
 // whose subject is not initialization pass it so they exercise the path they are
 // actually about; see TestNewHandler_InitRequired for the guard itself.
 var testInit = stream.InitSegment{Bytes: []byte("init-bytes")}
+
+// fixtureEpoch is when the fixture's presentation starts on the wall clock.
+var fixtureEpoch = time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 
 // trackFixture is a track with two committed segments, plus the metadata and
 // payloads a serving test wants to assert against.
@@ -59,6 +64,10 @@ func newTrackFixtureGroups(tb testing.TB, encoding string, groups int64) trackFi
 			ID:        ledger.NewGroupID(0, uint64(sequence)),
 			MediaTime: sequence * 180000,
 			Duration:  180000,
+			// Anchored on a fixed clock advancing with media time, so the
+			// presentation start these imply is the same for every group — which
+			// is what a stable DASH availabilityStartTime depends on.
+			Wallclock: fixtureEpoch.Add(time.Duration(sequence) * 2 * time.Second).UnixNano(),
 		}, payload)
 		require.NoError(tb, err)
 		fix.metas = append(fix.metas, meta)
@@ -302,6 +311,142 @@ func TestHandler_WindowLargerThanTrack(t *testing.T) {
 	assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:0")
 	assert.Contains(t, got, fix.metas[0].ID.String()+".m4s")
 	assert.Contains(t, got, fix.metas[1].ID.String()+".m4s")
+}
+
+// A window that has rolled past an epoch change must still tell the player the
+// timeline reset. The reset belongs to the first listed segment, where nothing
+// in the listed groups reveals it, and the resets already gone from the playlist
+// have to be counted so discontinuity numbering survives them.
+func TestHandler_WindowAcrossEpochs(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
+		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+		MIME: "video/mp4", Encoding: "fmp4",
+	}, ledger.Config{})
+	require.NoError(t, err)
+
+	writer, err := track.Writer(ctx)
+	require.NoError(t, err)
+
+	// Three groups, then a producer restart, then three more. Windowing to the
+	// last four puts the epoch boundary one segment into the window; windowing
+	// to two puts it behind the window entirely.
+	appendGroups := func(n int64) {
+		for i := range n {
+			_, err := writer.AppendGroup(ctx, ledger.GroupInfo{
+				ID:        ledger.NewGroupID(0, uint64(i)),
+				MediaTime: i * 180000,
+				Duration:  180000,
+			}, []byte("frames"))
+			require.NoError(t, err)
+		}
+	}
+	appendGroups(3)
+	require.NoError(t, writer.NewEpoch(ctx))
+	appendGroups(3)
+
+	t.Run("boundary inside the window", func(t *testing.T) {
+		got := playlistFor(t, track, 4)
+		assert.Contains(t, got, "#EXT-X-DISCONTINUITY",
+			"the epoch change is listed, so its reset is marked")
+		assert.NotContains(t, got, "#EXT-X-DISCONTINUITY-SEQUENCE",
+			"no reset has rolled off, and an absent tag already means zero")
+	})
+
+	t.Run("window opens on the boundary", func(t *testing.T) {
+		// The last three segments are exactly the new epoch, so the reset sits
+		// at the first listed segment.
+		got := playlistFor(t, track, 3)
+		assert.Contains(t, got, "#EXT-X-DISCONTINUITY",
+			"a window opening on a new epoch still announces the reset")
+	})
+
+	t.Run("boundary behind the window", func(t *testing.T) {
+		got := playlistFor(t, track, 2)
+		assert.NotContains(t, got, "\n#EXT-X-DISCONTINUITY\n",
+			"the reset is no longer between two listed segments")
+		assert.Contains(t, got, "#EXT-X-DISCONTINUITY-SEQUENCE:1",
+			"but the player is told one reset has rolled off")
+	})
+}
+
+// playlistFor renders the HLS playlist for a track through a windowed handler.
+func playlistFor(tb testing.TB, track *ledger.Track, window int) string {
+	tb.Helper()
+
+	handler, err := stream.NewHandler(track, stream.Options{
+		InitSegment: testInit,
+		Window:      window,
+	})
+	require.NoError(tb, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/playlist.m3u8")
+	require.NoError(tb, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(tb, err)
+	return string(body)
+}
+
+// A windowed MPD lists only the window, and says how far back it reaches. Its
+// availabilityStartTime anchors the presentation, so it must name where the
+// presentation began rather than where the window currently starts — otherwise
+// it moves on every refresh and drags each client's timeline with it.
+func TestHandler_WindowDASH(t *testing.T) {
+	const total = 10
+	fix := newTrackFixtureGroups(t, "fmp4", total)
+
+	manifestFor := func(window int) string {
+		handler, err := stream.NewHandler(fix.track, stream.Options{
+			InitSegment: testInit,
+			Window:      window,
+		})
+		require.NoError(t, err)
+		ts := httptest.NewServer(handler)
+		defer ts.Close()
+
+		resp, err := http.Get(ts.URL + "/manifest.mpd")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	got := manifestFor(3)
+
+	assert.Contains(t, got, `timeShiftBufferDepth="PT6S"`,
+		"three two-second segments is how far back the window reaches")
+	for _, meta := range fix.metas[:total-3] {
+		assert.NotContains(t, got, `media="`+meta.ID.String()+`.m4s"`,
+			"segments older than the window are not listed")
+	}
+	for _, meta := range fix.metas[total-3:] {
+		assert.Contains(t, got, `media="`+meta.ID.String()+`.m4s"`)
+	}
+
+	// The presentation did not move, so neither may its anchor.
+	assert.Equal(t,
+		availabilityStartTime(t, manifestFor(0)),
+		availabilityStartTime(t, got),
+		"availabilityStartTime names the presentation start, not the window start")
+}
+
+// availabilityStartTime pulls the MPD attribute out of a rendered manifest.
+func availabilityStartTime(tb testing.TB, mpd string) string {
+	tb.Helper()
+
+	const attr = `availabilityStartTime="`
+	at := strings.Index(mpd, attr)
+	require.GreaterOrEqual(tb, at, 0, "the MPD carries an availabilityStartTime")
+	rest := mpd[at+len(attr):]
+	end := strings.Index(rest, `"`)
+	require.GreaterOrEqual(tb, end, 0)
+	return rest[:end]
 }
 
 // A supplied init segment is served at /init.<ext> and referenced from both
