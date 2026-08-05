@@ -14,8 +14,10 @@
 // segments, which makes the HLS playlist a sliding live one (EVENT forbids
 // removing segments) and gives the MPD a timeShiftBufferDepth. Rolling out of a
 // manifest is not deletion: an older segment stays addressable for a client that
-// still holds its URL. Either way there is no end-list signal; the ledger has no
-// notion of a finished track.
+// still holds its URL. [Options.LatestEpochOnly] narrows it further, to the
+// newest producer lifetime — a live viewer has no reason to be shown the session
+// before a restart, and left listed it is where a player starts. Either way there
+// is no end-list signal; the ledger has no notion of a finished track.
 //
 // # Segment delivery
 //

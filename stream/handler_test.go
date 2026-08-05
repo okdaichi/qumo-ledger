@@ -371,6 +371,90 @@ func TestHandler_WindowAcrossEpochs(t *testing.T) {
 	})
 }
 
+// A producer that restarts opens a new epoch, and the lifetime before it has
+// ended. LatestEpochOnly drops it from the manifest at once, rather than leaving
+// a player to open the stream on a finished session and watch it through.
+func TestHandler_LatestEpochOnly(t *testing.T) {
+	ctx := context.Background()
+	store := memstore.New()
+	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
+		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+		MIME: "video/mp4", Encoding: "fmp4",
+	}, ledger.Config{})
+	require.NoError(t, err)
+
+	writer, err := track.Writer(ctx)
+	require.NoError(t, err)
+
+	appendGroups := func(n int64) []ledger.GroupInfo {
+		var out []ledger.GroupInfo
+		for i := range n {
+			meta, err := writer.AppendGroup(ctx, ledger.GroupInfo{
+				ID:        ledger.NewGroupID(0, uint64(i)),
+				MediaTime: i * 180000,
+				Duration:  180000,
+				Wallclock: fixtureEpoch.Add(time.Duration(i) * 2 * time.Second).UnixNano(),
+			}, []byte("frames"))
+			require.NoError(t, err)
+			out = append(out, meta)
+		}
+		return out
+	}
+
+	// A finished session of four segments, then a restart that has produced two.
+	ended := appendGroups(4)
+	require.NoError(t, writer.NewEpoch(ctx))
+	live := appendGroups(2)
+
+	render := func(opts stream.Options) string {
+		opts.InitSegment = testInit
+		handler, err := stream.NewHandler(track, opts)
+		require.NoError(t, err)
+		ts := httptest.NewServer(handler)
+		defer ts.Close()
+
+		resp, err := http.Get(ts.URL + "/playlist.m3u8")
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	assertOnlyLive := func(t *testing.T, got string) {
+		t.Helper()
+		for _, meta := range ended {
+			assert.NotContains(t, got, meta.ID.String()+".m4s",
+				"a segment from the finished lifetime is not listed")
+		}
+		for _, meta := range live {
+			assert.Contains(t, got, meta.ID.String()+".m4s")
+		}
+		assert.Contains(t, got, "#EXT-X-MEDIA-SEQUENCE:4",
+			"the four segments of the previous lifetime are behind the manifest")
+		assert.Contains(t, got, "#EXT-X-DISCONTINUITY",
+			"a client polling across the restart is told the timeline reset")
+	}
+
+	// The window is a separate concern: scoping to the newest lifetime has to
+	// hold whether or not one is set, and a window wide enough to reach back
+	// into the old epoch must not drag it in.
+	t.Run("unwindowed", func(t *testing.T) {
+		assertOnlyLive(t, render(stream.Options{LatestEpochOnly: true}))
+	})
+
+	t.Run("window spans the restart", func(t *testing.T) {
+		assertOnlyLive(t, render(stream.Options{LatestEpochOnly: true, Window: 5}))
+	})
+
+	// Without it, the finished lifetime is still listed — which is the stale
+	// session a player would otherwise start on.
+	t.Run("off by default", func(t *testing.T) {
+		got := render(stream.Options{})
+		assert.Contains(t, got, ended[0].ID.String()+".m4s")
+	})
+}
+
 // playlistFor renders the HLS playlist for a track through a windowed handler.
 func playlistFor(tb testing.TB, track *ledger.Track, window int) string {
 	tb.Helper()

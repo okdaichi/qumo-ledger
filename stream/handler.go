@@ -36,6 +36,8 @@ type Handler struct {
 	segExt   string
 	segMIME  string
 	window   int
+
+	latestEpochOnly bool
 }
 
 // ErrInitRequired reports that the track's container cannot be played without an
@@ -81,6 +83,20 @@ type Options struct {
 	// addressable — the ledger deletes nothing, so a client that kept a URL can
 	// still fetch it.
 	Window int
+
+	// LatestEpochOnly limits a manifest to the newest producer lifetime.
+	//
+	// A producer that restarts opens a new epoch, and everything before it is a
+	// different lifetime — media from a session that has already ended. Left
+	// listed, those segments are what a player opening the stream starts on: it
+	// plays the previous session through before reaching the current one, and a
+	// window only clears them once enough new segments have pushed them out.
+	//
+	// The lifetime is resolved per request, from the newest group the walk
+	// finds, so a restart takes effect on the next manifest rather than when a
+	// handler is next built. Earlier epochs stay addressable; they are only
+	// absent from the manifest.
+	LatestEpochOnly bool
 }
 
 // InitSegment is the fMP4 initialization segment (ftyp + moov). Supply Bytes —
@@ -137,6 +153,8 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		segExt:   segExt,
 		segMIME:  segMIME,
 		window:   opts.Window,
+
+		latestEpochOnly: opts.LatestEpochOnly,
 	}, nil
 }
 
@@ -287,17 +305,9 @@ func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 
 	var out manifestWindow
 
-	// A discontinuity belongs to the segment that opens a new epoch, so it
-	// rolls off the manifest when that segment does — the ring carries the flag
-	// alongside the group rather than recomputing it from a window that no
-	// longer contains the boundary.
-	type entry struct {
-		info          ledger.GroupInfo
-		discontinuity bool
-	}
-
 	// ring holds the last h.window entries when windowing; next is where the
-	// following one lands, wrapping once the ring is full.
+	// following one lands, wrapping once the ring is full. Unwindowed, every
+	// entry is kept and next is unused.
 	var ring []entry
 	var next int
 	if h.window > 0 {
@@ -321,43 +331,64 @@ func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 		prevEpoch = epoch
 		seen++
 
-		if h.window <= 0 {
-			out.groups = append(out.groups, g)
-			continue
-		}
-		if len(ring) < h.window {
+		if h.window <= 0 || len(ring) < h.window {
 			ring = append(ring, e)
 			continue
 		}
 
 		// The evicted entry is now behind the window: it becomes what precedes
 		// the first listed segment, and its own discontinuity has rolled off.
-		evicted := ring[next]
-		out.precedingEpoch = evicted.info.ID.Epoch()
-		if evicted.discontinuity {
-			out.discontinuities++
-		}
+		out.evict(ring[next])
 
 		ring[next] = e
 		next = (next + 1) % h.window
-		out.dropped++
-	}
-
-	if h.window <= 0 {
-		return out, nil
 	}
 
 	// Unroll the ring back into commit order: once full, the oldest entry sits
 	// at the write cursor.
 	ordered := ring
-	if len(ring) == h.window {
+	if h.window > 0 && len(ring) == h.window {
 		ordered = append(ring[next:len(ring):len(ring)], ring[:next]...)
 	}
+
+	// Everything before the newest lifetime is a session that has already
+	// ended, so it leaves the manifest the same way a windowed-out segment
+	// does: still addressable, just not listed, and counted as preceding the
+	// first one that is.
+	if h.latestEpochOnly && len(ordered) > 0 {
+		latest := ordered[len(ordered)-1].info.ID.Epoch()
+		for len(ordered) > 0 && ordered[0].info.ID.Epoch() != latest {
+			out.evict(ordered[0])
+			ordered = ordered[1:]
+		}
+	}
+
 	out.groups = make([]ledger.GroupInfo, len(ordered))
 	for i, e := range ordered {
 		out.groups[i] = e.info
 	}
 	return out, nil
+}
+
+// entry is a group together with what its position implies for the manifest. A
+// discontinuity belongs to the segment that opens a new epoch, so it rolls off
+// when that segment does — carrying the flag alongside the group beats
+// recomputing it from a window that no longer contains the boundary.
+type entry struct {
+	info          ledger.GroupInfo
+	discontinuity bool
+}
+
+// evict folds a group that is no longer listed into the counts a sliding
+// manifest states: it becomes what precedes the window, its place in the media
+// sequence is spent, and any timeline reset it carried is now behind the
+// manifest rather than inside it.
+func (w *manifestWindow) evict(e entry) {
+	w.precedingEpoch = e.info.ID.Epoch()
+	w.dropped++
+	if e.discontinuity {
+		w.discontinuities++
+	}
 }
 
 // renderOpts is the renderers' input projected from the handler's resolved state
