@@ -1,8 +1,7 @@
-// Command qumo-ledger inspects tracks stored by the ledger.
-//
-// Because a track is readable with nothing but object-store access, this tool
-// is a convenience rather than a component: it uses the same public API any
-// reader would, and nothing in the storage format depends on it existing.
+// Example inspect-follow reads a track stored by the ledger: it summarizes a
+// track and tails groups as they land. It is a reference reader built on the
+// same public API any reader would use — not a supported tool. A client CLI for
+// accessing a ledger lives in a separate repository.
 package main
 
 import (
@@ -24,7 +23,7 @@ import (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "qumo-ledger:", err)
+		fmt.Fprintln(os.Stderr, "inspect-follow:", err)
 		os.Exit(1)
 	}
 }
@@ -45,7 +44,7 @@ func run(args []string) error {
 		return follow(ctx, args[1:])
 	case "version":
 		info := version.Get()
-		fmt.Printf("qumo-ledger %s (%s, built %s, %s)\n", info.Version, info.Commit, info.Date, info.Go)
+		fmt.Printf("inspect-follow %s (%s, built %s, %s)\n", info.Version, info.Commit, info.Date, info.Go)
 		return nil
 	case "help", "-h", "--help":
 		usage()
@@ -57,16 +56,16 @@ func run(args []string) error {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `qumo-ledger — inspect temporal tracks
+	fmt.Fprint(os.Stderr, `inspect-follow — example reader for a ledger track
 
 Usage:
-  qumo-ledger inspect -root <dir> -track <path>   summarize a track
-  qumo-ledger follow  -root <dir> -track <path>   tail groups as they land
-                      [-tip] [-group <ref>]      start at the tip, or resume
-  qumo-ledger version
+  inspect-follow inspect -root <dir> -track <path>   summarize a track
+  inspect-follow follow  -root <dir> -track <path>   tail groups as they land
+                      [-tip] [-group <ref>]          start at the tip, or resume
+  inspect-follow version
 
-Only the local filesystem backend is wired up so far. Object-store backends
-implement the same interface, so nothing here is specific to local storage.
+A runnable example, not a supported tool. Only the local filesystem backend is
+wired up; object-store backends implement the same interface.
 `)
 }
 

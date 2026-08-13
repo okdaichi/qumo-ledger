@@ -35,7 +35,7 @@ jobs:
 
       - name: Test with coverage
         # Scope to the library tree so cross-package
-        # execution is attributed. cmd/ and internal/version are excluded —
+        # execution is attributed. examples/ and internal/version are excluded —
         # they aren't unit-tested, so including them reads as uncovered and
         # noises up codecov/patch without flagging real gaps.
         run: go test -coverprofile=coverage.out -covermode=atomic -coverpkg=./ledger/... ./ledger/...

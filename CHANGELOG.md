@@ -10,6 +10,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **stream:** HLS and DASH renderers over a ledger track — derived views, not a
+  storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
+  `@d`; a new producer epoch is an HLS `EXT-X-DISCONTINUITY` and a DASH timeline
+  reset; a wallclock anchor is `EXT-X-PROGRAM-DATE-TIME` and the MPD
+  `availabilityStartTime`. A `Handler` is an `http.Handler` over one `*Track` that
+  serves an EVENT playlist (`.m3u8`) and a dynamic MPD (`.mpd`), both reflecting
+  the whole track and growing as groups land. Segments are addressed by their
+  `GroupID`, so a single segment handler serves both formats.
+
+- **stream:** Delivery is pluggable at the HTTP layer. The default
+  `ProxyResolver` streams segment bytes through `Reader.ReadGroup` — for local
+  development. A production deployment supplies a `RedirectResolver` that mints a
+  signed URL from `GroupInfo.ObjectKey`, so clients fetch objects directly and
+  the store stays free of any presigning method.
+
+- **ledger:** `Reader.Lookup` resolves a committed `GroupInfo` by its `GroupID`,
+  reading its `ObjectKey` from the manifest rather than deriving it. It is the
+  point-lookup a serving layer needs — to proxy a segment and to sign its URL —
+  and it does not advance the streaming cursor.
+
+### Changed
+
+- The `cmd/qumo-ledger` and `cmd/qumo-stream` binaries were demoted to runnable
+  examples under `examples/` (`inspect-follow`, `stream-server`): reference code,
+  not supported entrypoints. The repository no longer builds or ships binaries
+  (`mage build` now compiles every package), and a client CLI for accessing a
+  ledger will live in a separate repository.
+
+## [0.1.0] - unreleased
 ## [0.1.0] - 2026-08-07
 
 First release: an object-store-native store for temporal data — video, audio,
