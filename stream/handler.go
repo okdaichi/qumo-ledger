@@ -256,7 +256,7 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := reader.ReadGroup(r.Context(), group)
+	data, err := reader.ReadGroup(r.Context(), group.ObjectKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

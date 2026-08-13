@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"strconv"
@@ -51,10 +52,15 @@ func (g GroupID) String() string {
 	return fmt.Sprintf("e%06d-g%08d", g.Epoch(), g.Sequence())
 }
 
-// Before reports whether g orders before other. Because the epoch occupies the
-// high bits, this is ordinary numeric order: a later epoch is later in time even
-// when its sequence is lower.
-func (g GroupID) Before(other GroupID) bool { return uint64(g) < uint64(other) }
+// Compare returns -1, 0, or +1 as g orders before, with, or after other.
+// Because the epoch occupies the high bits, this is ordinary numeric order: a
+// later epoch is later in time even when its sequence is lower.
+//
+// It is the shape [slices.SortFunc] and [slices.BinarySearchFunc] want, so a
+// consumer holding rows from more than one source can order them by identity:
+//
+//	slices.SortFunc(groups, func(a, b GroupInfo) int { return a.ID.Compare(b.ID) })
+func (g GroupID) Compare(other GroupID) int { return cmp.Compare(uint64(g), uint64(other)) }
 
 // ParseGroupID parses the "e<epoch>-g<sequence>" form produced by
 // [GroupID.String], so a consumer can persist a position with String and resume
@@ -149,7 +155,16 @@ type GroupInfo struct {
 	// here rather than deriving it, because sequences are gappy.
 	ObjectKey string `json:"objectKey"`
 
-	// Size is the payload length in bytes.
+	// Size is the payload length in bytes, as recorded by the writer from the
+	// object it stored.
+	//
+	// It is descriptive, not a guarantee: readers do not re-verify it, so it
+	// answers "how big is this" without a fetch — for a client deciding whether
+	// to pull a segment, for an HLS BANDWIDTH figure, or for accounting that
+	// sums a track from its log alone. That matters most when the bytes never
+	// pass through this process, as with a resolver that hands out a signed URL.
+	// Detecting corruption is the store's concern, and would want a content
+	// hash rather than a length.
 	Size int64 `json:"size"`
 
 	// MIME and Encoding override the track defaults for this group alone, and
