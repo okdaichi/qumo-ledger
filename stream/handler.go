@@ -3,9 +3,11 @@ package stream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,11 +36,24 @@ type Handler struct {
 	init     InitSegment
 	segExt   string
 	segMIME  string
+	window   int
+
+	epochWindow int
 }
 
-// Options configures a [Handler]. The zero value is usable alongside a track: the
-// resolver proxies, segments take the schema's extension and MIME, and no init
-// segment is emitted.
+// ErrInitRequired reports that the track's container cannot be played without an
+// initialization segment and [Options.InitSegment] was left zero. Segments of a
+// fragmented-MP4 track are moof+mdat: the codec configuration lives in the moov
+// of a separate init segment, so a manifest without one is unplayable by every
+// client. Failing here is deliberate — the manifests would otherwise render
+// without #EXT-X-MAP (or DASH @initialization) and be served as a valid 200,
+// turning a misconfiguration into a silent playback failure.
+var ErrInitRequired = errors.New("stream: init segment required for this encoding")
+
+// Options configures a [Handler]. The zero value is usable alongside a track
+// whose container is self-initializing: the resolver proxies, segments take the
+// schema's extension and MIME, and no init segment is emitted. A
+// fragmented-MP4 track additionally requires InitSegment; see [ErrInitRequired].
 type Options struct {
 	// Resolver decides redirect-versus-proxy per segment. Nil means
 	// [ProxyResolver].
@@ -53,6 +68,41 @@ type Options struct {
 
 	// SegmentMIME overrides the schema-derived segment MIME type.
 	SegmentMIME string
+
+	// Window caps how many of the most recent segments a manifest lists. Zero
+	// lists every committed segment.
+	//
+	// A live track runs indefinitely, so an unwindowed manifest grows without
+	// bound: an hour of one-second segments is 3,600 entries re-rendered on
+	// every request, and a player re-fetches the whole thing each reload. A
+	// window bounds the response and turns the HLS playlist from EVENT (append
+	// only, whole history) into a sliding live playlist.
+	//
+	// It bounds the manifest, not the read: the handler still walks the track to
+	// count what precedes the window, because a sliding playlist's
+	// EXT-X-MEDIA-SEQUENCE has to be exact. Segments outside the window remain
+	// addressable — the ledger deletes nothing, so a client that kept a URL can
+	// still fetch it.
+	Window int
+
+	// EpochWindow caps how many producer lifetimes a manifest lists, newest
+	// first. Zero lists every one; 1 lists only the current session.
+	//
+	// A producer that restarts opens a new epoch, and everything before it is
+	// media from a session that has ended. Left listed, those segments are what
+	// a player opening the stream starts on — it plays the previous session
+	// through before reaching the current one — and [Options.Window] only
+	// clears them once enough new segments have pushed them out.
+	//
+	// Above 1 keeps recent lifetimes listed, which suits a producer that
+	// restarts briefly: a viewer already playing the old epoch reaches the
+	// restart across a discontinuity instead of finding its segments gone.
+	//
+	// Lifetimes are counted per request from the newest group the walk finds,
+	// so a restart takes effect on the next manifest rather than when a handler
+	// is next built. Earlier epochs stay addressable; they are only absent from
+	// the manifest.
+	EpochWindow int
 }
 
 // InitSegment is the fMP4 initialization segment (ftyp + moov). Supply Bytes —
@@ -73,12 +123,19 @@ type InitSegment struct {
 // NewHandler builds a [Handler] over track. It reads the track root once to
 // derive the segment extension and MIME from the schema; the matching Options
 // fields override them.
+//
+// It returns [ErrInitRequired] when the schema's container needs an
+// initialization segment and Options.InitSegment is zero.
 func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 	if track == nil {
 		return nil, errors.New("stream: nil track")
 	}
 
 	info := track.Root()
+
+	if requiresInit(info.TrackSchema) && opts.InitSegment.Bytes == nil && opts.InitSegment.URL == "" {
+		return nil, fmt.Errorf("%w: encoding %q", ErrInitRequired, info.TrackSchema.Encoding)
+	}
 
 	segExt := opts.SegmentExt
 	if segExt == "" {
@@ -101,6 +158,9 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		init:     opts.InitSegment,
 		segExt:   segExt,
 		segMIME:  segMIME,
+		window:   opts.Window,
+
+		epochWindow: opts.EpochWindow,
 	}, nil
 }
 
@@ -121,12 +181,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveHLS renders and writes the HLS media playlist.
 func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
-	groups, err := h.gather(r.Context())
+	window, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderHLS(h.schema, groups, h.renderOpts())
+	body, err := renderHLS(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -137,12 +197,12 @@ func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
 
 // serveDASH renders and writes the DASH MPD.
 func (h *Handler) serveDASH(w http.ResponseWriter, r *http.Request) {
-	groups, err := h.gather(r.Context())
+	window, err := h.gather(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := renderDASH(h.schema, groups, h.renderOpts())
+	body, err := renderDASH(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -211,31 +271,170 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data) // not actionable: once the body write fails the client is gone
 }
 
+// manifestWindow is what the renderers need about a track: the groups to list,
+// and what the groups before them imply for the numbering a sliding manifest has
+// to carry.
+type manifestWindow struct {
+	// groups are the segments to list, in commit order.
+	groups []ledger.GroupInfo
+
+	// dropped is how many segments preceded the window — the first listed
+	// segment's media sequence.
+	dropped uint64
+
+	// discontinuities is how many epoch changes preceded the window: the
+	// discontinuity sequence the first listed segment continues from.
+	discontinuities uint64
+
+	// precedingEpoch is the epoch of the segment immediately before the window,
+	// or zero when the window starts at the track's beginning. A window that
+	// opens on a new epoch has a timeline reset at its very first segment, and
+	// nothing in the listed groups themselves reveals it.
+	precedingEpoch uint64
+}
+
 // gather opens a Reader, rewinds to the start, and drains every committed group
 // in commit order. It is the shared input to both renderers.
-func (h *Handler) gather(ctx context.Context) ([]ledger.GroupInfo, error) {
+//
+// With a window configured it keeps only the newest Window groups, in a ring,
+// and accumulates what the dropped groups imply for the manifest's numbering. A
+// sliding playlist must state its media and discontinuity sequences exactly and
+// consistently across reloads, which is what the full walk buys — the output is
+// short but the counts are not derivable from it. The walk reads manifests, not
+// segment payloads.
+func (h *Handler) gather(ctx context.Context) (manifestWindow, error) {
 	reader, err := h.track.Reader(ctx)
 	if err != nil {
-		return nil, err
+		return manifestWindow{}, err
 	}
 	reader.SeekStart()
 
-	var groups []ledger.GroupInfo
+	var out manifestWindow
+
+	// ring holds the last h.window entries when windowing; next is where the
+	// following one lands, wrapping once the ring is full. Unwindowed, every
+	// entry is kept and next is unused.
+	var ring []entry
+	var next int
+	if h.window > 0 {
+		ring = make([]entry, 0, h.window)
+	}
+
+	var prevEpoch uint64
+	var seen uint64
+
 	for {
 		g, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return groups, nil
+			break
 		}
 		if err != nil {
-			return nil, err
+			return manifestWindow{}, err
 		}
-		groups = append(groups, g)
+
+		epoch := g.ID.Epoch()
+		e := entry{info: g, discontinuity: seen > 0 && epoch != prevEpoch}
+		prevEpoch = epoch
+		seen++
+
+		if h.window <= 0 || len(ring) < h.window {
+			ring = append(ring, e)
+			continue
+		}
+
+		// The evicted entry is now behind the window: it becomes what precedes
+		// the first listed segment, and its own discontinuity has rolled off.
+		out.evict(ring[next])
+
+		ring[next] = e
+		next = (next + 1) % h.window
+	}
+
+	// Unroll the ring back into commit order: once full, the oldest entry sits
+	// at the write cursor.
+	ordered := ring
+	if h.window > 0 && len(ring) == h.window {
+		ordered = slices.Concat(ring[next:], ring[:next])
+	}
+
+	// Lifetimes past the epoch window are sessions that have already ended, so
+	// they leave the manifest the same way a windowed-out segment does: still
+	// addressable, just not listed, and counted as preceding the first one that
+	// is.
+	for range h.epochsToDrop(ordered) {
+		out.evict(ordered[0])
+		ordered = ordered[1:]
+	}
+
+	out.groups = make([]ledger.GroupInfo, len(ordered))
+	for i, e := range ordered {
+		out.groups[i] = e.info
+	}
+	return out, nil
+}
+
+// epochsToDrop counts the leading entries that fall outside the epoch window —
+// those belonging to a lifetime older than the newest h.epochWindow.
+//
+// Lifetimes are counted backwards from the newest group rather than by
+// subtracting from the latest epoch number, so the answer depends only on what
+// is actually listed. Epochs the segment window has already trimmed away are
+// not lifetimes this manifest still shows, and counting them would evict a
+// session that is genuinely on screen.
+func (h *Handler) epochsToDrop(ordered []entry) int {
+	if h.epochWindow <= 0 || len(ordered) == 0 {
+		return 0
+	}
+
+	lifetimes := 1
+	epoch := ordered[len(ordered)-1].info.ID.Epoch()
+	for i := len(ordered) - 1; i >= 0; i-- {
+		if ordered[i].info.ID.Epoch() == epoch {
+			continue
+		}
+		epoch = ordered[i].info.ID.Epoch()
+		lifetimes++
+		if lifetimes > h.epochWindow {
+			// Entry i opens the first lifetime past the window, so it and
+			// everything before it goes.
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// entry is a group together with what its position implies for the manifest. A
+// discontinuity belongs to the segment that opens a new epoch, so it rolls off
+// when that segment does — carrying the flag alongside the group beats
+// recomputing it from a window that no longer contains the boundary.
+type entry struct {
+	info          ledger.GroupInfo
+	discontinuity bool
+}
+
+// evict folds a group that is no longer listed into the counts a sliding
+// manifest states: it becomes what precedes the window, its place in the media
+// sequence is spent, and any timeline reset it carried is now behind the
+// manifest rather than inside it.
+func (w *manifestWindow) evict(e entry) {
+	w.precedingEpoch = e.info.ID.Epoch()
+	w.dropped++
+	if e.discontinuity {
+		w.discontinuities++
 	}
 }
 
-// renderOpts is the renderers' input projected from the handler's resolved state.
-func (h *Handler) renderOpts() renderOpts {
-	return renderOpts{segExt: h.segExt, initURI: h.initURI()}
+// renderOpts is the renderers' input projected from the handler's resolved state
+// and the window it just gathered.
+func (h *Handler) renderOpts(window manifestWindow) renderOpts {
+	return renderOpts{
+		segExt:                h.segExt,
+		initURI:               h.initURI(),
+		sliding:               h.window > 0,
+		mediaSequence:         window.dropped,
+		discontinuitySequence: window.discontinuities,
+		precedingEpoch:        window.precedingEpoch,
+	}
 }
 
 // initURI is the URI both manifests reference for the init segment: a local path
@@ -259,6 +458,16 @@ func parseSegmentID(base, ext string) (ledger.GroupID, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// requiresInit reports whether a schema's container carries its codec
+// configuration in a separate initialization segment rather than in every
+// segment. Fragmented MP4 does; MPEG-TS repeats its PAT/PMT per segment and so
+// does not. An unrecognized encoding is left permissive: the caller knows its
+// container, and refusing to serve one this package has no opinion about would
+// be worse than serving it.
+func requiresInit(s ledger.TrackSchema) bool {
+	return s.Encoding == "fmp4"
 }
 
 // defaultSegmentExt picks a segment extension for a schema the caller did not

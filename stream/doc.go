@@ -8,10 +8,16 @@
 // [http.Handler] over one [*ledger.Track] that routes playlist and manifest
 // requests and serves the segments both point at.
 //
-// The playlist is the whole track and grows as groups land — HLS as an EVENT
-// playlist, DASH as a dynamic MPD — because the ledger is append-only and never
-// deletes. There is no end-list signal; the ledger has no notion of a finished
-// track.
+// By default the playlist is the whole track and grows as groups land — HLS as
+// an EVENT playlist, DASH as a dynamic MPD — because the ledger is append-only
+// and never deletes. [Options.Window] instead caps it at the most recent
+// segments, which makes the HLS playlist a sliding live one (EVENT forbids
+// removing segments) and gives the MPD a timeShiftBufferDepth. Rolling out of a
+// manifest is not deletion: an older segment stays addressable for a client that
+// still holds its URL. [Options.EpochWindow] bounds it along the other axis, in
+// producer lifetimes — a live viewer has no reason to be shown the session
+// before a restart, and left listed it is where a player starts. Either way there
+// is no end-list signal; the ledger has no notion of a finished track.
 //
 // # Segment delivery
 //
@@ -26,11 +32,19 @@
 // # What the renderer assumes
 //
 // Each group must carry a positive Duration: a segment without one has no HLS
-// EXTINF or DASH @d, so the renderers refuse it. The container is whatever the
-// track's schema declares; an fMP4 init segment, when the container needs one,
-// is optional caller-supplied bytes or URL ([Options.InitSegment]).
+// EXTINF or DASH @d, so the renderers refuse it. Deriving that Duration from the
+// media rather than assuming it is the writer's job — see the fmp4 package for
+// the fragmented-MP4 case.
 //
-// The renderers reflect the whole track and regenerate per request, which is
-// O(track size). Caching the output and bounding it with a sliding window are
-// deliberate follow-ons.
+// The container is whatever the track's schema declares. A fragmented-MP4 track
+// additionally requires [Options.InitSegment]: its segments carry no codec
+// configuration, so a manifest without an init reference is unplayable, and
+// [NewHandler] returns [ErrInitRequired] rather than serve one. A
+// self-initializing container such as MPEG-TS needs none.
+//
+// A manifest is regenerated per request and the track is walked each time, which
+// is O(track size) even when [Options.Window] bounds the output — a sliding
+// playlist's EXT-X-MEDIA-SEQUENCE has to count what preceded it. Caching the
+// rendered manifest, and a reader API that returns a window together with its
+// ordinal, are deliberate follow-ons.
 package stream

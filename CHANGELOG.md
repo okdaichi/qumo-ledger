@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger will live in a separate repository.
 
 ## [0.1.0] - unreleased
+## [0.1.0] - 2026-08-07
 
 First release: an object-store-native store for temporal data — video, audio,
 logs, sensor readings — where the manifest is the source of truth and the
@@ -144,6 +145,55 @@ once: the unit of independent decoding *and* the unit of storage.
   which matters because keys reach it from manifest data rather than from
   caller-authored input.
 
+- **stream:** HLS and DASH renderers over a ledger track — derived views, not a
+  storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
+  `@d`; a new producer epoch is an HLS `EXT-X-DISCONTINUITY` and a DASH timeline
+  reset; a wallclock anchor is `EXT-X-PROGRAM-DATE-TIME` and the MPD
+  `availabilityStartTime`. A `Handler` is an `http.Handler` over one `*Track` that
+  serves an EVENT playlist (`.m3u8`) and a dynamic MPD (`.mpd`), both reflecting
+  the whole track and growing as groups land. Segments are addressed by their
+  `GroupID`, so a single segment handler serves both formats.
+
+- **stream:** Delivery is pluggable at the HTTP layer. The default
+  `ProxyResolver` streams segment bytes through `Reader.ReadGroup` — for local
+  development. A production deployment supplies a `RedirectResolver` that mints a
+  signed URL from `GroupInfo.ObjectKey`, so clients fetch objects directly and
+  the store stays free of any presigning method.
+
+- **ledger:** `Reader.Lookup` resolves a committed `GroupInfo` by its `GroupID`,
+  reading its `ObjectKey` from the manifest rather than deriving it. It is the
+  point-lookup a serving layer needs — to proxy a segment and to sign its URL —
+  and it does not advance the streaming cursor.
+
+- **cmd/qumo-stream:** serves a track over HTTP as HLS and DASH from a local
+  filesystem store.
+
+- **stream:** `Options.Window` caps a manifest at the most recent segments. A
+  live track runs indefinitely, so an unwindowed manifest grows without bound and
+  a player opens it at its oldest segment — a recording rather than a live
+  stream. A windowed HLS playlist is a sliding live one rather than `EVENT`
+  (which forbids removing segments), `EXT-X-MEDIA-SEQUENCE` counts what rolled
+  off, and the MPD gains a `timeShiftBufferDepth`. Rolling out of a manifest is
+  not deletion: the ledger keeps every group, so a client holding an older URL
+  can still fetch it.
+
+- **stream:** `Options.EpochWindow` caps a manifest by producer lifetimes —
+  `0` lists every one, `1` only the current session. A producer that restarts
+  opens a new epoch, and the segments before it are a session that has ended;
+  left listed, they are where a player starts. Above `1` keeps recent lifetimes
+  listed, so a viewer already playing the previous one reaches the restart across
+  a discontinuity instead of finding its segments gone.
+
+- **fmp4:** reads what a fragmented-MP4 writer must otherwise assume:
+  `Timescale` from an init segment's `mdhd` (`TimescaleForTrack` when the init
+  describes several tracks), and `FragmentDuration` from a fragment's
+  `tfhd`/`trun`. The renderers require a `Duration` the ledger gave writers no
+  way to compute, so ingesters assumed one from configuration — and when the
+  assumption and the encoder's real GOP disagree, every `EXTINF` is wrong and
+  players drift with nothing contradicting them. Nothing is guessed: an absent
+  duration is `ErrNotFound`, and a `sample_count` is checked against what the box
+  can hold before it is used.
+
 - **cmd/qumo-ledger:** `inspect` and `follow`, built on the public API alone.
 
 - **docs:** `docs/ARCHITECTURE.md` records the design decisions and why each was
@@ -154,11 +204,24 @@ once: the unit of independent decoding *and* the unit of storage.
   magefiles verification; golangci-lint via reviewdog; release-on-tag; CHANGELOG
   enforcement; Dependabot for both modules and for Actions.
 
+### Fixed
+
+- **stream:** a fragmented-MP4 track with no `Options.InitSegment` now fails at
+  `NewHandler` with `ErrInitRequired` instead of rendering manifests that omit
+  `EXT-X-MAP` (and DASH `@initialization`) and serving them as a valid `200` —
+  turning a misconfiguration into a silent playback failure.
+
+- **stream:** a windowed manifest states its timeline correctly. The DASH
+  `availabilityStartTime` is the presentation start rather than the first listed
+  group's anchor, so it no longer moves as the window rolls and shifts every
+  client's timeline with it; and an HLS window that opens on an epoch change
+  emits the `EXT-X-DISCONTINUITY` belonging to its first segment, with
+  `EXT-X-DISCONTINUITY-SEQUENCE` counting the resets that have rolled off.
+
 ### Notes
 
 - Deferred deliberately, with rationale in `docs/ARCHITECTURE.md`: garbage
-  collection, retention, the MoQT adapter, HLS/DASH renderers, and an S3
-  backend.
+  collection, retention, the MoQT adapter, and an S3 backend.
 - Manifests are JSON. They are small, read far less often than payloads, and
   inspecting a broken track in a text editor is worth more than the bytes saved.
   A `version` field is what allows this to be revisited.
