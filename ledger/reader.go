@@ -240,14 +240,17 @@ func (r *Reader) sealed(ctx context.Context, epoch uint64, ref sealedRef) (seale
 	return sealed, nil
 }
 
-// ReadGroup fetches a group's payload.
+// ReadGroup fetches a group's payload, given the object key from its manifest
+// row.
 //
-// It reads [GroupInfo.ObjectKey] rather than deriving a key, because producer
-// sequences are gappy and a derived key can name a group that was dropped.
-func (r *Reader) ReadGroup(ctx context.Context, meta GroupInfo) ([]byte, error) {
-	data, _, err := r.objects.Get(ctx, meta.ObjectKey)
+// Pass [GroupInfo.ObjectKey] from a row obtained through [Reader.Lookup],
+// [Reader.Next], or a range iterator. Never construct the key: producer
+// sequences are gappy, so a derived key can name a group that was dropped, or
+// nothing at all.
+func (r *Reader) ReadGroup(ctx context.Context, objectKey string) ([]byte, error) {
+	data, _, err := r.objects.Get(ctx, objectKey)
 	if err != nil {
-		return nil, fmt.Errorf("ledger: read group %s: %w", meta.ID, err)
+		return nil, fmt.Errorf("ledger: read group %s: %w", objectKey, err)
 	}
 
 	return data, nil

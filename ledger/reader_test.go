@@ -80,7 +80,7 @@ func TestReader_ReadGroup(t *testing.T) {
 
 	r := openReader(t, objects)
 
-	got, err := r.ReadGroup(t.Context(), meta)
+	got, err := r.ReadGroup(t.Context(), meta.ObjectKey)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got)
 }

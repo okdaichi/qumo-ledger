@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,25 +26,35 @@ func TestGroupID_String(t *testing.T) {
 	}
 }
 
-func TestGroupID_Before(t *testing.T) {
+func TestGroupID_Compare(t *testing.T) {
 	tests := map[string]struct {
 		left, right GroupID
-		expected    bool
+		expected    int
 	}{
-		"same epoch, ascending":  {left: NewGroupID(1, 1), right: NewGroupID(1, 2), expected: true},
-		"same epoch, descending": {left: NewGroupID(1, 2), right: NewGroupID(1, 1), expected: false},
-		"identical":              {left: NewGroupID(1, 1), right: NewGroupID(1, 1), expected: false},
+		"same epoch, ascending":  {left: NewGroupID(1, 1), right: NewGroupID(1, 2), expected: -1},
+		"same epoch, descending": {left: NewGroupID(1, 2), right: NewGroupID(1, 1), expected: 1},
+		"identical":              {left: NewGroupID(1, 1), right: NewGroupID(1, 1), expected: 0},
+		"zero value":             {left: 0, right: 0, expected: 0},
 		// A restart resets the producer's numbering, so a later epoch is later
 		// in time even though its sequence is lower.
-		"later epoch with a lower sequence":    {left: NewGroupID(2, 1), right: NewGroupID(1, 900), expected: false},
-		"earlier epoch with a higher sequence": {left: NewGroupID(1, 900), right: NewGroupID(2, 1), expected: true},
+		"later epoch with a lower sequence":    {left: NewGroupID(2, 1), right: NewGroupID(1, 900), expected: 1},
+		"earlier epoch with a higher sequence": {left: NewGroupID(1, 900), right: NewGroupID(2, 1), expected: -1},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.left.Before(tt.right))
+			assert.Equal(t, tt.expected, tt.left.Compare(tt.right))
 		})
 	}
+}
+
+// Compare is the ordering slices.SortFunc wants, which is the reason it returns
+// three states rather than a bool.
+func TestGroupID_Compare_SortsCommitOrder(t *testing.T) {
+	ids := []GroupID{NewGroupID(2, 1), NewGroupID(1, 900), NewGroupID(1, 2)}
+	slices.SortFunc(ids, GroupID.Compare)
+
+	assert.Equal(t, []GroupID{NewGroupID(1, 2), NewGroupID(1, 900), NewGroupID(2, 1)}, ids)
 }
 
 func TestGroupInfo_MediaEnd(t *testing.T) {

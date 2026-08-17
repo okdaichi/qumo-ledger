@@ -75,7 +75,7 @@ for group, err := range reader.RangeWallclock(ctx, from, to) {
     if err != nil {
         return err   // the error is terminal; nothing follows it
     }
-    frames, _ := reader.ReadGroup(ctx, group)
+    frames, _ := reader.ReadGroup(ctx, group.ObjectKey)
     _ = frames
 }
 

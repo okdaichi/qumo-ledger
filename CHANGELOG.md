@@ -32,13 +32,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point-lookup a serving layer needs — to proxy a segment and to sign its URL —
   and it does not advance the streaming cursor.
 
+- **ledger:** `GroupID.Compare` reports the order of two group identities as
+  -1, 0, or +1, following the convention of `time.Time.Compare` and
+  `netip.Addr.Compare`. It is the shape `slices.SortFunc` and
+  `slices.BinarySearchFunc` want, so a consumer holding rows from more than one
+  source can order them by identity.
+
 ### Changed
+
+- **ledger:** `Reader.ReadGroup` takes the object key rather than the whole
+  `GroupInfo`. It only ever read `ObjectKey`, and the rule that a key must come
+  from a manifest row — never derived, because producer sequences are gappy —
+  is enforced by the store's resolve boundary rather than by the parameter
+  type. Callers pass `group.ObjectKey`.
 
 - The `cmd/qumo-ledger` and `cmd/qumo-stream` binaries were demoted to runnable
   examples under `examples/` (`inspect-follow`, `stream-server`): reference code,
   not supported entrypoints. The repository no longer builds or ships binaries
   (`mage build` now compiles every package), and a client CLI for accessing a
   ledger will live in a separate repository.
+
+### Removed
+
+- **ledger:** `GroupID.Before`, superseded by `GroupID.Compare`. It had no
+  callers, and unlike `time.Time` a `GroupID` is an ordered numeric type, so
+  `a < b` was always available to a caller who wanted a predicate — the method
+  was a second spelling of `<` rather than access to something otherwise
+  unreachable. Keeping it would have invited a matching `After` and a
+  permanently asymmetric API.
 
 ## [0.1.0] - unreleased
 ## [0.1.0] - 2026-08-07
