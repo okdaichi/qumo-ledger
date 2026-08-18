@@ -757,27 +757,25 @@ func TestHandler_InitSegment(t *testing.T) {
 	}
 }
 
-// brokenStore wraps a memory store and fails the Gets its fail function names,
-// standing in for an object-store outage. Its errors quote the key so tests can
-// assert the key never reaches a client.
+// brokenStore wraps a memory store and stands in for an object-store outage:
+// failAll fails every Get, failKey fails one key, and err overrides the error
+// returned. The default error quotes the key, so a leak into a response body is
+// findable. The zero value passes every Get through.
 type brokenStore struct {
 	store.Store
-	fail func(key string) error
+	failAll bool
+	failKey string
+	err     error
 }
 
 func (s *brokenStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
-	if s.fail != nil {
-		if err := s.fail(key); err != nil {
-			return nil, "", err
+	if s.failAll || (s.failKey != "" && key == s.failKey) {
+		if s.err != nil {
+			return nil, "", s.err
 		}
+		return nil, "", fmt.Errorf("store outage on %q", key)
 	}
 	return s.Store.Get(ctx, key)
-}
-
-// outage is the outage error: it quotes the key so a leak into a response body
-// is findable.
-func outage(key string) error {
-	return fmt.Errorf("store outage on %q", key)
 }
 
 // A store outage is a failure to answer, not an absence: serving 404 for a
@@ -787,7 +785,7 @@ func outage(key string) error {
 func TestHandler_StoreFailureIsServerError(t *testing.T) {
 	backend := &brokenStore{Store: memstore.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
-	backend.fail = outage
+	backend.failAll = true
 
 	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
 	require.NoError(t, err)
@@ -837,12 +835,8 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 	}, []byte("frames"))
 	require.NoError(t, err)
 
-	backend.fail = func(key string) error {
-		if strings.HasSuffix(key, "/e000002/log.manifest") {
-			return outage(key)
-		}
-		return nil
-	}
+	// Armed only now: NewEpoch itself reads epoch 2's log back after writing it.
+	backend.failKey = "live/cam1/video/e000002/log.manifest"
 
 	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
 	require.NoError(t, err)
@@ -862,7 +856,7 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 func TestHandler_InternalErrorsAreLogged(t *testing.T) {
 	backend := &brokenStore{Store: memstore.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
-	backend.fail = outage
+	backend.failAll = true
 
 	var buf bytes.Buffer
 	handler, err := stream.NewHandler(fix.track, stream.Options{
@@ -891,7 +885,8 @@ func TestHandler_InternalErrorsAreLogged(t *testing.T) {
 func TestHandler_CanceledRequestNotLogged(t *testing.T) {
 	backend := &brokenStore{Store: memstore.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
-	backend.fail = func(key string) error { return context.Canceled }
+	backend.failAll = true
+	backend.err = context.Canceled
 
 	var buf bytes.Buffer
 	handler, err := stream.NewHandler(fix.track, stream.Options{
