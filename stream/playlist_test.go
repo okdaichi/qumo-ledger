@@ -189,3 +189,44 @@ func assertXMLWellFormed(t *testing.T, body []byte) {
 		require.NoError(t, err)
 	}
 }
+
+// A track with no wallclock anchor anywhere has no instant to name as the
+// presentation start. The MPD omits availabilityStartTime rather than inventing
+// one: a wrong anchor shifts every client's timeline, which is worse than none.
+func TestRenderDASH_NoWallclockAnchor(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, 0),
+		grp(ledger.NewGroupID(1, 1), 180000, 180000, 0),
+	}
+
+	body, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s"})
+	require.NoError(t, err)
+	assertXMLWellFormed(t, body)
+
+	assert.NotContains(t, string(body), "availabilityStartTime",
+		"with no anchor to derive it from, the attribute is absent rather than wrong")
+}
+
+// DASH's coarse content classification projects from the track's MIME type: an
+// audio track adapts as audio, and anything DASH has no class for adapts as
+// application rather than being mislabeled video.
+func TestRenderDASH_ContentType(t *testing.T) {
+	groups := []ledger.GroupInfo{
+		grp(ledger.NewGroupID(1, 0), 0, 180000, wallclock(0)),
+	}
+
+	for mime, want := range map[string]string{
+		"audio/mp4": `contentType="audio"`,
+		"video/mp4": `contentType="video"`,
+		"text/ttml": `contentType="application"`,
+	} {
+		t.Run(mime, func(t *testing.T) {
+			schema := testSchema
+			schema.MIME = mime
+
+			body, err := renderDASH(schema, groups, renderOpts{segExt: ".m4s"})
+			require.NoError(t, err)
+			assert.Contains(t, string(body), want)
+		})
+	}
+}

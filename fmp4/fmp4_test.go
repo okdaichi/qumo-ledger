@@ -330,3 +330,29 @@ func TestFragmentDuration_MalformedSize(t *testing.T) {
 	_, err := fmp4.FragmentDuration(fragment)
 	assert.ErrorIs(t, err, fmp4.ErrNotFound)
 }
+
+// trakV1Tkhd is a trak whose tkhd is version 1: creation and modification times
+// widen to 64 bits, moving track_ID eight bytes further in. Encoders emit this
+// layout for timestamps that do not fit 32 bits.
+func trakV1Tkhd(trackID, timescale uint32) []byte {
+	tkhd := box("tkhd",
+		[]byte{1, 0, 0, 0}, // version 1, flags
+		u64(0), u64(0),     // creation, modification
+		u32(trackID),
+	)
+	return box("trak", tkhd, box("mdia", mdhdV0(timescale)))
+}
+
+// The track_ID sits at a version-dependent offset, and the two tkhd layouts mix
+// freely in one moov — an encoder may write v1 for one track and v0 for another.
+func TestTimescaleForTrack_Version1Tkhd(t *testing.T) {
+	init := box("moov", trak(1, 57600), trakV1Tkhd(2, 48000))
+
+	ts, err := fmp4.TimescaleForTrack(init, 2)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(48000), ts, "the ID is read from behind the 64-bit times")
+
+	ts, err = fmp4.TimescaleForTrack(init, 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(57600), ts, "the v0 sibling still resolves")
+}
