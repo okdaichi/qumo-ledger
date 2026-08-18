@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"slices"
@@ -39,6 +40,7 @@ type Handler struct {
 	window   int
 
 	epochWindow int
+	logger      *slog.Logger
 }
 
 // ErrInitRequired reports that the track's container cannot be played without an
@@ -103,6 +105,12 @@ type Options struct {
 	// is next built. Earlier epochs stay addressable; they are only absent from
 	// the manifest.
 	EpochWindow int
+
+	// Logger receives internal errors before they are answered with a generic
+	// 500. Those errors carry object keys and store paths, which do not belong
+	// in a response body — the log is where the detail survives. Nil means no
+	// logging: the responses are the same either way.
+	Logger *slog.Logger
 }
 
 // InitSegment is the fMP4 initialization segment (ftyp + moov). Supply Bytes —
@@ -151,6 +159,11 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		resolver = ProxyResolver{}
 	}
 
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+
 	return &Handler{
 		track:    track,
 		schema:   info.TrackSchema,
@@ -161,6 +174,7 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		window:   opts.Window,
 
 		epochWindow: opts.EpochWindow,
+		logger:      logger,
 	}, nil
 }
 
@@ -179,16 +193,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// internalError answers a generic 500 and logs what actually failed. The
+// errors on these paths carry object keys and store paths — detail a client
+// has no use for and should not see — so the record is where it survives.
+func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	h.logger.Error(op, "method", r.Method, "url", r.URL.Path, "err", err)
+	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+}
+
 // serveHLS renders and writes the HLS media playlist.
 func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
 	window, err := h.gather(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "gather playlist window", err)
 		return
 	}
 	body, err := renderHLS(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "render playlist", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -199,12 +221,12 @@ func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveDASH(w http.ResponseWriter, r *http.Request) {
 	window, err := h.gather(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "gather manifest window", err)
 		return
 	}
 	body, err := renderDASH(h.schema, window.groups, h.renderOpts(window))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "render manifest", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/dash+xml")
@@ -234,21 +256,27 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 
 	reader, err := h.track.Reader(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "open reader", err)
 		return
 	}
 
 	group, err := reader.Lookup(r.Context(), id)
 	if err != nil {
 		// No committed group for the id: the segment was never written, or the
-		// client is asking ahead of the tip.
-		http.NotFound(w, r)
+		// client is asking ahead of the tip. Anything else is a failure to
+		// answer, not an absence — a 404 here would tell a player to prune a
+		// segment that exists.
+		if errors.Is(err, ledger.ErrGroupNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		h.internalError(w, r, "lookup segment", err)
 		return
 	}
 
 	url, err := h.resolver.ResolveSegment(r.Context(), group)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "resolve segment", err)
 		return
 	}
 	if url != "" {
@@ -258,7 +286,7 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 
 	data, err := reader.ReadGroup(r.Context(), group.ObjectKey)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.internalError(w, r, "read segment", err)
 		return
 	}
 

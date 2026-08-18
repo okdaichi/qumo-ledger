@@ -146,9 +146,15 @@ type GroupInfo struct {
 	// cannot be correlated across tracks.
 	Wallclock int64 `json:"wallclock,omitempty"`
 
-	// ObjectCount is the number of objects (frames) the group contains. It
-	// lets a reader confirm it consumed the whole group, and lets an object
-	// index be range-checked without fetching the payload.
+	// ObjectCount is the number of objects (frames) the group contains, as
+	// counted by the producer.
+	//
+	// It is descriptive, not a guarantee: the writer stores the producer's
+	// figure as-is and nothing on the read path verifies it against the
+	// payload. Like [GroupInfo.Size], it answers a question without a fetch —
+	// whether an object index falls inside the group, whether the frames just
+	// read amount to the whole of it — which is the manifest's substitute for
+	// per-frame indexing, whose metadata would grow with the frame rate.
 	ObjectCount uint64 `json:"objectCount,omitempty"`
 
 	// ObjectKey is the storage key of the payload. Readers must take it from

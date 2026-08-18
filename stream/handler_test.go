@@ -1,8 +1,11 @@
 package stream_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 	"github.com/okdaichi/qumo-ledger/stream"
 	"github.com/stretchr/testify/assert"
@@ -745,4 +749,119 @@ func TestHandler_InitSegment(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(body), "init.m4s", "%s must reference the init segment", name)
 	}
+}
+
+// brokenStore wraps a memory store and starts failing every Get once tripped,
+// standing in for an object-store outage. Its errors quote the key so tests can
+// assert the key never reaches a client.
+type brokenStore struct {
+	store.Store
+	tripped bool
+}
+
+func (s *brokenStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	if s.tripped {
+		return nil, "", fmt.Errorf("store outage on %q", key)
+	}
+	return s.Store.Get(ctx, key)
+}
+
+// newBrokenTrackFixture builds a one-segment track over a store that can be
+// tripped mid-test, returning the handler inputs.
+func newBrokenTrackFixture(tb testing.TB) (track *ledger.Track, backend *brokenStore, id string) {
+	tb.Helper()
+	ctx := context.Background()
+
+	backend = &brokenStore{Store: memstore.New()}
+	track, err := ledger.Create(ctx, backend, "live/cam1/video", ledger.TrackSchema{
+		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
+		MIME: "video/mp4", Encoding: "fmp4",
+	}, ledger.Config{})
+	require.NoError(tb, err)
+
+	writer, err := track.Writer(ctx)
+	require.NoError(tb, err)
+	meta, err := writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 1),
+		MediaTime: 0,
+		Duration:  180000,
+	}, []byte("frames"))
+	require.NoError(tb, err)
+	return track, backend, meta.ID.String()
+}
+
+// A store outage is a failure to answer, not an absence: serving 404 for a
+// segment that exists would tell a player to prune it, so only a genuinely
+// missing group maps to 404 and everything else is a 500.
+func TestHandler_StoreFailureIsServerError(t *testing.T) {
+	track, backend, id := newBrokenTrackFixture(t)
+	backend.tripped = true
+
+	handler, err := stream.NewHandler(track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, path := range map[string]string{
+		"segment":  "/" + id + ".m4s",
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+				"a store outage must not read as a missing segment")
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.NotContains(t, string(body), "live/cam1/",
+				"object keys from store errors stay out of the response")
+		})
+	}
+}
+
+// With a logger supplied, the generic 500 is accompanied by a record carrying
+// what broke and which request broke it — the log is the only place the detail
+// survives. Without one, the responses are the same and nothing is logged.
+func TestHandler_InternalErrorsAreLogged(t *testing.T) {
+	track, backend, id := newBrokenTrackFixture(t)
+	backend.tripped = true
+
+	var buf bytes.Buffer
+	handler, err := stream.NewHandler(track, stream.Options{
+		InitSegment: testInit,
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + id + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "store outage", "the underlying error is logged")
+	assert.Contains(t, logged, "GET", "the record names the method")
+	assert.Contains(t, logged, "/"+id+".m4s", "the record names the request path")
+}
+
+// An absent segment stays a 404 however the store is doing: the client asked
+// ahead of the tip, or for a group that was never written.
+func TestHandler_AbsentSegmentStillNotFound(t *testing.T) {
+	track, _, _ := newBrokenTrackFixture(t)
+
+	handler, err := stream.NewHandler(track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/e000001-g00000099.m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
