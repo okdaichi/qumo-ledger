@@ -196,8 +196,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // internalError answers a generic 500 and logs what actually failed. The
 // errors on these paths carry object keys and store paths — detail a client
 // has no use for and should not see — so the record is where it survives.
+//
+// A canceled context is the client leaving (a seek, a variant switch) and is
+// not logged: routine player churn must not flood the record of real failures.
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
-	h.logger.Error(op, "method", r.Method, "url", r.URL.Path, "err", err)
+	if !errors.Is(err, context.Canceled) {
+		h.logger.Error(op, "method", r.Method, "url", r.URL.Path, "error", err)
+	}
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
 
@@ -263,10 +268,12 @@ func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) {
 	group, err := reader.Lookup(r.Context(), id)
 	if err != nil {
 		// No committed group for the id: the segment was never written, or the
-		// client is asking ahead of the tip. Anything else is a failure to
-		// answer, not an absence — a 404 here would tell a player to prune a
-		// segment that exists.
-		if errors.Is(err, ledger.ErrGroupNotFound) {
+		// client is asking ahead of the tip. A missing epoch log is the same
+		// verdict — the ledger treats it as a creation that did not finish, so
+		// no group in that epoch can exist. Anything else is a failure to
+		// answer rather than an absence, and a 404 here would tell a player to
+		// prune a segment that exists.
+		if errors.Is(err, ledger.ErrGroupNotFound) || errors.Is(err, ledger.ErrEpochNotFound) {
 			http.NotFound(w, r)
 			return
 		}
