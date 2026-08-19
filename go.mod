@@ -1,6 +1,6 @@
 module github.com/okdaichi/qumo-ledger
 
-go 1.26.1
+go 1.26.0
 
 require github.com/stretchr/testify v1.11.1
 
