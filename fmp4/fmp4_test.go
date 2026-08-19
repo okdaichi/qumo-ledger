@@ -356,3 +356,127 @@ func TestTimescaleForTrack_Version1Tkhd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint32(57600), ts, "the v0 sibling still resolves")
 }
+
+// --- walkTrak coverage gaps -------------------------------------------------
+
+// A v1 tkhd whose track_ID does not match must be skipped so the walk continues
+// to the next trak. The negative match is as important as the positive one:
+// getting the offset wrong would read garbage as the ID and either falsely match
+// or skip a genuine match.
+func TestTimescaleForTrack_Version1Tkhd_NonMatch(t *testing.T) {
+	// Two v1-tkhd tracks; only track 2 exists.
+	init := box("moov", trakV1Tkhd(1, 57600), trakV1Tkhd(2, 48000))
+
+	ts, err := fmp4.TimescaleForTrack(init, 2)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(48000), ts)
+
+	_, err = fmp4.TimescaleForTrack(init, 3)
+	assert.ErrorIs(t, err, fmp4.ErrNotFound,
+		"a track_ID present in neither v1 trak must not match")
+}
+
+// An mdhd whose version is neither 0 nor 1 is unrecognized, and the walk must
+// report the track as absent rather than interpret unknown layout.
+func TestTimescale_MdhdVersion2(t *testing.T) {
+	mdhd := box("mdhd",
+		[]byte{2, 0, 0, 0}, // version 2, flags
+		u64(0), u64(0),     // creation, modification (64-bit for v1+)
+		u32(48000),
+		u64(0),
+	)
+	init := box("moov", box("trak", box("mdia", mdhd)))
+
+	_, err := fmp4.Timescale(init)
+	assert.ErrorIs(t, err, fmp4.ErrNotFound)
+}
+
+// A trak with an mdia but no tkhd has no identity. TimescaleForTrack must skip
+// it when a specific track_ID is requested rather than matching the zero value.
+func TestTimescaleForTrack_NoTkhd(t *testing.T) {
+	// A trak without a tkhd — only mdia with a known timescale.
+	init := box("moov",
+		box("trak", box("mdia", mdhdV0(57600))),
+		trak(1, 48000),
+	)
+
+	// Asking for track 1 must find the trak that HAS a tkhd.
+	ts, err := fmp4.TimescaleForTrack(init, 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(48000), ts,
+		"the trak without a tkhd must not match track_ID 0")
+}
+
+// --- Fuzz tests --------------------------------------------------------------
+
+func FuzzTimescale(f *testing.F) {
+	// Seed with every valid init from the table tests so the fuzzer starts
+	// from known-good inputs and mutates from there.
+	f.Add(initSegment(mdhdV0(57600)))
+	f.Add(initSegment(mdhdV1(90000)))
+	f.Add(box("moov", trak(1, 57600), trak(2, 48000)))
+	f.Add(box("moov", trak(1, 57600), trakV1Tkhd(2, 48000)))
+	// Edge cases that must not panic.
+	f.Add([]byte{})
+	f.Add(box("moov"))
+	f.Add(box("moov", box("trak")))
+	f.Add(box("moov", box("trak", box("mdia"))))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Fuzz target: must never panic on any input.
+		_, _ = fmp4.Timescale(data)         //nolint:errcheck
+		_, _ = fmp4.TimescaleForTrack(data, 1) //nolint:errcheck
+	})
+}
+
+func FuzzFragmentDuration(f *testing.F) {
+	// Seed with representative fragments.
+	f.Add(box("moof",
+		box("traf",
+			box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920)),
+			box("trun", []byte{0, 0, 0, 0x01}, u32(30), u32(0)),
+		),
+	))
+	f.Add(box("moof",
+		box("traf",
+			box("tfhd", []byte{0, 0, 0, 0}, u32(1)),
+			box("trun", []byte{0, 0, 0x03, 0x01}, u32(2), u32(0), u32(100), u32(500), u32(200), u32(500)),
+		),
+	))
+	// Edge cases.
+	f.Add([]byte{})
+	f.Add(box("moof"))
+	f.Add(box("moof", box("traf")))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = fmp4.FragmentDuration(data) //nolint:errcheck
+	})
+}
+
+// --- Benchmarks --------------------------------------------------------------
+
+func BenchmarkTimescale(b *testing.B) {
+	init := initSegment(mdhdV0(90000))
+	b.ResetTimer()
+	for range b.N {
+		_, _ = fmp4.Timescale(init)
+	}
+}
+
+func BenchmarkTimescaleForTrack(b *testing.B) {
+	init := box("moov", trak(1, 57600), trakV1Tkhd(2, 48000))
+	b.ResetTimer()
+	for range b.N {
+		_, _ = fmp4.TimescaleForTrack(init, 2)
+	}
+}
+
+func BenchmarkFragmentDuration(b *testing.B) {
+	tfhd := box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920))
+	trun := box("trun", []byte{0, 0, 0, 0x01}, u32(30), u32(0))
+	fragment := box("moof", box("traf", tfhd, trun))
+	b.ResetTimer()
+	for range b.N {
+		_, _ = fmp4.FragmentDuration(fragment)
+	}
+}
