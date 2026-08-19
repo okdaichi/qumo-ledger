@@ -739,3 +739,88 @@ func TestReader_Next_SpansEpochs(t *testing.T) {
 		NewGroupID(2, 0), NewGroupID(2, 1),
 	}, ids, "a reader crosses the epoch boundary in ID order")
 }
+
+// A track handle caches the root it was opened against: a follower holding one
+// does not see a producer's restart until it Reloads, and a reader built after
+// the reload spans the new lifetime.
+func TestTrack_RootAndReload(t *testing.T) {
+	objects := memstore.New()
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
+	require.NoError(t, err)
+
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("epoch 1"))
+	require.NoError(t, err)
+	assert.Equal(t, testTrack, w.Track(), "a writer reports the track it writes")
+
+	follower, err := Open(t.Context(), objects, testTrack, Config{})
+	require.NoError(t, err)
+	root := follower.Root()
+	assert.Equal(t, TrackPath(testTrack), root.Track)
+	assert.Equal(t, uint32(90000), root.Timescale)
+	assert.Equal(t, uint64(1), root.LatestEpoch)
+
+	require.NoError(t, w.NewEpoch(t.Context()))
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("epoch 2"))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(1), follower.Root().LatestEpoch,
+		"the cached root does not move on its own")
+	require.NoError(t, follower.Reload(t.Context()))
+	assert.Equal(t, uint64(2), follower.Root().LatestEpoch,
+		"Reload re-reads the root")
+
+	r, err := follower.Reader(t.Context())
+	require.NoError(t, err)
+	r.SeekStart()
+	var ids []GroupID
+	for {
+		g, err := r.Next(t.Context())
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		ids = append(ids, g.ID)
+	}
+	assert.Equal(t, []GroupID{NewGroupID(1, 0), NewGroupID(2, 0)}, ids,
+		"a reader from the reloaded handle spans the new lifetime")
+}
+
+// A group with no duration is a point: a range includes it exactly when its
+// anchor falls inside the window, where a group with an extent would also reach
+// backward from an earlier anchor.
+func TestReader_RangeMedia_PointGroups(t *testing.T) {
+	objects := memstore.New()
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
+	require.NoError(t, err)
+
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+	for sequence := range uint64(3) {
+		point := testGroup(t, sequence)
+		point.Duration = 0
+		_, err := w.AppendGroup(t.Context(), point, []byte("payload"))
+		require.NoError(t, err)
+	}
+
+	r := openReader(t, objects)
+	require.NoError(t, r.Refresh(t.Context()))
+
+	// Anchors sit at 0, 180k, and 360k.
+	tests := map[string]struct {
+		from, to int64
+		expected []uint64
+	}{
+		"window between anchors":   {from: 100_000, to: 400_000, expected: []uint64{1, 2}},
+		"anchor exactly at from":   {from: 180_000, to: 360_000, expected: []uint64{1}},
+		"anchor exactly at to":     {from: 0, to: 180_000, expected: []uint64{0}},
+		"entirely after the track": {from: 400_000, to: 500_000, expected: nil},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, collect(t, r.RangeMedia(t.Context(), tt.from, tt.to)))
+		})
+	}
+}
