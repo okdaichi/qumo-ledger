@@ -1,8 +1,11 @@
 package stream_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 	"github.com/okdaichi/qumo-ledger/stream"
 	"github.com/stretchr/testify/assert"
@@ -45,10 +49,16 @@ func newTrackFixtureEncoding(tb testing.TB, encoding string) trackFixture {
 
 func newTrackFixtureGroups(tb testing.TB, encoding string, groups int64) trackFixture {
 	tb.Helper()
+	return newTrackFixtureStore(tb, encoding, groups, memstore.New())
+}
+
+// newTrackFixtureStore is newTrackFixtureGroups over a caller-supplied backend,
+// for tests that need to instrument the store mid-test.
+func newTrackFixtureStore(tb testing.TB, encoding string, groups int64, backend store.Store) trackFixture {
+	tb.Helper()
 	ctx := context.Background()
 
-	store := memstore.New()
-	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
+	track, err := ledger.Create(ctx, backend, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: encoding,
 	}, ledger.Config{})
@@ -745,4 +755,152 @@ func TestHandler_InitSegment(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(body), "init.m4s", "%s must reference the init segment", name)
 	}
+}
+
+// brokenStore wraps a memory store and stands in for an object-store outage:
+// failAll fails every Get, failKey fails one key, and err overrides the error
+// returned. The default error quotes the key, so a leak into a response body is
+// findable. The zero value passes every Get through.
+type brokenStore struct {
+	store.Store
+	failAll bool
+	failKey string
+	err     error
+}
+
+func (s *brokenStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	if s.failAll || (s.failKey != "" && key == s.failKey) {
+		if s.err != nil {
+			return nil, "", s.err
+		}
+		return nil, "", fmt.Errorf("store outage on %q", key)
+	}
+	return s.Store.Get(ctx, key)
+}
+
+// A store outage is a failure to answer, not an absence: serving 404 for a
+// segment that exists would tell a player to prune it. The body is exactly the
+// status text — the store errors underneath carry object keys and store paths,
+// which have no business in a response.
+func TestHandler_StoreFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: memstore.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failAll = true
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, path := range map[string]string{
+		"segment":  "/" + fix.metas[0].ID.String() + ".m4s",
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+				"a store outage must not read as a missing segment")
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			// http.Error terminates with a newline; the point is that the body
+			// is exactly this and nothing of the store error.
+			assert.Equal(t, http.StatusText(http.StatusInternalServerError)+"\n", string(body))
+		})
+	}
+}
+
+// The Lookup split itself, which the outage-all fixture cannot reach: Reader
+// construction loads only epoch 1's log, so failing epoch 2's log key lets the
+// reader open cleanly and makes Lookup fail for a reason that is neither
+// ErrGroupNotFound nor the open — the arm that must answer 500 rather than 404.
+func TestHandler_LookupFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: memstore.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 1, backend)
+
+	// A second lifetime, so the fixture's groups sit in epoch 1 and a segment
+	// in epoch 2 forces Lookup to fetch a log the open never touched.
+	ctx := context.Background()
+	writer, err := fix.track.Writer(ctx)
+	require.NoError(t, err)
+	require.NoError(t, writer.NewEpoch(ctx))
+	restarted, err := writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 1),
+		MediaTime: 0,
+		Duration:  180000,
+	}, []byte("frames"))
+	require.NoError(t, err)
+
+	// Armed only now: NewEpoch itself reads epoch 2's log back after writing it.
+	backend.failKey = "live/cam1/video/e000002/log.manifest"
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + restarted.ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+		"a Lookup failure that is not an absence answers 500")
+}
+
+// With a logger supplied, the generic 500 is accompanied by a record carrying
+// what broke and which request broke it — the log is the only place the detail
+// survives.
+func TestHandler_InternalErrorsAreLogged(t *testing.T) {
+	backend := &brokenStore{Store: memstore.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failAll = true
+
+	var buf bytes.Buffer
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	logged := buf.String()
+	assert.Contains(t, logged, `error="`, "the error is logged under the attr name the ledger's records use")
+	assert.Contains(t, logged, "store outage", "the underlying error is in the record, wrapping and all")
+	assert.Contains(t, logged, "GET", "the record names the method")
+	assert.Contains(t, logged, "/"+fix.metas[0].ID.String()+".m4s", "the record names the request path")
+}
+
+// A canceled request is player churn — a seek, a variant switch — not a
+// failure: the handler still answers 500, but writes no record, so the log the
+// option carries stays a signal of real outages.
+func TestHandler_CanceledRequestNotLogged(t *testing.T) {
+	backend := &brokenStore{Store: memstore.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failAll = true
+	backend.err = context.Canceled
+
+	var buf bytes.Buffer
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	assert.Empty(t, buf.String(), "routine client churn writes no record")
 }

@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **stream:** `Handler` answers internal failures with a generic 500 instead of
+  echoing the error to the client, and records the detail — the error, the
+  method, the request path — through the new `Options.Logger` when one is
+  supplied (nil logs nothing; a canceled request logs nothing either way, being
+  player churn rather than a failure). Store errors carry object keys and store
+  paths, which have no business in a response body. A segment whose `Lookup`
+  fails for any reason other than an absent group — or an epoch log that was
+  never written, which the ledger treats as a creation that did not finish — is
+  now a 500 rather than a 404: a store outage must not read as an absent
+  segment, which a player would prune.
+
+- **ledger:** `GroupInfo.ObjectCount` is documented as advisory, matching
+  `Size`. It is the producer's figure, stored as-is and never verified against
+  the payload — useful exactly where the bytes are not at hand, not a promise
+  the ledger checks.
+
 - **ledger:** `Reader.ReadGroup` takes the object key rather than the whole
   `GroupInfo`. It only ever read `ObjectKey`, and the rule that a key must come
   from a manifest row — never derived, because producer sequences are gappy —

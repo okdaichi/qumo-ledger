@@ -52,7 +52,7 @@ func run(args []string) error {
 		return err
 	}
 
-	opts := stream.Options{}
+	opts := stream.Options{Logger: slog.Default()}
 	if *init != "" {
 		bytes, err := os.ReadFile(*init)
 		if err != nil {
