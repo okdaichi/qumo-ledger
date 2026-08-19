@@ -1,0 +1,964 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>stream: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/okdaichi/qumo-ledger/stream/dash.go (98.1%)</option>
+				
+				<option value="file1">github.com/okdaichi/qumo-ledger/stream/handler.go (90.1%)</option>
+				
+				<option value="file2">github.com/okdaichi/qumo-ledger/stream/hls.go (97.3%)</option>
+				
+				<option value="file3">github.com/okdaichi/qumo-ledger/stream/resolver.go (100.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">no coverage</span>
+				<span class="cov1">low coverage</span>
+				<span class="cov2">*</span>
+				<span class="cov3">*</span>
+				<span class="cov4">*</span>
+				<span class="cov5">*</span>
+				<span class="cov6">*</span>
+				<span class="cov7">*</span>
+				<span class="cov8">*</span>
+				<span class="cov9">*</span>
+				<span class="cov10">high coverage</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package stream
+
+import (
+        "fmt"
+        "strings"
+        "time"
+
+        "github.com/okdaichi/qumo-ledger/ledger"
+)
+
+// renderDASH builds a dynamic Media Presentation Description (MPD) for groups in
+// commit order.
+//
+// The presentation is dynamic — it grows as groups land, mirroring an HLS EVENT
+// playlist — and lists every committed segment, since the ledger never deletes.
+// Segments are listed explicitly by their GroupID URL (a SegmentList of
+// SegmentURL entries), so the same segment handler serves HLS and DASH; DASH
+// offers no template variable for a producer's own id, so the list is explicit
+// rather than templated. A SegmentTimeline alongside carries each segment's
+// duration and resets @t at each epoch boundary, where media time restarts.
+func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts renderOpts) ([]byte, error) <span class="cov7" title="13">{
+        for _, g := range groups </span><span class="cov9" title="32">{
+                if g.Duration &lt;= 0 </span><span class="cov1" title="1">{
+                        return nil, fmt.Errorf("stream: group %s has no duration; DASH needs an @d", g.ID)
+                }</span>
+        }
+
+        <span class="cov7" title="12">buffer := maxSegmentSeconds(schema, groups)
+
+        var b strings.Builder
+        b.WriteString(`&lt;?xml version="1.0" encoding="UTF-8"?&gt;` + "\n")
+        b.WriteString(`&lt;MPD xmlns="urn:mpeg:dash:schema:mpd:2011" ` +
+                `type="dynamic" ` +
+                `profiles="urn:mpeg:dash:profile:isoff-live:2011"`)
+        if ast := dashAvailabilityStartTime(schema, groups); ast != "" </span><span class="cov6" title="11">{
+                fmt.Fprintf(&amp;b, ` availabilityStartTime="%s"`, ast)
+        }</span>
+        <span class="cov7" title="12">fmt.Fprintf(&amp;b, ` minimumUpdatePeriod="%s"`, dashDuration(2))
+        fmt.Fprintf(&amp;b, ` minBufferTime="%s"`, dashDuration(buffer))
+        fmt.Fprintf(&amp;b, ` maxSegmentDuration="%s"`, dashDuration(buffer))
+        // A windowed presentation only lists its most recent segments, which is
+        // exactly what timeShiftBufferDepth describes: how far back a client may
+        // seek. Without it a client may assume the whole presentation is listed.
+        if opts.sliding </span><span class="cov1" title="1">{
+                fmt.Fprintf(&amp;b, ` timeShiftBufferDepth="%s"`, dashDuration(windowSeconds(schema, groups)))
+        }</span>
+        <span class="cov7" title="12">b.WriteString("&gt;\n")
+
+        b.WriteString(`  &lt;Period id="0" start="PT0S"&gt;` + "\n")
+        fmt.Fprintf(&amp;b, `    &lt;AdaptationSet id="0" mimeType="%s" contentType="%s" segmentAlignment="true"&gt;`+"\n",
+                schema.MIME, dashContentType(schema.MIME))
+        b.WriteString(`      &lt;Representation id="0"&gt;` + "\n")
+        fmt.Fprintf(&amp;b, `        &lt;SegmentList timescale="%d"&gt;`+"\n", schema.Timescale)
+        if opts.initURI != "" </span><span class="cov5" title="7">{
+                fmt.Fprintf(&amp;b, `          &lt;Initialization sourceURL="%s"/&gt;`+"\n", opts.initURI)
+        }</span>
+
+        // SegmentTimeline: @t resets at each epoch boundary; otherwise the timeline
+        // continues from the previous segment's end. Entries correspond 1:1, in
+        // order, with the SegmentURL list below.
+        <span class="cov7" title="12">b.WriteString("          &lt;SegmentTimeline&gt;\n")
+        var prevEpoch uint64
+        for i, g := range groups </span><span class="cov9" title="31">{
+                if i == 0 || g.ID.Epoch() != prevEpoch </span><span class="cov7" title="13">{
+                        fmt.Fprintf(&amp;b, `            &lt;S t="%d" d="%d"/&gt;`+"\n", g.MediaTime, g.Duration)
+                }</span> else<span class="cov8" title="18"> {
+                        fmt.Fprintf(&amp;b, `            &lt;S d="%d"/&gt;`+"\n", g.Duration)
+                }</span>
+                <span class="cov9" title="31">prevEpoch = g.ID.Epoch()</span>
+        }
+        <span class="cov7" title="12">b.WriteString("          &lt;/SegmentTimeline&gt;\n")
+
+        for _, g := range groups </span><span class="cov9" title="31">{
+                fmt.Fprintf(&amp;b, `          &lt;SegmentURL media="%s%s"/&gt;`+"\n", g.ID, opts.segExt)
+        }</span>
+
+        <span class="cov7" title="12">b.WriteString("        &lt;/SegmentList&gt;\n")
+        b.WriteString("      &lt;/Representation&gt;\n")
+        b.WriteString("    &lt;/AdaptationSet&gt;\n")
+        b.WriteString("  &lt;/Period&gt;\n")
+        b.WriteString("&lt;/MPD&gt;\n")
+
+        return []byte(b.String()), nil</span>
+}
+
+// dashAvailabilityStartTime is the wallclock the presentation began: the first
+// anchored group's wallclock, less its own offset along the media timeline. A
+// dynamic MPD needs one to relate media time to the wall clock; without any
+// anchor there is none to report.
+//
+// Subtracting the media time is what keeps it stable. Reporting the anchor
+// itself names when the *window* began, which for a windowed manifest moves
+// every time the window rolls — and a moving availabilityStartTime shifts the
+// whole timeline under a client on each refresh. Any group in an epoch yields
+// the same answer, so the value holds as segments come and go.
+func dashAvailabilityStartTime(schema ledger.TrackSchema, groups []ledger.GroupInfo) string <span class="cov7" title="12">{
+        for _, g := range groups </span><span class="cov7" title="13">{
+                if g.Wallclock == 0 </span><span class="cov2" title="2">{
+                        continue</span>
+                }
+                <span class="cov6" title="11">start := time.Unix(0, g.Wallclock).Add(-mediaOffset(g.MediaTime, schema.Timescale))
+                return start.UTC().Format(time.RFC3339Nano)</span>
+        }
+        <span class="cov1" title="1">return ""</span>
+}
+
+// mediaOffset converts a media-time extent into a duration. Seconds and
+// remainder are converted separately so a long presentation cannot overflow the
+// nanosecond multiply.
+func mediaOffset(mediaTime int64, timescale uint32) time.Duration <span class="cov6" title="11">{
+        if timescale == 0 </span><span class="cov0" title="0">{
+                return 0
+        }</span>
+        <span class="cov6" title="11">ts := int64(timescale)
+        seconds := mediaTime / ts
+        remainder := mediaTime % ts
+        return time.Duration(seconds)*time.Second +
+                time.Duration(remainder*int64(time.Second)/ts)</span>
+}
+
+// dashDuration formats a whole-second extent as an ISO 8601 period.
+func dashDuration(seconds int) string <span class="cov10" title="37">{
+        return fmt.Sprintf("PT%dS", seconds)
+}</span>
+
+// dashContentType projects a MIME type onto DASH's coarse content classification.
+func dashContentType(mime string) string <span class="cov7" title="12">{
+        switch </span>{
+        case strings.HasPrefix(mime, "video/"):<span class="cov6" title="10">
+                return "video"</span>
+        case strings.HasPrefix(mime, "audio/"):<span class="cov1" title="1">
+                return "audio"</span>
+        default:<span class="cov1" title="1">
+                return "application"</span>
+        }
+}
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package stream
+
+import (
+        "context"
+        "errors"
+        "fmt"
+        "io"
+        "log/slog"
+        "net/http"
+        "path"
+        "slices"
+        "strconv"
+        "strings"
+
+        "github.com/okdaichi/qumo-ledger/ledger"
+)
+
+// Handler serves one track over HTTP as both HLS and DASH. It implements
+// [http.Handler] but owns no listener and no lifecycle: drop it into an
+// [http.Server], the way [http.FileServer] is used. It routes by the request
+// URL's base name, so it is mount-point-agnostic — mount it at the track's path:
+//
+//        mux.Handle("/"+string(track)+"/", handler)
+//
+//        .../playlist.m3u8 (or any *.m3u8)  the HLS media playlist
+//        .../manifest.mpd   (or any *.mpd)   the DASH MPD
+//        .../&lt;group-id&gt;.&lt;ext&gt;                one segment — shared by both formats
+//        .../init.&lt;ext&gt;                      the init segment, when supplied
+//
+// A fresh [*ledger.Reader] is opened per request. A Reader is single-consumer,
+// and concurrent consumers each opening their own is the documented cheap
+// pattern, so the handler does that rather than share one.
+type Handler struct {
+        track    *ledger.Track
+        schema   ledger.TrackSchema
+        resolver SegmentResolver
+        init     InitSegment
+        segExt   string
+        segMIME  string
+        window   int
+
+        epochWindow int
+        logger      *slog.Logger
+}
+
+// ErrInitRequired reports that the track's container cannot be played without an
+// initialization segment and [Options.InitSegment] was left zero. Segments of a
+// fragmented-MP4 track are moof+mdat: the codec configuration lives in the moov
+// of a separate init segment, so a manifest without one is unplayable by every
+// client. Failing here is deliberate — the manifests would otherwise render
+// without #EXT-X-MAP (or DASH @initialization) and be served as a valid 200,
+// turning a misconfiguration into a silent playback failure.
+var ErrInitRequired = errors.New("stream: init segment required for this encoding")
+
+// Options configures a [Handler]. The zero value is usable alongside a track
+// whose container is self-initializing: the resolver proxies, segments take the
+// schema's extension and MIME, and no init segment is emitted. A
+// fragmented-MP4 track additionally requires InitSegment; see [ErrInitRequired].
+type Options struct {
+        // Resolver decides redirect-versus-proxy per segment. Nil means
+        // [ProxyResolver].
+        Resolver SegmentResolver
+
+        // InitSegment, when set, is emitted as HLS #EXT-X-MAP and DASH
+        // @initialization. Leave zero for self-initializing containers (MPEG-TS).
+        InitSegment InitSegment
+
+        // SegmentExt overrides the schema-derived segment extension (".m4s" for fmp4).
+        SegmentExt string
+
+        // SegmentMIME overrides the schema-derived segment MIME type.
+        SegmentMIME string
+
+        // Window caps how many of the most recent segments a manifest lists. Zero
+        // lists every committed segment.
+        //
+        // A live track runs indefinitely, so an unwindowed manifest grows without
+        // bound: an hour of one-second segments is 3,600 entries re-rendered on
+        // every request, and a player re-fetches the whole thing each reload. A
+        // window bounds the response and turns the HLS playlist from EVENT (append
+        // only, whole history) into a sliding live playlist.
+        //
+        // It bounds the manifest, not the read: the handler still walks the track to
+        // count what precedes the window, because a sliding playlist's
+        // EXT-X-MEDIA-SEQUENCE has to be exact. Segments outside the window remain
+        // addressable — the ledger deletes nothing, so a client that kept a URL can
+        // still fetch it.
+        Window int
+
+        // EpochWindow caps how many producer lifetimes a manifest lists, newest
+        // first. Zero lists every one; 1 lists only the current session.
+        //
+        // A producer that restarts opens a new epoch, and everything before it is
+        // media from a session that has ended. Left listed, those segments are what
+        // a player opening the stream starts on — it plays the previous session
+        // through before reaching the current one — and [Options.Window] only
+        // clears them once enough new segments have pushed them out.
+        //
+        // Above 1 keeps recent lifetimes listed, which suits a producer that
+        // restarts briefly: a viewer already playing the old epoch reaches the
+        // restart across a discontinuity instead of finding its segments gone.
+        //
+        // Lifetimes are counted per request from the newest group the walk finds,
+        // so a restart takes effect on the next manifest rather than when a handler
+        // is next built. Earlier epochs stay addressable; they are only absent from
+        // the manifest.
+        EpochWindow int
+
+        // Logger receives internal errors before they are answered with a generic
+        // 500. Those errors carry object keys and store paths, which do not belong
+        // in a response body — the log is where the detail survives. Nil means no
+        // logging: the responses are the same either way.
+        Logger *slog.Logger
+}
+
+// InitSegment is the fMP4 initialization segment (ftyp + moov). Supply Bytes —
+// served at /init.&lt;ext&gt; and referenced from both manifests — or URL, referenced
+// as-is and not served. Leave zero for self-initializing containers such as
+// MPEG-TS.
+type InitSegment struct {
+        // Bytes, when set, is served at the init URL and referenced from both
+        // manifests. URL is ignored when Bytes is set.
+        Bytes []byte
+
+        // URL, when set and Bytes is empty, is referenced from both manifests and is
+        // not served by this handler — for an init segment already reachable at a
+        // signed object URL.
+        URL string
+}
+
+// NewHandler builds a [Handler] over track. It reads the track root once to
+// derive the segment extension and MIME from the schema; the matching Options
+// fields override them.
+//
+// It returns [ErrInitRequired] when the schema's container needs an
+// initialization segment and Options.InitSegment is zero.
+func NewHandler(track *ledger.Track, opts Options) (*Handler, error) <span class="cov7" title="35">{
+        if track == nil </span><span class="cov0" title="0">{
+                return nil, errors.New("stream: nil track")
+        }</span>
+
+        <span class="cov7" title="35">info := track.Root()
+
+        if requiresInit(info.TrackSchema) &amp;&amp; opts.InitSegment.Bytes == nil &amp;&amp; opts.InitSegment.URL == "" </span><span class="cov1" title="1">{
+                return nil, fmt.Errorf("%w: encoding %q", ErrInitRequired, info.TrackSchema.Encoding)
+        }</span>
+
+        <span class="cov7" title="34">segExt := opts.SegmentExt
+        if segExt == "" </span><span class="cov7" title="34">{
+                segExt = defaultSegmentExt(info.TrackSchema)
+        }</span>
+        <span class="cov7" title="34">segMIME := opts.SegmentMIME
+        if segMIME == "" </span><span class="cov7" title="34">{
+                segMIME = info.MIME
+        }</span>
+
+        <span class="cov7" title="34">resolver := opts.Resolver
+        if resolver == nil </span><span class="cov7" title="33">{
+                resolver = ProxyResolver{}
+        }</span>
+
+        <span class="cov7" title="34">logger := opts.Logger
+        if logger == nil </span><span class="cov7" title="32">{
+                logger = slog.New(slog.DiscardHandler)
+        }</span>
+
+        <span class="cov7" title="34">return &amp;Handler{
+                track:    track,
+                schema:   info.TrackSchema,
+                resolver: resolver,
+                init:     opts.InitSegment,
+                segExt:   segExt,
+                segMIME:  segMIME,
+                window:   opts.Window,
+
+                epochWindow: opts.EpochWindow,
+                logger:      logger,
+        }, nil</span>
+}
+
+// ServeHTTP routes a request to the playlist, manifest, segment, or init handler.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) <span class="cov8" title="85">{
+        base := path.Base(r.URL.Path)
+        switch </span>{
+        case strings.HasSuffix(base, ".m3u8"):<span class="cov6" title="18">
+                h.serveHLS(w, r)</span>
+        case strings.HasSuffix(base, ".mpd"):<span class="cov4" title="7">
+                h.serveDASH(w, r)</span>
+        case base == "init"+h.segExt:<span class="cov2" title="2">
+                h.serveInit(w, r)</span>
+        default:<span class="cov8" title="58">
+                h.serveSegment(w, r)</span>
+        }
+}
+
+// internalError answers a generic 500 and logs what actually failed. The
+// errors on these paths carry object keys and store paths — detail a client
+// has no use for and should not see — so the record is where it survives.
+//
+// A canceled context is the client leaving (a seek, a variant switch) and is
+// not logged: routine player churn must not flood the record of real failures.
+func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op string, err error) <span class="cov4" title="6">{
+        if !errors.Is(err, context.Canceled) </span><span class="cov3" title="5">{
+                h.logger.Error(op, "method", r.Method, "url", r.URL.Path, "error", err)
+        }</span>
+        <span class="cov4" title="6">http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)</span>
+}
+
+// serveHLS renders and writes the HLS media playlist.
+func (h *Handler) serveHLS(w http.ResponseWriter, r *http.Request) <span class="cov6" title="18">{
+        window, err := h.gather(r.Context())
+        if err != nil </span><span class="cov1" title="1">{
+                h.internalError(w, r, "gather playlist window", err)
+                return
+        }</span>
+        <span class="cov5" title="17">body, err := renderHLS(h.schema, window.groups, h.renderOpts(window))
+        if err != nil </span><span class="cov0" title="0">{
+                h.internalError(w, r, "render playlist", err)
+                return
+        }</span>
+        <span class="cov5" title="17">w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+        _, _ = w.Write(body)</span> // not actionable: once the body write fails the client is gone
+}
+
+// serveDASH renders and writes the DASH MPD.
+func (h *Handler) serveDASH(w http.ResponseWriter, r *http.Request) <span class="cov4" title="7">{
+        window, err := h.gather(r.Context())
+        if err != nil </span><span class="cov1" title="1">{
+                h.internalError(w, r, "gather manifest window", err)
+                return
+        }</span>
+        <span class="cov4" title="6">body, err := renderDASH(h.schema, window.groups, h.renderOpts(window))
+        if err != nil </span><span class="cov0" title="0">{
+                h.internalError(w, r, "render manifest", err)
+                return
+        }</span>
+        <span class="cov4" title="6">w.Header().Set("Content-Type", "application/dash+xml")
+        _, _ = w.Write(body)</span> // not actionable: once the body write fails the client is gone
+}
+
+// serveInit writes the caller-supplied init segment, when there is one.
+func (h *Handler) serveInit(w http.ResponseWriter, r *http.Request) <span class="cov2" title="2">{
+        if len(h.init.Bytes) == 0 </span><span class="cov1" title="1">{
+                http.NotFound(w, r)
+                return
+        }</span>
+        <span class="cov1" title="1">w.Header().Set("Content-Type", h.segMIME)
+        w.Header().Set("Content-Length", strconv.Itoa(len(h.init.Bytes)))
+        _, _ = w.Write(h.init.Bytes)</span> // not actionable: once the body write fails the client is gone
+}
+
+// serveSegment resolves a segment by its GroupID and either redirects to it or
+// proxies its bytes. One handler serves both HLS and DASH, since both address
+// segments by GroupID.
+func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request) <span class="cov8" title="58">{
+        id, ok := parseSegmentID(path.Base(r.URL.Path), h.segExt)
+        if !ok </span><span class="cov0" title="0">{
+                http.NotFound(w, r)
+                return
+        }</span>
+
+        <span class="cov8" title="58">reader, err := h.track.Reader(r.Context())
+        if err != nil </span><span class="cov2" title="3">{
+                h.internalError(w, r, "open reader", err)
+                return
+        }</span>
+
+        <span class="cov8" title="55">group, err := reader.Lookup(r.Context(), id)
+        if err != nil </span><span class="cov2" title="2">{
+                // No committed group for the id: the segment was never written, or the
+                // client is asking ahead of the tip. A missing epoch log is the same
+                // verdict — the ledger treats it as a creation that did not finish, so
+                // no group in that epoch can exist. Anything else is a failure to
+                // answer rather than an absence, and a 404 here would tell a player to
+                // prune a segment that exists.
+                if errors.Is(err, ledger.ErrGroupNotFound) || errors.Is(err, ledger.ErrEpochNotFound) </span><span class="cov1" title="1">{
+                        http.NotFound(w, r)
+                        return
+                }</span>
+                <span class="cov1" title="1">h.internalError(w, r, "lookup segment", err)
+                return</span>
+        }
+
+        <span class="cov7" title="53">url, err := h.resolver.ResolveSegment(r.Context(), group)
+        if err != nil </span><span class="cov0" title="0">{
+                h.internalError(w, r, "resolve segment", err)
+                return
+        }</span>
+        <span class="cov7" title="53">if url != "" </span><span class="cov1" title="1">{
+                http.Redirect(w, r, url, http.StatusFound)
+                return
+        }</span>
+
+        <span class="cov7" title="52">data, err := reader.ReadGroup(r.Context(), group.ObjectKey)
+        if err != nil </span><span class="cov0" title="0">{
+                h.internalError(w, r, "read segment", err)
+                return
+        }</span>
+
+        <span class="cov7" title="52">mime := group.MIME
+        if mime == "" </span><span class="cov7" title="52">{
+                mime = h.segMIME
+        }</span>
+        <span class="cov7" title="52">w.Header().Set("Content-Type", mime)
+        w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+        _, _ = w.Write(data)</span> // not actionable: once the body write fails the client is gone
+}
+
+// manifestWindow is what the renderers need about a track: the groups to list,
+// and what the groups before them imply for the numbering a sliding manifest has
+// to carry.
+type manifestWindow struct {
+        // groups are the segments to list, in commit order.
+        groups []ledger.GroupInfo
+
+        // dropped is how many segments preceded the window — the first listed
+        // segment's media sequence.
+        dropped uint64
+
+        // discontinuities is how many epoch changes preceded the window: the
+        // discontinuity sequence the first listed segment continues from.
+        discontinuities uint64
+
+        // precedingEpoch is the epoch of the segment immediately before the window,
+        // or zero when the window starts at the track's beginning. A window that
+        // opens on a new epoch has a timeline reset at its very first segment, and
+        // nothing in the listed groups themselves reveals it.
+        precedingEpoch uint64
+}
+
+// gather opens a Reader, rewinds to the start, and drains every committed group
+// in commit order. It is the shared input to both renderers.
+//
+// With a window configured it keeps only the newest Window groups, in a ring,
+// and accumulates what the dropped groups imply for the manifest's numbering. A
+// sliding playlist must state its media and discontinuity sequences exactly and
+// consistently across reloads, which is what the full walk buys — the output is
+// short but the counts are not derivable from it. The walk reads manifests, not
+// segment payloads.
+func (h *Handler) gather(ctx context.Context) (manifestWindow, error) <span class="cov6" title="25">{
+        reader, err := h.track.Reader(ctx)
+        if err != nil </span><span class="cov2" title="2">{
+                return manifestWindow{}, err
+        }</span>
+        <span class="cov6" title="23">reader.SeekStart()
+
+        var out manifestWindow
+
+        // ring holds the last h.window entries when windowing; next is where the
+        // following one lands, wrapping once the ring is full. Unwindowed, every
+        // entry is kept and next is unused.
+        var ring []entry
+        var next int
+        if h.window &gt; 0 </span><span class="cov5" title="11">{
+                ring = make([]entry, 0, h.window)
+        }</span>
+
+        <span class="cov6" title="23">var prevEpoch uint64
+        var seen uint64
+
+        for </span><span class="cov10" title="167">{
+                g, err := reader.Next(ctx)
+                if errors.Is(err, io.EOF) </span><span class="cov6" title="23">{
+                        break</span>
+                }
+                <span class="cov9" title="144">if err != nil </span><span class="cov0" title="0">{
+                        return manifestWindow{}, err
+                }</span>
+
+                <span class="cov9" title="144">epoch := g.ID.Epoch()
+                e := entry{info: g, discontinuity: seen &gt; 0 &amp;&amp; epoch != prevEpoch}
+                prevEpoch = epoch
+                seen++
+
+                if h.window &lt;= 0 || len(ring) &lt; h.window </span><span class="cov9" title="98">{
+                        ring = append(ring, e)
+                        continue</span>
+                }
+
+                // The evicted entry is now behind the window: it becomes what precedes
+                // the first listed segment, and its own discontinuity has rolled off.
+                <span class="cov7" title="46">out.evict(ring[next])
+
+                ring[next] = e
+                next = (next + 1) % h.window</span>
+        }
+
+        // Unroll the ring back into commit order: once full, the oldest entry sits
+        // at the write cursor.
+        <span class="cov6" title="23">ordered := ring
+        if h.window &gt; 0 &amp;&amp; len(ring) == h.window </span><span class="cov5" title="10">{
+                ordered = slices.Concat(ring[next:], ring[:next])
+        }</span>
+
+        // Lifetimes past the epoch window are sessions that have already ended, so
+        // they leave the manifest the same way a windowed-out segment does: still
+        // addressable, just not listed, and counted as preceding the first one that
+        // is.
+        <span class="cov6" title="23">for range h.epochsToDrop(ordered) </span><span class="cov6" title="20">{
+                out.evict(ordered[0])
+                ordered = ordered[1:]
+        }</span>
+
+        <span class="cov6" title="23">out.groups = make([]ledger.GroupInfo, len(ordered))
+        for i, e := range ordered </span><span class="cov8" title="78">{
+                out.groups[i] = e.info
+        }</span>
+        <span class="cov6" title="23">return out, nil</span>
+}
+
+// epochsToDrop counts the leading entries that fall outside the epoch window —
+// those belonging to a lifetime older than the newest h.epochWindow.
+//
+// Lifetimes are counted backwards from the newest group rather than by
+// subtracting from the latest epoch number, so the answer depends only on what
+// is actually listed. Epochs the segment window has already trimmed away are
+// not lifetimes this manifest still shows, and counting them would evict a
+// session that is genuinely on screen.
+func (h *Handler) epochsToDrop(ordered []entry) int <span class="cov6" title="23">{
+        if h.epochWindow &lt;= 0 || len(ordered) == 0 </span><span class="cov5" title="15">{
+                return 0
+        }</span>
+
+        <span class="cov4" title="8">lifetimes := 1
+        epoch := ordered[len(ordered)-1].info.ID.Epoch()
+        for i := len(ordered) - 1; i &gt;= 0; i-- </span><span class="cov7" title="34">{
+                if ordered[i].info.ID.Epoch() == epoch </span><span class="cov6" title="24">{
+                        continue</span>
+                }
+                <span class="cov5" title="10">epoch = ordered[i].info.ID.Epoch()
+                lifetimes++
+                if lifetimes &gt; h.epochWindow </span><span class="cov3" title="5">{
+                        // Entry i opens the first lifetime past the window, so it and
+                        // everything before it goes.
+                        return i + 1
+                }</span>
+        }
+        <span class="cov2" title="3">return 0</span>
+}
+
+// entry is a group together with what its position implies for the manifest. A
+// discontinuity belongs to the segment that opens a new epoch, so it rolls off
+// when that segment does — carrying the flag alongside the group beats
+// recomputing it from a window that no longer contains the boundary.
+type entry struct {
+        info          ledger.GroupInfo
+        discontinuity bool
+}
+
+// evict folds a group that is no longer listed into the counts a sliding
+// manifest states: it becomes what precedes the window, its place in the media
+// sequence is spent, and any timeline reset it carried is now behind the
+// manifest rather than inside it.
+func (w *manifestWindow) evict(e entry) <span class="cov8" title="66">{
+        w.precedingEpoch = e.info.ID.Epoch()
+        w.dropped++
+        if e.discontinuity </span><span class="cov4" title="6">{
+                w.discontinuities++
+        }</span>
+}
+
+// renderOpts is the renderers' input projected from the handler's resolved state
+// and the window it just gathered.
+func (h *Handler) renderOpts(window manifestWindow) renderOpts <span class="cov6" title="23">{
+        return renderOpts{
+                segExt:                h.segExt,
+                initURI:               h.initURI(),
+                sliding:               h.window &gt; 0,
+                mediaSequence:         window.dropped,
+                discontinuitySequence: window.discontinuities,
+                precedingEpoch:        window.precedingEpoch,
+        }
+}</span>
+
+// initURI is the URI both manifests reference for the init segment: a local path
+// when the handler serves the bytes, the caller's URL when it does not.
+func (h *Handler) initURI() string <span class="cov6" title="23">{
+        switch </span>{
+        case len(h.init.Bytes) &gt; 0:<span class="cov6" title="21">
+                return "init" + h.segExt</span>
+        case h.init.URL != "":<span class="cov2" title="2">
+                return h.init.URL</span>
+        default:<span class="cov0" title="0">
+                return ""</span>
+        }
+}
+
+// parseSegmentID reads a GroupID off a segment URL's base name by stripping the
+// segment extension. The second result is false when the name is not a group id.
+func parseSegmentID(base, ext string) (ledger.GroupID, bool) <span class="cov8" title="58">{
+        id, err := ledger.ParseGroupID(strings.TrimSuffix(base, ext))
+        if err != nil || id == 0 </span><span class="cov0" title="0">{
+                return 0, false
+        }</span>
+        <span class="cov8" title="58">return id, true</span>
+}
+
+// requiresInit reports whether a schema's container carries its codec
+// configuration in a separate initialization segment rather than in every
+// segment. Fragmented MP4 does; MPEG-TS repeats its PAT/PMT per segment and so
+// does not. An unrecognized encoding is left permissive: the caller knows its
+// container, and refusing to serve one this package has no opinion about would
+// be worse than serving it.
+func requiresInit(s ledger.TrackSchema) bool <span class="cov7" title="35">{
+        return s.Encoding == "fmp4"
+}</span>
+
+// defaultSegmentExt picks a segment extension for a schema the caller did not
+// override. fmp4 segments are CMAF .m4s; MPEG-TS is .ts; anything else falls back
+// to a generic extension rather than guessing.
+func defaultSegmentExt(s ledger.TrackSchema) string <span class="cov7" title="34">{
+        switch s.Encoding </span>{
+        case "fmp4":<span class="cov7" title="33">
+                return ".m4s"</span>
+        case "ts", "mpegts":<span class="cov1" title="1">
+                return ".ts"</span>
+        default:<span class="cov0" title="0">
+                return ".bin"</span>
+        }
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package stream
+
+import (
+        "fmt"
+        "math"
+        "strconv"
+        "strings"
+        "time"
+
+        "github.com/okdaichi/qumo-ledger/ledger"
+)
+
+// renderOpts carries the rendering inputs that come from neither the schema nor
+// the groups themselves: the segment URL extension and the init-segment URI.
+type renderOpts struct {
+        segExt  string // e.g. ".m4s"
+        initURI string // relative init URI, "" when there is none
+
+        // sliding reports that the groups are a window over the track rather than
+        // the whole of it, so the manifest describes a rolling live presentation
+        // instead of an append-only one.
+        sliding bool
+
+        // mediaSequence is the media sequence number of the first listed segment —
+        // the count of segments that have rolled out of the window.
+        mediaSequence uint64
+
+        // discontinuitySequence is the count of timeline resets that have rolled out
+        // of the window, which a sliding playlist states so a client's discontinuity
+        // numbering survives segments leaving.
+        discontinuitySequence uint64
+
+        // precedingEpoch is the epoch of the segment just before the window, or zero
+        // when nothing precedes it. A window can open exactly on an epoch change,
+        // where the reset belongs to the first listed segment and is invisible from
+        // the listed groups alone.
+        precedingEpoch uint64
+}
+
+// renderHLS builds a media playlist for groups in commit order.
+//
+// Unwindowed, the playlist is the whole track and grows as groups land: EVENT
+// means segments are only ever appended, never removed. Windowed, it is a
+// sliding live playlist — no EXT-X-PLAYLIST-TYPE, because segments leave the
+// playlist as it rolls, which EVENT forbids. Neither carries EXT-X-ENDLIST: the
+// ledger has no notion of a finished track.
+//
+// The producer's own — gappy, epoch-resetting — sequence is not the media
+// sequence: HLS requires consecutive media sequence numbers, so the sequence is
+// synthetic (the segment's ordinal), and the stable per-segment address is the
+// GroupID carried in the URL.
+func renderHLS(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts renderOpts) ([]byte, error) <span class="cov6" title="20">{
+        for _, g := range groups </span><span class="cov9" title="63">{
+                if g.Duration &lt;= 0 </span><span class="cov1" title="1">{
+                        return nil, fmt.Errorf("stream: group %s has no duration; HLS needs an EXTINF", g.ID)
+                }</span>
+        }
+
+        <span class="cov6" title="19">var b strings.Builder
+        b.WriteString("#EXTM3U\n")
+        b.WriteString("#EXT-X-VERSION:6\n")
+        fmt.Fprintf(&amp;b, "#EXT-X-TARGETDURATION:%d\n", maxSegmentSeconds(schema, groups))
+        fmt.Fprintf(&amp;b, "#EXT-X-MEDIA-SEQUENCE:%d\n", opts.mediaSequence)
+        if opts.discontinuitySequence &gt; 0 </span><span class="cov4" title="6">{
+                // Without this, a client numbers discontinuities from zero and
+                // mis-associates them once a reset has rolled out of the playlist.
+                fmt.Fprintf(&amp;b, "#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", opts.discontinuitySequence)
+        }</span>
+        <span class="cov6" title="19">if !opts.sliding </span><span class="cov5" title="9">{
+                b.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n")
+        }</span>
+        <span class="cov6" title="19">if opts.initURI != "" </span><span class="cov6" title="18">{
+                fmt.Fprintf(&amp;b, "#EXT-X-MAP:URI=\"%s\"\n", opts.initURI)
+        }</span>
+
+        // A window can begin exactly where a producer lifetime did, in which case the
+        // reset belongs to the first listed segment. Seeding from what precedes the
+        // window states it; unwindowed, nothing precedes the first segment and there
+        // is no reset to announce.
+        <span class="cov6" title="19">prevEpoch := opts.precedingEpoch
+        for i, g := range groups </span><span class="cov9" title="62">{
+                // A new producer lifetime is a discontinuity: the timeline reset.
+                if (i &gt; 0 || prevEpoch != 0) &amp;&amp; g.ID.Epoch() != prevEpoch </span><span class="cov6" title="14">{
+                        b.WriteString("#EXT-X-DISCONTINUITY\n")
+                }</span>
+                <span class="cov9" title="62">if g.Wallclock != 0 </span><span class="cov8" title="51">{
+                        fmt.Fprintf(&amp;b, "#EXT-X-PROGRAM-DATE-TIME:%s\n",
+                                time.Unix(0, g.Wallclock).UTC().Format(time.RFC3339Nano))
+                }</span>
+                <span class="cov9" title="62">fmt.Fprintf(&amp;b, "#EXTINF:%s,\n", extinfSeconds(g.Duration, schema.Timescale))
+                fmt.Fprintf(&amp;b, "%s%s\n", g.ID, opts.segExt)
+                prevEpoch = g.ID.Epoch()</span>
+        }
+
+        <span class="cov6" title="19">return []byte(b.String()), nil</span>
+}
+
+// maxSegmentSeconds is the ceiling, in whole seconds, of the longest segment —
+// the bound HLS TARGETDURATION must honor and a sensible DASH minBufferTime.
+func maxSegmentSeconds(schema ledger.TrackSchema, groups []ledger.GroupInfo) int <span class="cov7" title="31">{
+        var max float64
+        for _, g := range groups </span><span class="cov10" title="93">{
+                if g.Duration &lt;= 0 </span><span class="cov0" title="0">{
+                        continue</span>
+                }
+                <span class="cov10" title="93">if s := float64(g.Duration) / float64(schema.Timescale); s &gt; max </span><span class="cov7" title="31">{
+                        max = s
+                }</span>
+        }
+        <span class="cov7" title="31">return int(math.Ceil(max))</span>
+}
+
+// windowSeconds is the total media extent of the listed groups, in whole
+// seconds, rounded up — how far back a client can seek in a windowed manifest.
+func windowSeconds(schema ledger.TrackSchema, groups []ledger.GroupInfo) int <span class="cov1" title="1">{
+        var total int64
+        for _, g := range groups </span><span class="cov3" title="3">{
+                if g.Duration &gt; 0 </span><span class="cov3" title="3">{
+                        total += g.Duration
+                }</span>
+        }
+        <span class="cov1" title="1">return int(math.Ceil(float64(total) / float64(schema.Timescale)))</span>
+}
+
+// extinfSeconds formats a media extent as the decimal seconds HLS carries in
+// EXTINF. Three decimals is more than any player needs and keeps output stable.
+func extinfSeconds(duration int64, timescale uint32) string <span class="cov9" title="62">{
+        return strconv.FormatFloat(float64(duration)/float64(timescale), 'f', 3, 64)
+}</span>
+</pre>
+		
+		<pre class="file" id="file3" style="display: none">package stream
+
+import (
+        "context"
+
+        "github.com/okdaichi/qumo-ledger/ledger"
+)
+
+// SegmentResolver decides whether a segment is served by redirect.
+//
+// HLS and DASH both address segments by their [ledger.GroupID], so a segment
+// request looks the same no matter which format pointed at it: the server
+// resolves the GroupID to a [ledger.GroupInfo] and asks the resolver what to do.
+// ResolveSegment returns a URL to redirect to; an empty URL means the server
+// proxies the segment bytes itself through the ledger.
+//
+// Keeping delivery at this layer — rather than on the store — leaves the core
+// independent of the strategy. Proxying is the simple default for local
+// development, where the object store is local and there is nothing to sign; a
+// production deployment redirects to signed object URLs, and does so without the
+// store gaining a presigning method it could not implement uniformly across
+// backends.
+type SegmentResolver interface {
+        ResolveSegment(ctx context.Context, group ledger.GroupInfo) (string, error)
+}
+
+// ProxyResolver never redirects: the server proxies segment bytes through the
+// ledger. It is the zero-value default for local development and simple
+// deployments.
+type ProxyResolver struct{}
+
+// ResolveSegment implements [SegmentResolver] by never redirecting.
+func (ProxyResolver) ResolveSegment(context.Context, ledger.GroupInfo) (string, error) <span class="cov10" title="52">{
+        return "", nil
+}</span>
+
+// RedirectResolver mints a URL for each segment. It is satisfied by a function,
+// so a production deployment wires S3 or GCS presigning against
+// [ledger.GroupInfo.ObjectKey] — the object key — with no cloud SDK imported
+// here and no method added to the store:
+//
+//        h, _ := stream.NewHandler(track, stream.Options{
+//            Resolver: stream.RedirectResolver(func(g ledger.GroupInfo) string {
+//                return presigner.GetSignedURL(g.ObjectKey)
+//            }),
+//        })
+type RedirectResolver func(ledger.GroupInfo) string
+
+// ResolveSegment implements [SegmentResolver] by returning the minted URL.
+func (f RedirectResolver) ResolveSegment(_ context.Context, g ledger.GroupInfo) (string, error) <span class="cov1" title="1">{
+        return f(g), nil
+}</span>
+
+var _ SegmentResolver = ProxyResolver{}
+var _ SegmentResolver = RedirectResolver(nil)
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>
