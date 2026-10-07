@@ -152,6 +152,7 @@ A supported client CLI for accessing a ledger lives in a separate repository.
 | `ledger/store/fsstore` | Local filesystem backend. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
 | `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
+| `ingest` | Announce and record over HTTP: many contributors append JSON records to one track. Authorization and live delivery are hooks. |
 | `examples/` | Runnable examples (a reference reader; a dev HLS/DASH server). Not supported entrypoints. |
 
 ## Development

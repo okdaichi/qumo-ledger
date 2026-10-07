@@ -12,6 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ingest:** A new package that accepts records over HTTP and appends them to
+  ledger tracks, the inbound counterpart of `stream`. A `Handler` is an
+  `http.Handler` over a store with two POST endpoints, routed by the URL's base
+  name. Both take a JSON body naming a track and a contributor:
+  `{"broadcast_path": "/room/123", "track_name": "chat", "name": "alice"}`.
+  - `announce` establishes the track, creating it when it does not exist
+    (`201`, or `200` when it already did).
+  - `record` appends the body's `payload`, any JSON value, to an announced track
+    as one group and answers `201` once it is committed. A track nobody
+    announced answers `404`.
+  - Many contributors record into one track; each group stores a `Record`, the
+    contributor's name and its payload. Records of one track are serialized
+    within a handler, and two processes recording into the same track are not
+    coordinated.
+  - `Options.Authorize` decides whether a request proceeds (`403` otherwise).
+    `Options.OnAnnounce` and `Options.OnRecord` observe what was committed,
+    which is where a caller forwards a record to live subscribers.
+  - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
+    `json`. A record has no media time, so each group is anchored by the wall
+    clock at commit; read a window back with `Reader.RangeWallclock`. The
+    `stream` renderers need a duration per group and do not serve these tracks.
+
 - **stream:** HLS and DASH renderers over a ledger track — derived views, not a
   storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
   `@d`; a new producer epoch is an HLS `EXT-X-DISCONTINUITY` and a DASH timeline
