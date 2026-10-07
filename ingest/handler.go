@@ -497,5 +497,7 @@ func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op strin
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	// not actionable: the status is sent, and a client that stopped reading
+	// cannot be answered differently.
 	_ = json.NewEncoder(w).Encode(v)
 }
