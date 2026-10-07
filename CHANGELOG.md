@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **fmp4:** `FragmentDuration` rejects a `trun` shorter than the header its
+  flags declare. Such a run skipped the sample-count check, so a fragment could
+  claim any sample count and have it multiplied into a duration.
+
 ## [0.2.0] - 2026-10-08
 
 ### Added

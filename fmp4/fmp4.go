@@ -231,6 +231,11 @@ func trunDuration(trun []byte, defaultDuration uint32, maxSamples uint64) (uint6
 	if flags&firstSampleFlagsPresent != 0 {
 		at += 4
 	}
+	// The flags are read off the wire too: a run shorter than the header they
+	// declare has no entries, and the space left for them must not go negative.
+	if at > len(trun) {
+		return 0, errors.New("fmp4: trun truncated")
+	}
 
 	// Every optional per-sample field contributes 4 bytes to each entry, so the
 	// entries are what the declared count can be checked against.
