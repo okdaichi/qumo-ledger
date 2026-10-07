@@ -3,6 +3,7 @@ package stream_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -848,6 +849,185 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
 		"a Lookup failure that is not an absence answers 500")
+}
+
+// assertGenericServerError asserts resp is a 500 whose body is exactly the
+// status text. The errors behind these responses carry object keys and store
+// paths, so the body is checked as closely as the status.
+func assertGenericServerError(tb testing.TB, resp *http.Response) {
+	tb.Helper()
+	assert.Equal(tb, http.StatusInternalServerError, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(tb, err)
+	// http.Error terminates with a newline.
+	assert.Equal(tb, http.StatusText(http.StatusInternalServerError)+"\n", string(body))
+}
+
+// The read after a successful Lookup: the manifest row is there but the payload
+// object cannot be fetched. The segment exists, so this is a 500, not a 404.
+func TestHandler_ReadGroupFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failKey = fix.metas[0].ObjectKey
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assertGenericServerError(t, resp)
+
+	// The other segment's payload is untouched and still serves.
+	resp, err = http.Get(ts.URL + "/" + fix.metas[1].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// The manifest walk failing partway: the reader opens on epoch 1's log, and the
+// walk into epoch 2 hits a log that cannot be fetched. A truncated manifest
+// would tell a player the stream ended there, so neither format is served.
+func TestHandler_GatherFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 1, backend)
+
+	ctx := context.Background()
+	writer, err := fix.track.Writer(ctx)
+	require.NoError(t, err)
+	require.NoError(t, writer.NewEpoch(ctx))
+	_, err = writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 1),
+		MediaTime: 0,
+		Duration:  180000,
+	}, []byte("frames"))
+	require.NoError(t, err)
+
+	// Armed only now: NewEpoch itself reads epoch 2's log back after writing it.
+	backend.failKey = "live/cam1/video/e000002/log.manifest"
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// The reader still opens: an epoch 1 segment serves, so the failures below
+	// come from the walk reaching epoch 2 and not from opening the track.
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	for name, manifest := range map[string]string{
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + manifest)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assertGenericServerError(t, resp)
+		})
+	}
+}
+
+// A resolver that cannot produce a URL — a signing backend that is down, say —
+// is a failure to answer. The handler must not fall back to proxying the bytes
+// a deployment chose not to serve itself, nor report the segment missing.
+func TestHandler_ResolverFailureIsServerError(t *testing.T) {
+	fix := newTrackFixture(t)
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Resolver:    &fakeResolver{err: errors.New("signer unavailable: key live/cam1/video")},
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assertGenericServerError(t, resp)
+}
+
+// A name that is not a group id never reaches the ledger: it is answered 404
+// from the URL alone. The store is failing throughout, so a request that did
+// reach it would answer 500 instead.
+func TestHandler_MalformedSegmentNotFound(t *testing.T) {
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failAll = true
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, segment := range map[string]string{
+		"not a group id":  "/segment.m4s",
+		"zero id":         "/e000000-g00000000.m4s",
+		"wrong extension": "/" + fix.metas[0].ID.String() + ".ts",
+		"no name":         "/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + segment)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		})
+	}
+}
+
+// A group without a duration cannot be given an EXTINF or an @d. Rendering it
+// anyway would publish a manifest a player cannot time, so both formats refuse.
+func TestHandler_GroupWithoutDurationIsServerError(t *testing.T) {
+	fix := newTrackFixture(t)
+
+	var buf bytes.Buffer
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	manifests := map[string]string{
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	}
+
+	// Every group has a duration so far, and both manifests render.
+	for name, manifest := range manifests {
+		resp, err := http.Get(ts.URL + manifest)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s before the append", name)
+	}
+
+	ctx := context.Background()
+	writer, err := fix.track.Writer(ctx)
+	require.NoError(t, err)
+	_, err = writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 2),
+		MediaTime: 2 * 180000,
+	}, []byte("frames"))
+	require.NoError(t, err)
+
+	for name, manifest := range manifests {
+		t.Run(name, func(t *testing.T) {
+			buf.Reset()
+			resp, err := http.Get(ts.URL + manifest)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assertGenericServerError(t, resp)
+			assert.Contains(t, buf.String(), "has no duration",
+				"the 500 is the renderer refusing the group, not some other failure")
+		})
+	}
 }
 
 // With a logger supplied, the generic 500 is accompanied by a record carrying
