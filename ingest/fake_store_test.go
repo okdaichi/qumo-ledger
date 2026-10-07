@@ -9,13 +9,14 @@ import (
 	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 )
 
-// fakeStore is an in-memory store whose Create fails for chosen keys, so a
-// test can fail one step of a ledger write and keep every other step real.
-// The zero value is usable and behaves like memstore.
+// fakeStore is an in-memory store whose Create or Get fails for chosen keys,
+// so a test can fail one step of a ledger write or read and keep every other
+// step real. The zero value is usable and behaves like memstore.
 type fakeStore struct {
-	// createErr fails a Create of every key containing a map key. Set it
-	// before the store is shared.
+	// createErr and getErr fail a Create or Get of every key containing a
+	// map key. Set them while the store is not in use.
 	createErr map[string]error
+	getErr    map[string]error
 
 	once  sync.Once
 	inner *memstore.Store
@@ -29,6 +30,11 @@ func (s *fakeStore) objects() *memstore.Store {
 }
 
 func (s *fakeStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	for part, err := range s.getErr {
+		if strings.Contains(key, part) {
+			return nil, store.NoVersion, err
+		}
+	}
 	return s.objects().Get(ctx, key)
 }
 

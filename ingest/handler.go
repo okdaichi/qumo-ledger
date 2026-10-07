@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -22,10 +23,17 @@ import (
 const DefaultMaxBodyBytes = 64 << 10
 
 // Encoding and MIME of the tracks a [Handler] creates: every group is one JSON
-// value, the payload of one record.
+// [Record].
 const (
 	Encoding = "json"
 	MIME     = "application/json"
+)
+
+// History pages: how many records a GET returns when it asks for none, and at
+// most.
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 200
 )
 
 // timescale is the media timescale of the tracks a Handler creates.
@@ -67,25 +75,59 @@ func trackFromPath(p string) (Track, error) {
 	return Track{BroadcastPath: "/" + p[:i], TrackName: p[i+1:]}, nil
 }
 
+// Record is one group of an ingested track: the payload a sender posted, and
+// the sender as [Options.Authorize] named it. A record with no sender was
+// written by a party trusted with the whole track.
+type Record struct {
+	Sender  string          `json:"sender,omitempty"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// Access is what a request does to a track.
+type Access int
+
+const (
+	// Write creates a track or records into it.
+	Write Access = iota
+	// Read reads a track's history.
+	Read
+)
+
+// Limit bounds how fast records arrive: Rate per second on average, and up to
+// Burst at once. The zero Limit is no limit.
+type Limit struct {
+	Rate  float64
+	Burst int
+}
+
 // Options configures a [Handler]. The zero value accepts every request.
 type Options struct {
-	// Authorize decides whether a request on a track may proceed. A non-nil
-	// error refuses it with 403 Forbidden, or 401 Unauthorized when it is
-	// [ErrUnauthenticated]. Nil allows every request.
-	Authorize func(r *http.Request, t Track) error
+	// Authorize decides whether a request may have access to a track, and for
+	// a write names its sender, which every record it makes carries. A
+	// non-nil error refuses the request with 403 Forbidden, or 401
+	// Unauthorized when it is [ErrUnauthenticated]. Nil allows every request,
+	// with no sender.
+	Authorize func(r *http.Request, t Track, access Access) (sender string, err error)
 
 	// Challenge is the WWW-Authenticate header sent with a 401, naming the
 	// scheme Authorize expects, such as "Bearer". Empty sends none.
 	Challenge string
 
+	// SenderLimit bounds each sender's records into one track, and TrackLimit
+	// all of a track's. A record past either is refused with 429 Too Many
+	// Requests and a Retry-After. Records with no sender count only toward
+	// TrackLimit.
+	SenderLimit Limit
+	TrackLimit  Limit
+
 	// OnOpen is called once per track, when the handler first opens it for
 	// writing, before any of its records reach OnRecord.
 	OnOpen func(ctx context.Context, t Track)
 
-	// OnRecord is called after payload was committed to t as group g, before
-	// the request is answered. Records of one track are delivered in commit
-	// order.
-	OnRecord func(ctx context.Context, t Track, g ledger.GroupInfo, payload []byte)
+	// OnRecord is called after record, the JSON encoding of a [Record], was
+	// committed to t as group g, before the request is answered. Records of
+	// one track are delivered in commit order.
+	OnRecord func(ctx context.Context, t Track, g ledger.GroupInfo, record []byte)
 
 	// MaxBodyBytes caps the request body. Zero means [DefaultMaxBodyBytes].
 	MaxBodyBytes int64
@@ -98,13 +140,15 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// Handler appends records to the tracks of one store, addressed by the URL. It
-// implements [http.Handler]; mount it under a prefix with [http.StripPrefix]:
+// Handler records into and reads back the tracks of one store, addressed by
+// the URL. It implements [http.Handler]; mount it under a prefix with
+// [http.StripPrefix]:
 //
 //	mux.Handle("/ingest/", http.StripPrefix("/ingest", handler))
 //
 //	PUT  /tracks/{broadcast path}/{track name}  create the track when it does not exist
 //	POST /tracks/{broadcast path}/{track name}  append the body, one JSON value, as one record
+//	GET  /tracks/{broadcast path}/{track name}  read the newest records, or those ?before= a group
 //
 // A record creates its track too; PUT is for a track that should exist before
 // its first record. A record sent with an Idempotency-Key header is stored once
@@ -125,12 +169,15 @@ type Handler struct {
 type track struct {
 	Track
 
-	// mu serializes the track's records and guards replies and keys.
+	// mu serializes the track's records and guards the fields below.
 	mu     sync.Mutex
 	writer *ledger.Writer
 	// replies holds the answers to keyed records, oldest key first in keys.
 	replies map[string]recordResponse
 	keys    []string
+	// limit is the track's bucket, and senders each sender's.
+	limit   bucket
+	senders map[string]*bucket
 }
 
 // NewHandler builds a [Handler] over s.
@@ -154,6 +201,7 @@ func NewHandler(s store.Store, opts Options) (*Handler, error) {
 	}
 	h.mux.HandleFunc("PUT /tracks/{track...}", h.serveCreate)
 	h.mux.HandleFunc("POST /tracks/{track...}", h.serveRecord)
+	h.mux.HandleFunc("GET /tracks/{track...}", h.serveHistory)
 	return h, nil
 }
 
@@ -165,7 +213,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveCreate creates the request's track when it does not exist: 201 when it
 // did not, 204 when it did.
 func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
-	t, ok := h.resolve(w, r)
+	t, _, ok := h.resolve(w, r, Write)
 	if !ok {
 		return
 	}
@@ -193,7 +241,7 @@ type recordResponse struct {
 // once it is committed. The track is resolved and authorized before the body
 // is read.
 func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
-	t, ok := h.resolve(w, r)
+	t, sender, ok := h.resolve(w, r, Write)
 	if !ok {
 		return
 	}
@@ -213,6 +261,11 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the body must be one JSON value in UTF-8", http.StatusBadRequest)
 		return
 	}
+	data, err := json.Marshal(Record{Sender: sender, Payload: payload})
+	if err != nil {
+		h.internalError(w, r, "encode record", err)
+		return
+	}
 	tr, _, err := h.open(r.Context(), t)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
@@ -227,10 +280,16 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, reply)
 		return
 	}
+	if wait := h.admit(tr, sender); wait > 0 {
+		tr.mu.Unlock()
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+		return
+	}
 	// The append outlives a client that leaves mid-request: an append cut
 	// short between storing the group and committing it leaves the group's
 	// object behind, and the next append of the track would collide with it.
-	group, err := tr.writer.Append(context.WithoutCancel(r.Context()), 0, payload)
+	group, err := tr.writer.Append(context.WithoutCancel(r.Context()), 0, data)
 	// An append that committed but could not seal returns the group with its
 	// error: the record is stored, so it is delivered and answered as such.
 	committed := group.ObjectKey != ""
@@ -240,7 +299,7 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 			tr.remember(key, reply)
 		}
 		if h.opts.OnRecord != nil {
-			h.opts.OnRecord(r.Context(), tr.Track, group, payload)
+			h.opts.OnRecord(r.Context(), tr.Track, group, data)
 		}
 	}
 	tr.mu.Unlock()
@@ -268,21 +327,101 @@ func (tr *track) remember(key string, reply recordResponse) {
 	tr.keys = append(tr.keys, key)
 }
 
-// resolve reads the request's track and authorizes the request on it,
-// answering the request when either fails.
-func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) (Track, bool) {
+// historyEntry is one record of a history page.
+type historyEntry struct {
+	Group     string `json:"group"`
+	Wallclock int64  `json:"wallclock"`
+	Record
+}
+
+// historyResponse is the body of a history page, oldest record first. Before is
+// the cursor for the page of older records, present while there may be one.
+type historyResponse struct {
+	Records []historyEntry `json:"records"`
+	Before  string         `json:"before,omitempty"`
+}
+
+// serveHistory answers a page of the track's records: the newest, or those
+// committed before the group ?before= names, at most ?limit=.
+func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
+	t, _, ok := h.resolve(w, r, Read)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	limit := DefaultPageSize
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > MaxPageSize {
+			http.Error(w, fmt.Sprintf("limit must be between 1 and %d", MaxPageSize), http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+	var before ledger.GroupID
+	if raw := query.Get("before"); raw != "" {
+		id, err := ledger.ParseGroupID(raw)
+		if err != nil {
+			http.Error(w, "before must be a group ID", http.StatusBadRequest)
+			return
+		}
+		before = id
+	}
+
+	lt, err := ledger.Open(r.Context(), h.store, t.Path(), h.opts.Config)
+	if errors.Is(err, ledger.ErrTrackNotFound) {
+		http.Error(w, "no such track", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return
+	}
+	reader, err := lt.Reader(r.Context())
+	if err != nil {
+		h.internalError(w, r, "read track", err)
+		return
+	}
+	groups, err := reader.Before(r.Context(), before, limit)
+	if err != nil {
+		h.internalError(w, r, "read history", err)
+		return
+	}
+	page := historyResponse{Records: make([]historyEntry, 0, len(groups))}
+	for _, g := range groups {
+		data, err := reader.ReadGroup(r.Context(), g.ObjectKey)
+		if err != nil {
+			h.internalError(w, r, "read record", err)
+			return
+		}
+		entry := historyEntry{Group: g.ID.String(), Wallclock: g.Wallclock}
+		if err := json.Unmarshal(data, &entry.Record); err != nil {
+			h.internalError(w, r, "decode record", err)
+			return
+		}
+		page.Records = append(page.Records, entry)
+	}
+	if len(groups) == limit {
+		page.Before = groups[0].ID.String()
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// resolve reads the request's track and authorizes the access on it, answering
+// the request when either fails.
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request, access Access) (Track, string, bool) {
 	t, err := trackFromPath(r.PathValue("track"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return Track{}, false
+		return Track{}, "", false
 	}
 	if h.opts.Authorize == nil {
-		return t, true
+		return t, "", true
 	}
-	err = h.opts.Authorize(r, t)
+	sender, err := h.opts.Authorize(r, t, access)
 	switch {
 	case err == nil:
-		return t, true
+		return t, sender, true
 	case errors.Is(err, ErrUnauthenticated):
 		if h.opts.Challenge != "" {
 			w.Header().Set("WWW-Authenticate", h.opts.Challenge)
@@ -291,7 +430,7 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) (Track, bool) 
 	default:
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}
-	return Track{}, false
+	return Track{}, "", false
 }
 
 // open returns the track's writer, creating the track when it does not exist

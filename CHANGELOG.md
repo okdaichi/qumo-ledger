@@ -12,31 +12,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **ingest:** A new package that accepts records over HTTP and appends them to
-  ledger tracks, the inbound counterpart of `stream`. A `Handler` is an
-  `http.Handler` over a store, mounted with `http.StripPrefix`.
+- **ingest:** A new package that accepts records over HTTP, appends them to
+  ledger tracks and reads them back, the inbound counterpart of `stream`. A
+  `Handler` is an `http.Handler` over a store, mounted with `http.StripPrefix`.
   - A track is named by its broadcast path and track name, a `Track`, and
     addressed by its ledger key: `/tracks/room/123/chat` is the track `chat` of
     the broadcast `/room/123`.
   - `POST /tracks/{track}` appends the body, one JSON value in UTF-8, as one
     group and answers `201` once it is committed, creating the track when it
-    does not exist. The payload is stored and delivered as sent. Requests are
-    routed by the URL, so a track is resolved and authorized before the body
-    is read.
+    does not exist. Requests are routed by the URL, so a track is resolved and
+    authorized before the body is read.
+  - Each group stores a `Record`, `{"sender": …, "payload": …}`: the payload
+    as sent, and the sender `Options.Authorize` named for the request, so a
+    record's sender comes from its credential rather than from its content. A
+    record with no sender was written by a party trusted with the whole track.
   - `PUT /tracks/{track}` creates the track ahead of its first record (`201`,
     or `204` when it exists).
+  - `GET /tracks/{track}` answers a page of records, oldest first: the newest,
+    or those before `?before=<group>`, at most `?limit=` (default 50, at most
+    200), with the cursor for the next older page.
   - A record with an `Idempotency-Key` header is stored once per track; a
     retry with the same key gets the first reply. A track remembers its 1024
     most recent keys.
+  - `Options.SenderLimit` and `Options.TrackLimit` bound records per sender and
+    per track as token buckets; a record past either is answered `429` with a
+    `Retry-After`.
   - Any number of senders record into one track. Records of one track are
     serialized within a handler, and two processes recording into the same
     track are not coordinated.
-  - `Options.Authorize(r, track)` is asked on every request; it refuses with
-    `403`, or `401` for `ErrUnauthenticated`, with `Options.Challenge` as its
+  - `Options.Authorize(r, track, access)` is asked on every request, for a
+    `Write` or a `Read`, and returns a write's sender; it refuses with `403`, or
+    `401` for `ErrUnauthenticated`, with `Options.Challenge` as its
     `WWW-Authenticate` header. `Options.OnOpen(ctx, track)` observes a track
     the handler starts writing to, and
-    `Options.OnRecord(ctx, track, group, payload)` what was committed, which is
+    `Options.OnRecord(ctx, track, group, record)` what was committed, which is
     where a caller forwards a record to live subscribers.
+
+- **ledger:** `Reader.Before(ctx, id, n)` returns up to n groups committed
+  before id, oldest first, or the newest n for the zero id: the way to page
+  backwards through a track. It reads backwards from each epoch's newest delta
+  and skips sealed runs that start at or after id.
   - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
     `json`. A record has no media time, so each group is anchored by the wall
     clock at commit; read a window back with `Reader.RangeWallclock`. The

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
+	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,8 +63,8 @@ func TestHandler_StoreFailures(t *testing.T) {
 				// A threshold of one byte seals after every record.
 				Config: ledger.Config{SealThreshold: 1},
 				Logger: slog.New(slog.NewTextHandler(&logs, nil)),
-				OnRecord: func(_ context.Context, _ Track, _ ledger.GroupInfo, payload []byte) {
-					delivered = append(delivered, string(payload))
+				OnRecord: func(_ context.Context, _ Track, _ ledger.GroupInfo, rec []byte) {
+					delivered = append(delivered, string(rec))
 				},
 			})
 			require.NoError(t, err)
@@ -81,10 +82,52 @@ func TestHandler_StoreFailures(t *testing.T) {
 			}
 			if tt.wantRecord == http.StatusCreated {
 				require.Len(t, delivered, 1, "a committed record is delivered even when the seal failed")
-				assert.Equal(t, `"hello"`, delivered[0])
+				assert.Equal(t, `{"payload":"hello"}`, delivered[0])
 			} else {
 				assert.Empty(t, delivered, "a record that was not committed is not delivered")
 			}
 		})
 	}
+}
+
+func TestHandler_History_StoreFailures(t *testing.T) {
+	errDown := errors.New("store is down")
+	tests := map[string]struct {
+		getErr     map[string]error
+		wantLogged string
+	}{
+		"the track root":   {getErr: map[string]error{"root.manifest": errDown}, wantLogged: "open track"},
+		"the epoch log":    {getErr: map[string]error{"log.manifest": errDown}, wantLogged: "read track"},
+		"the newest delta": {getErr: map[string]error{"/delta/open/": errDown}, wantLogged: "read history"},
+		"a record":         {getErr: map[string]error{"/groups/": errDown}, wantLogged: "read record"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			objects := &fakeStore{}
+			h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusCreated, serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`).Code)
+			objects.getErr = tt.getErr
+
+			rr := serve(h, http.MethodGet, "/tracks/room/123/chat", "")
+
+			assert.Equal(t, http.StatusInternalServerError, rr.Code)
+			assert.Contains(t, logs.String(), tt.wantLogged)
+		})
+	}
+}
+
+func TestHandler_History_UndecodableRecord(t *testing.T) {
+	objects := memstore.New()
+	h, err := NewHandler(objects, Options{})
+	require.NoError(t, err)
+	tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"})
+	require.NoError(t, err)
+	_, err = tr.writer.Append(t.Context(), 0, []byte(`not a record`))
+	require.NoError(t, err)
+
+	rr := serve(h, http.MethodGet, "/tracks/room/123/chat", "")
+
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
 }
