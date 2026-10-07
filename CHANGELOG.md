@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-08
+
 ### Added
 
 - **store:** `store.Open` opens a backend from a URI, so a deployment chooses
@@ -175,7 +177,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with the other unreferenced ones. `AppendGroup`, whose caller chose the
     sequence, still reports the collision.
 
-## [0.1.0] - unreleased
 ## [0.1.0] - 2026-08-07
 
 First release: an object-store-native store for temporal data — video, audio,
