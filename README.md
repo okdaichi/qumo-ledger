@@ -159,7 +159,7 @@ A supported client CLI for accessing a ledger lives in a separate repository.
 | `ledger/store/s3store` | Amazon S3 / S3-compatible backend over conditional PUTs. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
 | `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
-| `ingest` | Announce and record over HTTP: a contributor announces into a track, then posts JSON records to its contribution's URL. Authorization and live delivery are hooks. |
+| `ingest` | Record over HTTP: senders POST JSON records to a track's URL, `/tracks/room/123/chat`. Authorization and live delivery are hooks. |
 | `examples/` | Runnable examples (a reference reader; a dev HLS/DASH server). Not supported entrypoints. |
 
 ## Development

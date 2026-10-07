@@ -2,7 +2,6 @@ package ingest
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
@@ -22,10 +20,6 @@ import (
 // DefaultMaxBodyBytes is the largest request body a [Handler] reads when
 // [Options.MaxBodyBytes] is zero.
 const DefaultMaxBodyBytes = 64 << 10
-
-// DefaultIdleTimeout is how long a contribution lasts without a record when
-// [Options.IdleTimeout] is zero.
-const DefaultIdleTimeout = 5 * time.Minute
 
 // Encoding and MIME of the tracks a [Handler] creates: every group is one JSON
 // value, the payload of one record.
@@ -37,10 +31,10 @@ const (
 // timescale is the media timescale of the tracks a Handler creates.
 const timescale = 1000
 
-// Idempotency keys: a contribution remembers the replies to this many of its
-// most recent keyed records, and a key is at most this long.
+// Idempotency keys: a track remembers the replies to this many of its most
+// recent keyed records, and a key is at most this long.
 const (
-	idempotencyKeys      = 256
+	idempotencyKeys      = 1024
 	maxIdempotencyKeyLen = 255
 )
 
@@ -48,11 +42,10 @@ const (
 // a request with 401 Unauthorized rather than 403 Forbidden.
 var ErrUnauthenticated = errors.New("ingest: unauthenticated")
 
-// Track names a track by its broadcast path and track name. It is the body of
-// an announce request.
+// Track names a track by its broadcast path and track name.
 type Track struct {
-	BroadcastPath string `json:"broadcast_path"`
-	TrackName     string `json:"track_name"`
+	BroadcastPath string
+	TrackName     string
 }
 
 // Path returns the single key the ledger stores the track under: the broadcast
@@ -61,29 +54,38 @@ func (t Track) Path() ledger.TrackPath {
 	return ledger.TrackPath(strings.Trim(t.BroadcastPath, "/") + "/" + t.TrackName)
 }
 
+// trackFromPath reads a track from its ledger key: every segment but the last
+// is the broadcast path, and the last is the track name.
+func trackFromPath(p string) (Track, error) {
+	if p == "" || path.Clean("/"+p) != "/"+p {
+		return Track{}, errors.New("the track must be a clean path: no empty, \".\" or \"..\" segments")
+	}
+	i := strings.LastIndexByte(p, '/')
+	if i < 0 {
+		return Track{}, errors.New("the track needs a broadcast path and a track name, as room/123/chat")
+	}
+	return Track{BroadcastPath: "/" + p[:i], TrackName: p[i+1:]}, nil
+}
+
 // Options configures a [Handler]. The zero value accepts every request.
 type Options struct {
-	// Authorize decides whether a request on a track may proceed: an
-	// announce, and every record and end of the contribution it starts. A
-	// non-nil error refuses the request with 403 Forbidden, or 401
-	// Unauthorized when it is [ErrUnauthenticated]. Nil allows every request.
+	// Authorize decides whether a request on a track may proceed. A non-nil
+	// error refuses it with 403 Forbidden, or 401 Unauthorized when it is
+	// [ErrUnauthenticated]. Nil allows every request.
 	Authorize func(r *http.Request, t Track) error
 
 	// Challenge is the WWW-Authenticate header sent with a 401, naming the
 	// scheme Authorize expects, such as "Bearer". Empty sends none.
 	Challenge string
 
-	// OnAnnounce is called after an announce started a contribution to t.
-	OnAnnounce func(ctx context.Context, t Track)
+	// OnOpen is called once per track, when the handler first opens it for
+	// writing, before any of its records reach OnRecord.
+	OnOpen func(ctx context.Context, t Track)
 
 	// OnRecord is called after payload was committed to t as group g, before
 	// the request is answered. Records of one track are delivered in commit
 	// order.
 	OnRecord func(ctx context.Context, t Track, g ledger.GroupInfo, payload []byte)
-
-	// IdleTimeout ends a contribution that has recorded nothing for this
-	// long. Zero means [DefaultIdleTimeout].
-	IdleTimeout time.Duration
 
 	// MaxBodyBytes caps the request body. Zero means [DefaultMaxBodyBytes].
 	MaxBodyBytes int64
@@ -96,58 +98,39 @@ type Options struct {
 	Logger *slog.Logger
 }
 
-// Handler starts contributions and appends their records to the tracks of one
-// store. It implements [http.Handler]; mount it under a prefix with
-// [http.StripPrefix]:
+// Handler appends records to the tracks of one store, addressed by the URL. It
+// implements [http.Handler]; mount it under a prefix with [http.StripPrefix]:
 //
 //	mux.Handle("/ingest/", http.StripPrefix("/ingest", handler))
 //
-//	POST   /announce                    start a contribution: 201 with its Location
-//	POST   /contributions/{id}/records  append the body, one JSON value, as one record
-//	DELETE /contributions/{id}          end the contribution
+//	PUT  /tracks/{broadcast path}/{track name}  create the track when it does not exist
+//	POST /tracks/{broadcast path}/{track name}  append the body, one JSON value, as one record
 //
-// Any number of contributions record into one track. A contribution ends when
-// it is deleted or has recorded nothing for [Options.IdleTimeout]; its URLs
-// then answer 410 Gone.
-//
-// A record sent with an Idempotency-Key header is stored once per
-// contribution: a retry with the same key is answered as the first was.
+// A record creates its track too; PUT is for a track that should exist before
+// its first record. A record sent with an Idempotency-Key header is stored once
+// per track: a retry with the same key is answered as the first was.
 type Handler struct {
 	store store.Store
 	opts  Options
 
 	maxBody int64
-	idle    time.Duration
 	logger  *slog.Logger
 	mux     *http.ServeMux
 
-	mu            sync.Mutex
-	tracks        map[ledger.TrackPath]*trackWriter
-	contributions map[string]*contribution
+	mu     sync.Mutex
+	tracks map[ledger.TrackPath]*track
 }
 
-// trackWriter serializes the records of one track.
-type trackWriter struct {
+// track is one track the handler writes to.
+type track struct {
+	Track
+
+	// mu serializes the track's records and guards replies and keys.
 	mu     sync.Mutex
 	writer *ledger.Writer
-}
-
-// contribution is one announce's standing to record into a track. An ended one
-// is kept for one idle timeout so that its URLs answer 410 rather than 404.
-type contribution struct {
-	id    string
-	track Track
-	tw    *trackWriter
-
 	// replies holds the answers to keyed records, oldest key first in keys.
-	// Guarded by tw.mu.
 	replies map[string]recordResponse
 	keys    []string
-
-	// Guarded by Handler.mu.
-	ended    bool
-	deadline time.Time
-	timer    *time.Timer
 }
 
 // NewHandler builds a [Handler] over s.
@@ -156,27 +139,21 @@ func NewHandler(s store.Store, opts Options) (*Handler, error) {
 		return nil, errors.New("ingest: nil store")
 	}
 	h := &Handler{
-		store:         s,
-		opts:          opts,
-		maxBody:       opts.MaxBodyBytes,
-		idle:          opts.IdleTimeout,
-		logger:        opts.Logger,
-		mux:           http.NewServeMux(),
-		tracks:        make(map[ledger.TrackPath]*trackWriter),
-		contributions: make(map[string]*contribution),
+		store:   s,
+		opts:    opts,
+		maxBody: opts.MaxBodyBytes,
+		logger:  opts.Logger,
+		mux:     http.NewServeMux(),
+		tracks:  make(map[ledger.TrackPath]*track),
 	}
 	if h.maxBody == 0 {
 		h.maxBody = DefaultMaxBodyBytes
 	}
-	if h.idle == 0 {
-		h.idle = DefaultIdleTimeout
-	}
 	if h.logger == nil {
 		h.logger = slog.New(slog.DiscardHandler)
 	}
-	h.mux.HandleFunc("POST /announce", h.serveAnnounce)
-	h.mux.HandleFunc("POST /contributions/{id}/records", h.serveRecord)
-	h.mux.HandleFunc("DELETE /contributions/{id}", h.serveEnd)
+	h.mux.HandleFunc("PUT /tracks/{track...}", h.serveCreate)
+	h.mux.HandleFunc("POST /tracks/{track...}", h.serveRecord)
 	return h, nil
 }
 
@@ -185,73 +162,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// announceResponse is the body of a successful announce.
-type announceResponse struct {
-	ID    string           `json:"id"`
-	Track ledger.TrackPath `json:"track"`
-}
-
-// serveAnnounce starts a contribution to the announced track, creating the
-// track when it does not exist.
-func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
-	var t Track
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, h.maxBody)).Decode(&t); err != nil {
-		badBody(w, err)
+// serveCreate creates the request's track when it does not exist: 201 when it
+// did not, 204 when it did.
+func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
+	t, ok := h.resolve(w, r)
+	if !ok {
 		return
 	}
-	// One track has one broadcast path: "room/123" and "/room/123/" are
-	// "/room/123", so its contributors and hooks agree on the path.
-	t.BroadcastPath = "/" + strings.Trim(t.BroadcastPath, "/")
-	if msg := validate(t); msg != "" {
-		http.Error(w, msg, http.StatusBadRequest)
-		return
-	}
-	if !h.authorize(w, r, t) {
-		return
-	}
-
-	_, err := ledger.Create(r.Context(), h.store, t.Path(), ledger.TrackSchema{
-		Timescale:  timescale,
-		TimeSource: ledger.TimeSourceIngest,
-		MIME:       MIME,
-		Encoding:   Encoding,
-	}, h.opts.Config)
-	switch {
-	case errors.Is(err, ledger.ErrTrackExists):
-	case errors.Is(err, ledger.ErrInvalidTrackPath):
-		http.Error(w, "invalid track path", http.StatusBadRequest)
-		return
-	case err != nil:
-		h.internalError(w, r, "create track", err)
-		return
-	}
-	tw, err := h.writerFor(r.Context(), t.Path())
+	_, created, err := h.open(r.Context(), t)
 	if err != nil {
-		h.internalError(w, r, "open track writer", err)
+		h.internalError(w, r, "open track", err)
 		return
 	}
-
-	id := h.start(t, tw)
-	if h.opts.OnAnnounce != nil {
-		h.opts.OnAnnounce(r.Context(), t)
+	if created {
+		w.WriteHeader(http.StatusCreated)
+		return
 	}
-	// A relative reference resolves against the announce URL, wherever the
-	// handler is mounted.
-	w.Header().Set("Location", "contributions/"+id)
-	writeJSON(w, http.StatusCreated, announceResponse{ID: id, Track: t.Path()})
-}
-
-// validate returns why a track name is unusable, or "".
-func validate(t Track) string {
-	switch {
-	case t.BroadcastPath == "/":
-		return "broadcast_path is required"
-	case path.Clean(t.BroadcastPath) != t.BroadcastPath:
-		return "broadcast_path must be clean: no empty, \".\" or \"..\" segments"
-	case t.TrackName == "" || strings.Contains(t.TrackName, "/"):
-		return "track_name is required and must not contain a slash"
-	}
-	return ""
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // recordResponse is the body of a successful record.
@@ -262,12 +189,12 @@ type recordResponse struct {
 	Wallclock int64 `json:"wallclock"`
 }
 
-// serveRecord appends the body to the contribution's track as one group and
-// answers once it is committed. The contribution is resolved and authorized
-// before the body is read.
+// serveRecord appends the body to the request's track as one group and answers
+// once it is committed. The track is resolved and authorized before the body
+// is read.
 func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
-	c, ok := h.lookup(w, r)
-	if !ok || !h.authorize(w, r, c.track) {
+	t, ok := h.resolve(w, r)
+	if !ok {
 		return
 	}
 	key := r.Header.Get("Idempotency-Key")
@@ -286,32 +213,37 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the body must be one JSON value in UTF-8", http.StatusBadRequest)
 		return
 	}
+	tr, _, err := h.open(r.Context(), t)
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return
+	}
 
 	// Committing and notifying under one lock delivers a track's records to
 	// OnRecord in commit order, and lets a retry find the reply to its key.
-	c.tw.mu.Lock()
-	if reply, seen := c.replies[key]; seen && key != "" {
-		c.tw.mu.Unlock()
+	tr.mu.Lock()
+	if reply, seen := tr.replies[key]; seen && key != "" {
+		tr.mu.Unlock()
 		writeJSON(w, http.StatusCreated, reply)
 		return
 	}
 	// The append outlives a client that leaves mid-request: an append cut
 	// short between storing the group and committing it leaves the group's
 	// object behind, and the next append of the track would collide with it.
-	group, err := c.tw.writer.Append(context.WithoutCancel(r.Context()), 0, payload)
+	group, err := tr.writer.Append(context.WithoutCancel(r.Context()), 0, payload)
 	// An append that committed but could not seal returns the group with its
 	// error: the record is stored, so it is delivered and answered as such.
 	committed := group.ObjectKey != ""
 	reply := recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock}
 	if committed {
 		if key != "" {
-			c.remember(key, reply)
+			tr.remember(key, reply)
 		}
 		if h.opts.OnRecord != nil {
-			h.opts.OnRecord(r.Context(), c.track, group, payload)
+			h.opts.OnRecord(r.Context(), tr.Track, group, payload)
 		}
 	}
-	c.tw.mu.Unlock()
+	tr.mu.Unlock()
 	switch {
 	case !committed:
 		h.internalError(w, r, "append record", err)
@@ -323,40 +255,34 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 // remember keeps the reply to a keyed record, forgetting the oldest key past
-// the limit. c.tw.mu is held.
-func (c *contribution) remember(key string, reply recordResponse) {
-	if c.replies == nil {
-		c.replies = make(map[string]recordResponse)
+// the limit. tr.mu is held.
+func (tr *track) remember(key string, reply recordResponse) {
+	if tr.replies == nil {
+		tr.replies = make(map[string]recordResponse)
 	}
-	if len(c.keys) == idempotencyKeys {
-		delete(c.replies, c.keys[0])
-		c.keys = c.keys[1:]
+	if len(tr.keys) == idempotencyKeys {
+		delete(tr.replies, tr.keys[0])
+		tr.keys = tr.keys[1:]
 	}
-	c.replies[key] = reply
-	c.keys = append(c.keys, key)
+	tr.replies[key] = reply
+	tr.keys = append(tr.keys, key)
 }
 
-// serveEnd ends a contribution.
-func (h *Handler) serveEnd(w http.ResponseWriter, r *http.Request) {
-	c, ok := h.lookup(w, r)
-	if !ok || !h.authorize(w, r, c.track) {
-		return
+// resolve reads the request's track and authorizes the request on it,
+// answering the request when either fails.
+func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) (Track, bool) {
+	t, err := trackFromPath(r.PathValue("track"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return Track{}, false
 	}
-	h.mu.Lock()
-	h.end(c)
-	h.mu.Unlock()
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// authorize applies Options.Authorize, answering the request when it refuses.
-func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, t Track) bool {
 	if h.opts.Authorize == nil {
-		return true
+		return t, true
 	}
-	err := h.opts.Authorize(r, t)
+	err = h.opts.Authorize(r, t)
 	switch {
 	case err == nil:
-		return true
+		return t, true
 	case errors.Is(err, ErrUnauthenticated):
 		if h.opts.Challenge != "" {
 			w.Header().Set("WWW-Authenticate", h.opts.Challenge)
@@ -365,97 +291,59 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, t Track) boo
 	default:
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}
-	return false
+	return Track{}, false
 }
 
-// start registers a new contribution to t and returns its ID.
-func (h *Handler) start(t Track, tw *trackWriter) string {
-	c := &contribution{
-		id:       rand.Text(),
-		track:    t,
-		tw:       tw,
-		deadline: time.Now().Add(h.idle),
-	}
+// open returns the track's writer, creating the track when it does not exist
+// and reporting whether it did. Opening reads the store, so it runs without
+// h.mu; when two requests open the same track at once, the first to finish is
+// kept.
+func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
+	key := t.Path()
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.contributions[c.id] = c
-	c.timer = time.AfterFunc(h.idle, func() { h.expire(c) })
-	return c.id
-}
-
-// lookup resolves the request's contribution and extends it, answering 404 for
-// an unknown one and 410 for one that ended.
-func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) (*contribution, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c, ok := h.contributions[r.PathValue("id")]
-	switch {
-	case !ok:
-		http.Error(w, "unknown contribution", http.StatusNotFound)
-		return nil, false
-	case c.ended:
-		http.Error(w, "the contribution has ended", http.StatusGone)
-		return nil, false
-	}
-	c.deadline = time.Now().Add(h.idle)
-	return c, true
-}
-
-// end ends a contribution and keeps it for one idle timeout. h.mu is held.
-func (h *Handler) end(c *contribution) {
-	if c.ended {
-		return
-	}
-	c.ended = true
-	c.deadline = time.Now().Add(h.idle)
-	c.timer.Reset(h.idle)
-}
-
-// expire runs when a contribution's timer fires: it waits again while the
-// deadline is ahead, then ends a live contribution or forgets an ended one.
-func (h *Handler) expire(c *contribution) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if wait := time.Until(c.deadline); wait > 0 {
-		c.timer.Reset(wait)
-		return
-	}
-	if !c.ended {
-		h.end(c)
-		return
-	}
-	delete(h.contributions, c.id)
-}
-
-// writerFor returns the track's writer, opening it on first use. Opening reads
-// the store, so it runs without h.mu; when two requests open the same track at
-// once, the first to finish is kept.
-func (h *Handler) writerFor(ctx context.Context, track ledger.TrackPath) (*trackWriter, error) {
-	h.mu.Lock()
-	tw, ok := h.tracks[track]
+	tr, ok := h.tracks[key]
 	h.mu.Unlock()
 	if ok {
-		return tw, nil
+		return tr, false, nil
 	}
-	t, err := ledger.Open(ctx, h.store, track, h.opts.Config)
+
+	created := true
+	_, err := ledger.Create(ctx, h.store, key, ledger.TrackSchema{
+		Timescale:  timescale,
+		TimeSource: ledger.TimeSourceIngest,
+		MIME:       MIME,
+		Encoding:   Encoding,
+	}, h.opts.Config)
+	switch {
+	case errors.Is(err, ledger.ErrTrackExists):
+		created = false
+	case err != nil:
+		return nil, false, err
+	}
+	lt, err := ledger.Open(ctx, h.store, key, h.opts.Config)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	writer, err := t.Writer(ctx)
+	writer, err := lt.Writer(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("ingest: open writer of %s: %w", track, err)
+		return nil, false, fmt.Errorf("ingest: open writer of %s: %w", key, err)
 	}
+
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if tw, ok := h.tracks[track]; ok {
-		return tw, nil
+	if tr, ok := h.tracks[key]; ok {
+		h.mu.Unlock()
+		return tr, false, nil
 	}
-	tw = &trackWriter{writer: writer}
-	h.tracks[track] = tw
-	return tw, nil
+	tr = &track{Track: t, writer: writer}
+	h.tracks[key] = tr
+	h.mu.Unlock()
+	if h.opts.OnOpen != nil {
+		h.opts.OnOpen(ctx, t)
+	}
+	return tr, created, nil
 }
 
-// badBody answers a request whose body could not be read or decoded.
+// badBody answers a request whose body could not be read.
 func badBody(w http.ResponseWriter, err error) {
 	if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
 		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)

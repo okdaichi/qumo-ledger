@@ -39,29 +39,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ingest:** A new package that accepts records over HTTP and appends them to
   ledger tracks, the inbound counterpart of `stream`. A `Handler` is an
   `http.Handler` over a store, mounted with `http.StripPrefix`.
-  - A track is named by its broadcast path and track name, a `Track`.
-    `POST /announce` with `{"broadcast_path": "/room/123", "track_name": "chat"}`
-    creates the track when it does not exist and starts a contribution:
-    `201 Created`, `Location: contributions/{id}`.
-  - `POST /contributions/{id}/records` appends the body, one JSON value in
-    UTF-8, as one group and answers `201` once it is committed. The payload is
-    stored and delivered as sent. Requests are routed by the URL, so a
-    contribution is resolved and authorized before the body is read.
-  - A record with an `Idempotency-Key` header is stored once per contribution;
-    a retry with the same key gets the first reply. A contribution remembers
-    its 256 most recent keys.
-  - `DELETE /contributions/{id}` ends a contribution, as does
-    `Options.IdleTimeout` (default 5 min) without a record. An ended
-    contribution answers `410 Gone`, an unknown one `404`.
-  - Any number of contributions record into one track. Records of one track
-    are serialized within a handler, and two processes recording into the same
+  - A track is named by its broadcast path and track name, a `Track`, and
+    addressed by its ledger key: `/tracks/room/123/chat` is the track `chat` of
+    the broadcast `/room/123`.
+  - `POST /tracks/{track}` appends the body, one JSON value in UTF-8, as one
+    group and answers `201` once it is committed, creating the track when it
+    does not exist. The payload is stored and delivered as sent. Requests are
+    routed by the URL, so a track is resolved and authorized before the body
+    is read.
+  - `PUT /tracks/{track}` creates the track ahead of its first record (`201`,
+    or `204` when it exists).
+  - A record with an `Idempotency-Key` header is stored once per track; a
+    retry with the same key gets the first reply. A track remembers its 1024
+    most recent keys.
+  - Any number of senders record into one track. Records of one track are
+    serialized within a handler, and two processes recording into the same
     track are not coordinated.
-  - `Options.Authorize(r, track)` is asked for the announce and for every
-    request to the contribution; it refuses with `403`, or `401` for
-    `ErrUnauthenticated`, with `Options.Challenge` as its `WWW-Authenticate`
-    header. `Options.OnAnnounce(ctx, track)` and
-    `Options.OnRecord(ctx, track, group, payload)` observe what was committed,
-    which is where a caller forwards a record to live subscribers.
+  - `Options.Authorize(r, track)` is asked on every request; it refuses with
+    `403`, or `401` for `ErrUnauthenticated`, with `Options.Challenge` as its
+    `WWW-Authenticate` header. `Options.OnOpen(ctx, track)` observes a track
+    the handler starts writing to, and
+    `Options.OnRecord(ctx, track, group, payload)` what was committed, which is
+    where a caller forwards a record to live subscribers.
   - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
     `json`. A record has no media time, so each group is anchored by the wall
     clock at commit; read a window back with `Reader.RangeWallclock`. The
