@@ -851,6 +851,19 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 		"a Lookup failure that is not an absence answers 500")
 }
 
+// assertGenericServerError asserts resp is a 500 whose body is exactly the
+// status text. The errors behind these responses carry object keys and store
+// paths, so the body is checked as closely as the status.
+func assertGenericServerError(tb testing.TB, resp *http.Response) {
+	tb.Helper()
+	assert.Equal(tb, http.StatusInternalServerError, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(tb, err)
+	// http.Error terminates with a newline.
+	assert.Equal(tb, http.StatusText(http.StatusInternalServerError)+"\n", string(body))
+}
+
 // The read after a successful Lookup: the manifest row is there but the payload
 // object cannot be fetched. The segment exists, so this is a 500, not a 404.
 func TestHandler_ReadGroupFailureIsServerError(t *testing.T) {
@@ -866,8 +879,7 @@ func TestHandler_ReadGroupFailureIsServerError(t *testing.T) {
 	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
-		"a payload that cannot be read is not a missing segment")
+	assertGenericServerError(t, resp)
 
 	// The other segment's payload is untouched and still serves.
 	resp, err = http.Get(ts.URL + "/" + fix.metas[1].ID.String() + ".m4s")
@@ -902,30 +914,24 @@ func TestHandler_GatherFailureIsServerError(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	for name, path := range map[string]string{
+	// The reader still opens: an epoch 1 segment serves, so the failures below
+	// come from the walk reaching epoch 2 and not from opening the track.
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	for name, manifest := range map[string]string{
 		"playlist": "/playlist.m3u8",
 		"manifest": "/manifest.mpd",
 	} {
 		t.Run(name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + path)
+			resp, err := http.Get(ts.URL + manifest)
 			require.NoError(t, err)
 			defer resp.Body.Close()
-			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+			assertGenericServerError(t, resp)
 		})
 	}
-}
-
-// fakeResolver is a SegmentResolver whose answer is fixed: url and err are
-// returned for every group. The zero value proxies, like ProxyResolver.
-type fakeResolver struct {
-	url string
-	err error
-}
-
-var _ stream.SegmentResolver = (*fakeResolver)(nil)
-
-func (f *fakeResolver) ResolveSegment(context.Context, ledger.GroupInfo) (string, error) {
-	return f.url, f.err
 }
 
 // A resolver that cannot produce a URL — a signing backend that is down, say —
@@ -944,31 +950,30 @@ func TestHandler_ResolverFailureIsServerError(t *testing.T) {
 	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusText(http.StatusInternalServerError)+"\n", string(body),
-		"the resolver's error must not reach the response")
+	assertGenericServerError(t, resp)
 }
 
 // A name that is not a group id never reaches the ledger: it is answered 404
-// from the URL alone.
+// from the URL alone. The store is failing throughout, so a request that did
+// reach it would answer 500 instead.
 func TestHandler_MalformedSegmentNotFound(t *testing.T) {
-	fix := newTrackFixture(t)
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failAll = true
+
 	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
 	require.NoError(t, err)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	for name, path := range map[string]string{
+	for name, segment := range map[string]string{
 		"not a group id":  "/segment.m4s",
 		"zero id":         "/e000000-g00000000.m4s",
 		"wrong extension": "/" + fix.metas[0].ID.String() + ".ts",
 		"no name":         "/",
 	} {
 		t.Run(name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + path)
+			resp, err := http.Get(ts.URL + segment)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -980,6 +985,29 @@ func TestHandler_MalformedSegmentNotFound(t *testing.T) {
 // anyway would publish a manifest a player cannot time, so both formats refuse.
 func TestHandler_GroupWithoutDurationIsServerError(t *testing.T) {
 	fix := newTrackFixture(t)
+
+	var buf bytes.Buffer
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	manifests := map[string]string{
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	}
+
+	// Every group has a duration so far, and both manifests render.
+	for name, manifest := range manifests {
+		resp, err := http.Get(ts.URL + manifest)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s before the append", name)
+	}
+
 	ctx := context.Background()
 	writer, err := fix.track.Writer(ctx)
 	require.NoError(t, err)
@@ -989,20 +1017,15 @@ func TestHandler_GroupWithoutDurationIsServerError(t *testing.T) {
 	}, []byte("frames"))
 	require.NoError(t, err)
 
-	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
-	require.NoError(t, err)
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
-
-	for name, path := range map[string]string{
-		"playlist": "/playlist.m3u8",
-		"manifest": "/manifest.mpd",
-	} {
+	for name, manifest := range manifests {
 		t.Run(name, func(t *testing.T) {
-			resp, err := http.Get(ts.URL + path)
+			buf.Reset()
+			resp, err := http.Get(ts.URL + manifest)
 			require.NoError(t, err)
 			defer resp.Body.Close()
-			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+			assertGenericServerError(t, resp)
+			assert.Contains(t, buf.String(), "has no duration",
+				"the 500 is the renderer refusing the group, not some other failure")
 		})
 	}
 }
