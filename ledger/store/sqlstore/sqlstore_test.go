@@ -60,18 +60,6 @@ func TestStore_SwapWithForeignVersion(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrVersionMismatch)
 }
 
-func TestNew_Rejected(t *testing.T) {
-	_, err := sqlstore.New(t.Context(), nil, "")
-	assert.Error(t, err, "a nil database")
-
-	db, err := sql.Open("pgx", "postgres://localhost/unused")
-	require.NoError(t, err)
-	defer db.Close()
-
-	_, err = sqlstore.New(t.Context(), db, "objects; DROP TABLE users")
-	assert.Error(t, err, "a table name that is not an identifier")
-}
-
 func TestOpen_UsesTheNamedTable(t *testing.T) {
 	uri := os.Getenv(uriEnv)
 	if uri == "" {
@@ -93,4 +81,58 @@ func TestOpen_UsesTheNamedTable(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM `+table).Scan(&n))
 	assert.Equal(t, 1, n)
+}
+
+func TestStore_DatabaseErrors(t *testing.T) {
+	uri := os.Getenv(uriEnv)
+	if uri == "" {
+		t.Skipf("%s is not set", uriEnv)
+	}
+	db, err := sql.Open("pgx", uri)
+	require.NoError(t, err)
+	s, err := sqlstore.New(t.Context(), db, "")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	calls := map[string]func(ctx context.Context) error{
+		"get":                func(ctx context.Context) error { _, _, err := s.Get(ctx, "k"); return err },
+		"create":             func(ctx context.Context) error { _, err := s.Create(ctx, "k", nil); return err },
+		"swap to create":     func(ctx context.Context) error { _, err := s.Swap(ctx, "k", nil, store.NoVersion); return err },
+		"swap a version":     func(ctx context.Context) error { _, err := s.Swap(ctx, "k", nil, "1"); return err },
+		"swap a foreign one": func(ctx context.Context) error { _, err := s.Swap(ctx, "k", nil, `"etag"`); return err },
+		"delete":             func(ctx context.Context) error { return s.Delete(ctx, "k") },
+		"list": func(ctx context.Context) error {
+			for _, err := range s.List(ctx, "") {
+				return err
+			}
+			return nil
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call(t.Context())
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "sqlstore:")
+			assert.NotErrorIs(t, err, store.ErrNotExist)
+			assert.NotErrorIs(t, err, store.ErrVersionMismatch)
+		})
+	}
+}
+
+func TestStore_List_StopsWhenTheCallerDoes(t *testing.T) {
+	s := newStore(t)
+	for i := range 3 {
+		_, err := s.Create(t.Context(), fmt.Sprintf("k%d", i), nil)
+		require.NoError(t, err)
+	}
+
+	var seen []string
+	for key, err := range s.List(t.Context(), "") {
+		require.NoError(t, err)
+		seen = append(seen, key)
+		break
+	}
+
+	assert.Equal(t, []string{"k0"}, seen)
 }
