@@ -57,6 +57,20 @@ func TestOpen_Rejected(t *testing.T) {
 	}
 }
 
+func TestOpen_ErrorsHideThePassword(t *testing.T) {
+	for name, uri := range map[string]string{
+		"an unknown scheme": "gopher://user:s3cret@host/ledger",
+		"a malformed URI":   "gopher://user:s3cret@host:port/ledger",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.Open(t.Context(), uri)
+
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "s3cret")
+		})
+	}
+}
+
 func TestSchemes_ListsRegisteredBackends(t *testing.T) {
 	schemes := store.Schemes()
 

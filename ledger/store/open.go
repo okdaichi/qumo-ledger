@@ -71,15 +71,21 @@ func Open(ctx context.Context, uri string) (Store, error) {
 	if uri == "" {
 		uri = MemoryScheme + ":"
 	}
+	// A URI can carry a password, so errors name it only redacted, and a
+	// parse error, which quotes the whole URI, not at all.
 	u, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("store: parse %q: %w", uri, err)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, fmt.Errorf("store: parse URI: %w", err)
 	}
 	openersMu.RLock()
 	open, ok := openers[u.Scheme]
 	openersMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("%w %q in %q (registered: %v)", ErrUnknownScheme, u.Scheme, uri, Schemes())
+		return nil, fmt.Errorf("%w %q in %q (registered: %v)", ErrUnknownScheme, u.Scheme, u.Redacted(), Schemes())
 	}
 	return open(ctx, u)
 }
