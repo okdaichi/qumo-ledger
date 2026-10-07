@@ -94,6 +94,21 @@ func TestReader_Before_AcrossEpochs(t *testing.T) {
 		"before the first group of an epoch is the end of the previous one")
 }
 
+func TestReader_Before_SealDuringTheRead(t *testing.T) {
+	w, objects := newTestWriter(t)
+	for seq := range uint64(5) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, seq), []byte("payload"))
+		require.NoError(t, err)
+	}
+	r := openReader(t, &fakeSealingStore{Store: objects, writer: w})
+
+	got, err := r.Before(t.Context(), 0, 10)
+
+	require.NoError(t, err)
+	assert.Equal(t, []GroupID{NewGroupID(1, 0), NewGroupID(1, 1), NewGroupID(1, 2), NewGroupID(1, 3), NewGroupID(1, 4)}, ids(got),
+		"groups a seal moves out of the open region mid-read are still returned")
+}
+
 func TestReader_Before_HeadLaggingTheTip(t *testing.T) {
 	// A head update that fails is dropped, leaving the head behind the
 	// committed tip.

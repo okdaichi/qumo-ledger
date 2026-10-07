@@ -152,7 +152,7 @@ type Options struct {
 //
 // A record creates its track too; PUT is for a track that should exist before
 // its first record. A record sent with an Idempotency-Key header is stored once
-// per track: a retry with the same key is answered as the first was.
+// per sender and track: a retry with the same key is answered as the first was.
 type Handler struct {
 	store store.Store
 	opts  Options
@@ -270,6 +270,12 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
+	}
+
+	// A key is its sender's: two senders that happen to choose the same key
+	// do not answer each other's records.
+	if key != "" {
+		key = sender + "\x00" + key
 	}
 
 	// Committing and notifying under one lock delivers a track's records to

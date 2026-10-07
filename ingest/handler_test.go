@@ -225,6 +225,28 @@ func TestHandler_Record_IdempotencyKey(t *testing.T) {
 	assert.Equal(t, 5, delivered, "a retry is not delivered again; the other track's record is")
 }
 
+func TestHandler_Record_IdempotencyKeyIsTheSenders(t *testing.T) {
+	s := mem.New()
+	h := newHandler(t, s, ingest.Options{
+		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
+			return r.Header.Get("X-Sender"), nil
+		},
+	})
+
+	alice := record(h, `"from alice"`, "X-Sender", "alice", "Idempotency-Key", "1")
+	bob := record(h, `"from bob"`, "X-Sender", "bob", "Idempotency-Key", "1")
+	aliceAgain := record(h, `"from alice"`, "X-Sender", "alice", "Idempotency-Key", "1")
+
+	require.Equal(t, http.StatusCreated, alice.Code)
+	require.Equal(t, http.StatusCreated, bob.Code)
+	assert.NotEqual(t, alice.Body.String(), bob.Body.String(), "bob's record is his own, not alice's reply")
+	assert.JSONEq(t, alice.Body.String(), aliceAgain.Body.String())
+	assert.Equal(t, []ingest.Record{
+		{Sender: "alice", Payload: json.RawMessage(`"from alice"`)},
+		{Sender: "bob", Payload: json.RawMessage(`"from bob"`)},
+	}, stored(t, s), "the same key from two senders stores both records")
+}
+
 func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
 	s := mem.New()
 	h := newHandler(t, s, ingest.Options{})

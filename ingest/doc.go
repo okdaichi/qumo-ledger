@@ -39,8 +39,9 @@
 //
 // # Retries and limits
 //
-// A record sent with an Idempotency-Key header is stored once per track: a
-// retry with the same key is answered with the first reply and stores nothing.
+// A record sent with an Idempotency-Key header is stored once per sender and
+// track: a retry with the same key is answered with the first reply and stores
+// nothing.
 // A track remembers its most recent keys, so a retry belongs soon after the
 // request it repeats.
 //

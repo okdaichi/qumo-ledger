@@ -55,9 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GET /tracks/{track}` answers a page of records, oldest first: the newest,
     or those before `?before=<group>`, at most `?limit=` (default 50, at most
     200), with the cursor for the next older page.
-  - A record with an `Idempotency-Key` header is stored once per track; a
-    retry with the same key gets the first reply. A track remembers its 1024
-    most recent keys.
+  - A record with an `Idempotency-Key` header is stored once per sender and
+    track; a retry with the same key gets the first reply. A track remembers
+    its 1024 most recent keys.
   - `Options.SenderLimit` and `Options.TrackLimit` bound records per sender and
     per track as token buckets; a record past either is answered `429` with a
     `Retry-After`.

@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
@@ -42,45 +43,74 @@ func (r *Reader) Before(ctx context.Context, id GroupID, n int) ([]GroupInfo, er
 	}
 
 	for ; epoch >= 1; epoch-- {
-		logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
-		if err != nil {
-			return nil, err
-		}
-		last, err := r.lastDelta(ctx, epoch, logRoot.OpenFrom)
-		if err != nil {
-			return nil, err
-		}
-		for d := last; d >= logRoot.OpenFrom && d != noDelta; d-- {
-			delta, err := r.delta(ctx, epoch, d)
-			if errors.Is(err, ErrNotCommitted) {
-				// A seal reclaimed it after the log root was read; its groups
-				// are in the newest sealed run, which is read next.
-				continue
-			}
+		start := len(groups)
+		for attempt := 1; ; attempt++ {
+			full, resealed, err := r.beforeIn(ctx, epoch, id, take)
 			if err != nil {
 				return nil, err
 			}
-			if take(delta.Groups) {
+			if full {
 				slices.Reverse(groups)
 				return groups, nil
 			}
-		}
-		for _, ref := range slices.Backward(logRoot.Sealed) {
-			if id != 0 && ref.First.Compare(id) >= 0 {
-				continue
+			if !resealed {
+				break
 			}
-			sealed, err := r.sealed(ctx, epoch, ref)
-			if err != nil {
-				return nil, err
+			if attempt == beforeAttempts {
+				return nil, fmt.Errorf("ledger: epoch %d of %s was sealed %d times while it was read", epoch, r.path, attempt)
 			}
-			if take(sealed.Groups) {
-				slices.Reverse(groups)
-				return groups, nil
-			}
+			// The epoch's groups moved to a sealed run the log root read did
+			// not list: read the epoch again from a fresh log root.
+			groups = groups[:start]
 		}
 	}
 	slices.Reverse(groups)
 	return groups, nil
+}
+
+// beforeAttempts is how many times Before reads an epoch that a seal keeps
+// changing under it before giving up.
+const beforeAttempts = 3
+
+// beforeIn hands take the groups of one epoch, newest first, from its newest
+// delta back through its sealed runs, skipping runs that start at or after id.
+// It stops when take reports it is full. It reports resealed when a delta the
+// log root still counted as open was gone: a seal moved its groups into a
+// sealed run this log root does not list, so the epoch must be read again.
+func (r *Reader) beforeIn(ctx context.Context, epoch uint64, id GroupID, take func([]GroupInfo) bool) (full, resealed bool, err error) {
+	logRoot, _, err := fetchEpochLog(ctx, r.objects, r.path, epoch)
+	if err != nil {
+		return false, false, err
+	}
+	last, err := r.lastDelta(ctx, epoch, logRoot.OpenFrom)
+	if err != nil {
+		return false, false, err
+	}
+	for d := last; d >= logRoot.OpenFrom && d != noDelta; d-- {
+		delta, err := r.delta(ctx, epoch, d)
+		if errors.Is(err, ErrNotCommitted) {
+			return false, true, nil
+		}
+		if err != nil {
+			return false, false, err
+		}
+		if take(delta.Groups) {
+			return true, false, nil
+		}
+	}
+	for _, ref := range slices.Backward(logRoot.Sealed) {
+		if id != 0 && ref.First.Compare(id) >= 0 {
+			continue
+		}
+		sealed, err := r.sealed(ctx, epoch, ref)
+		if err != nil {
+			return false, false, err
+		}
+		if take(sealed.Groups) {
+			return true, false, nil
+		}
+	}
+	return false, false, nil
 }
 
 // noDelta is what lastDelta returns for an epoch with no open delta.
