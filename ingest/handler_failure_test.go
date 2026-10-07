@@ -15,8 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const chatAnnouncement = `{"broadcast_path":"/room/123","track_name":"chat"}`
-
 // serve sends one request to h and returns the response.
 func serve(h http.Handler, method, target, body string) *httptest.ResponseRecorder {
 	rr := httptest.NewRecorder()
@@ -27,28 +25,32 @@ func serve(h http.Handler, method, target, body string) *httptest.ResponseRecord
 func TestHandler_StoreFailures(t *testing.T) {
 	errDown := errors.New("store is down")
 	tests := map[string]struct {
-		createErr    map[string]error
-		failAnnounce bool
-		wantRecord   int
-		wantLogged   string
+		createErr  map[string]error
+		wantCreate int
+		wantRecord int
+		wantLogged string
 	}{
-		"announce cannot create the track": {
-			createErr:    map[string]error{"root.manifest": errDown},
-			failAnnounce: true,
-			wantLogged:   "create track",
+		"the track cannot be created": {
+			createErr:  map[string]error{"root.manifest": errDown},
+			wantCreate: http.StatusInternalServerError,
+			wantRecord: http.StatusInternalServerError,
+			wantLogged: "open track",
 		},
 		"record cannot store its group": {
 			createErr:  map[string]error{"/groups/": errDown},
+			wantCreate: http.StatusCreated,
 			wantRecord: http.StatusInternalServerError,
 			wantLogged: "append record",
 		},
 		"record committed but the seal failed": {
 			createErr:  map[string]error{"/sealed": errDown},
+			wantCreate: http.StatusCreated,
 			wantRecord: http.StatusCreated,
 			wantLogged: "record committed with an error",
 		},
 		"a canceled store call is not logged": {
 			createErr:  map[string]error{"/groups/": context.Canceled},
+			wantCreate: http.StatusCreated,
 			wantRecord: http.StatusInternalServerError,
 		},
 	}
@@ -66,18 +68,12 @@ func TestHandler_StoreFailures(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			announce := serve(h, http.MethodPost, "/announce", chatAnnouncement)
-			if tt.failAnnounce {
-				assert.Equal(t, http.StatusInternalServerError, announce.Code)
-				assert.Contains(t, logs.String(), tt.wantLogged)
-				assert.NotContains(t, announce.Body.String(), errDown.Error(), "the cause is logged, not answered")
-				return
-			}
-			require.Equal(t, http.StatusCreated, announce.Code, announce.Body.String())
+			create := serve(h, http.MethodPut, "/tracks/room/123/chat", "")
+			rr := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
 
-			rr := serve(h, http.MethodPost, "/"+announce.Header().Get("Location")+"/records", `"hello"`)
-
+			assert.Equal(t, tt.wantCreate, create.Code)
 			assert.Equal(t, tt.wantRecord, rr.Code)
+			assert.NotContains(t, rr.Body.String(), errDown.Error(), "the cause is logged, not answered")
 			if tt.wantLogged == "" {
 				assert.Empty(t, logs.String())
 			} else {
