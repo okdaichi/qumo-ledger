@@ -29,9 +29,9 @@ func TestWriter_Append_AfterAFailedWrite(t *testing.T) {
 			fail:      func(s *FakeStore) { s.CreateErrOnce = map[string]error{delta0: errStoreDown} },
 			committed: []uint64{1},
 		},
-		"the commit is taken but its answer is lost": {
-			fail:      func(s *FakeStore) { s.CreatedErrOnce = map[string]error{delta0: errStoreDown} },
-			committed: []uint64{0, 1},
+		"the group object is taken but its answer is lost": {
+			fail:      func(s *FakeStore) { s.CreatedErrOnce = map[string]error{group0: errStoreDown} },
+			committed: []uint64{1},
 		},
 	}
 	for name, tt := range tests {
@@ -49,6 +49,66 @@ func TestWriter_Append_AfterAFailedWrite(t *testing.T) {
 			assert.Equal(t, tt.committed, drain(t, openReader(t, objects)))
 		})
 	}
+}
+
+func TestWriter_Append_CommitTakenButItsAnswerLost(t *testing.T) {
+	objects := &FakeStore{}
+	w := newWriter(t, objects, Config{})
+	objects.CreatedErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
+
+	first, err := w.Append(t.Context(), ticksPerGroup, []byte("first"))
+	require.NoError(t, err, "the commit is read back and found to be this one")
+	second, err := w.Append(t.Context(), ticksPerGroup, []byte("second"))
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(0), first.ID.Sequence())
+	assert.Equal(t, uint64(1), second.ID.Sequence())
+	assert.Equal(t, []uint64{0, 1}, drain(t, openReader(t, objects)))
+}
+
+func TestWriter_Append_CommitFailsAndCannotBeReadBack(t *testing.T) {
+	objects := &FakeStore{}
+	w := newWriter(t, objects, Config{})
+	delta0 := deltaKey(testTrack, 1, 0)
+	objects.CreatedErrOnce = map[string]error{delta0: errStoreDown}
+	objects.GetErrOnce = map[string]error{delta0: errStoreDown}
+
+	_, err := w.Append(t.Context(), ticksPerGroup, []byte("first"))
+	require.ErrorIs(t, err, errStoreDown, "an unconfirmed commit is reported")
+	second, err := w.Append(t.Context(), ticksPerGroup, []byte("second"))
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), second.ID.Sequence(), "the reload finds the commit the store took")
+	assert.Equal(t, []uint64{0, 1}, drain(t, openReader(t, objects)))
+}
+
+func TestWriter_Append_FollowsAnotherWritersCommit(t *testing.T) {
+	objects := &FakeStore{}
+	w := newWriter(t, objects, Config{})
+	track, err := Open(t.Context(), objects, testTrack, Config{})
+	require.NoError(t, err)
+	other, err := track.Writer(t.Context())
+	require.NoError(t, err)
+	_, err = other.Append(t.Context(), ticksPerGroup, []byte("other"))
+	require.NoError(t, err)
+
+	group, err := w.Append(t.Context(), ticksPerGroup, []byte("this"))
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), group.ID.Sequence(), "the committed sequence is followed, not stepped past")
+	assert.Equal(t, []uint64{0, 1}, drain(t, openReader(t, objects)))
+}
+
+func TestWriter_AppendGroup_DuplicateOfTheLastIsNotStepped(t *testing.T) {
+	objects := &FakeStore{}
+	w := newWriter(t, objects, Config{})
+	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("first"))
+	require.NoError(t, err)
+
+	_, err = w.AppendGroup(t.Context(), testGroup(t, 0), []byte("again"))
+
+	assert.ErrorIs(t, err, ErrGroupExists)
+	assert.False(t, isGroupObjectCollision(err), "a duplicate of the last group is not an uncommitted object")
 }
 
 func TestWriter_Append_AfterARestartPastAnUncommittedGroup(t *testing.T) {

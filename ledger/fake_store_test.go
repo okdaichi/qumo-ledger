@@ -39,8 +39,10 @@ type FakeStore struct {
 	// CreateErrOnce fails the first Create of a key and is then consumed.
 	// CreatedErrOnce stores the first Create of a key and then fails it, which
 	// is how a write the store took but whose answer was lost is modelled.
+	// GetErrOnce fails the first Get of a key and is then consumed.
 	CreateErrOnce  map[string]error
 	CreatedErrOnce map[string]error
+	GetErrOnce     map[string]error
 
 	mu sync.Mutex
 	// gets, creates, swaps and deletes record the keys each operation was
@@ -108,6 +110,13 @@ func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, store.Version,
 	s.record(&s.gets, key)
 	if err := s.GetErr[key]; err != nil {
 		return nil, store.NoVersion, err
+	}
+	s.mu.Lock()
+	once := s.GetErrOnce[key]
+	delete(s.GetErrOnce, key)
+	s.mu.Unlock()
+	if once != nil {
+		return nil, store.NoVersion, once
 	}
 
 	return s.inner().Get(ctx, key)

@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -202,10 +203,14 @@ func (w *Writer) Root() TrackInfo {
 // Because Append chooses the sequence, it steps past one an earlier failed
 // append left an uncommitted group object at, rather than failing on it: the
 // sequence was never committed, and the object is reclaimed with the rest of
-// the unreferenced ones.
+// the unreferenced ones. Each collision first re-reads the epoch, so a sequence
+// another writer committed in the meantime is followed rather than stepped
+// past.
 func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (GroupInfo, error) {
 	wallclock := w.now().UnixNano()
-	for skip := uint64(0); ; skip++ {
+	// floor is the lowest sequence not yet found taken by a group object.
+	var floor uint64
+	for attempt := 0; ; attempt++ {
 		w.mu.Lock()
 		// The sequence follows the last committed group, so learn it from
 		// the store first if a failed write left it unknown.
@@ -221,21 +226,30 @@ func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (Gr
 		}
 		w.mu.Unlock()
 
+		seq = max(seq, floor)
 		group, err := w.AppendGroup(ctx, GroupInfo{
-			ID:        NewGroupID(0, seq+skip),
+			ID:        NewGroupID(0, seq),
 			MediaTime: mediaStart,
 			Duration:  duration,
 			Wallclock: wallclock,
 		}, payload)
-		if !errors.Is(err, ErrGroupExists) || skip == maxSkippedSequences {
+		if !isGroupObjectCollision(err) || attempt == maxSkippedSequences {
 			return group, err
 		}
+		floor = seq + 1
 	}
 }
 
 // maxSkippedSequences bounds how many uncommitted group objects one Append
 // steps past before it reports the collision.
 const maxSkippedSequences = 16
+
+// isGroupObjectCollision reports whether err is AppendGroup finding a group
+// object already stored under the sequence, as opposed to the sequence being
+// the group just committed or the commit itself colliding.
+func isGroupObjectCollision(err error) bool {
+	return errors.Is(err, ErrGroupExists) && errors.Is(err, store.ErrExist)
+}
 
 // AppendGroup stores a sealed group and commits it.
 //
@@ -287,9 +301,13 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 
 	if _, err := w.objects.Create(ctx, meta.ObjectKey, payload); err != nil {
 		if errors.Is(err, store.ErrExist) {
-			return GroupInfo{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.ID, w.path)
+			// Another writer may be appending to the epoch, so the next
+			// append learns from the store what it has committed.
+			w.stale = true
+			return GroupInfo{}, fmt.Errorf("%w: %s in %s: %w", ErrGroupExists, meta.ID, w.path, err)
 		}
-		w.stale = true
+		// Nothing is committed without its delta, so what the writer knows
+		// still holds; a group object the store took anyway is stepped past.
 		return GroupInfo{}, fmt.Errorf("ledger: write group %s: %w", meta.ID, err)
 	}
 
@@ -305,17 +323,18 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 		return GroupInfo{}, err
 	}
 
-	// This create is the commit point.
-	if _, err := w.objects.Create(ctx, deltaKey(w.path, w.epoch, w.nextDelta), data); err != nil {
+	// This create is the commit point. The store may have taken the delta
+	// before failing to say so, which reading it back tells apart.
+	key := deltaKey(w.path, w.epoch, w.nextDelta)
+	if _, err := w.objects.Create(ctx, key, data); err != nil && !w.holds(ctx, key, data) {
+		// Either way the next append learns the epoch from the store rather
+		// than claiming the same delta again.
+		w.stale = true
 		if errors.Is(err, store.ErrExist) {
 			// Another writer claimed this delta number. Immutability turned a
 			// silent split-brain into a clean failure.
 			return GroupInfo{}, fmt.Errorf("ledger: delta %d already committed on %s epoch %d: %w", w.nextDelta, w.path, w.epoch, err)
 		}
-		// The store may have taken the delta before failing to say so; the
-		// next append learns which from the store rather than claiming the
-		// same delta again.
-		w.stale = true
 		return GroupInfo{}, fmt.Errorf("ledger: commit delta %d: %w", w.nextDelta, err)
 	}
 
@@ -344,6 +363,13 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 	}
 
 	return meta, nil
+}
+
+// holds reports whether the object at key is data. A delta carries its commit
+// time, so only the write that produced data can have stored it.
+func (w *Writer) holds(ctx context.Context, key string, data []byte) bool {
+	got, _, err := w.objects.Get(ctx, key)
+	return err == nil && bytes.Equal(got, data)
 }
 
 // NewEpoch begins a new producer lifetime, advancing this writer to the next
