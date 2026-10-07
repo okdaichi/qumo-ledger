@@ -36,6 +36,12 @@ type FakeStore struct {
 	// how a transient failure followed by a retry is modelled.
 	SwapErrOnce map[string]error
 
+	// CreateErrOnce fails the first Create of a key and is then consumed.
+	// CreatedErrOnce stores the first Create of a key and then fails it, which
+	// is how a write the store took but whose answer was lost is modelled.
+	CreateErrOnce  map[string]error
+	CreatedErrOnce map[string]error
+
 	mu sync.Mutex
 	// gets, creates, swaps and deletes record the keys each operation was
 	// called with, in call order. gets is what makes read amplification
@@ -113,7 +119,19 @@ func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (store.
 		return store.NoVersion, err
 	}
 
-	return s.inner().Create(ctx, key, data)
+	s.mu.Lock()
+	failed, created := s.CreateErrOnce[key], s.CreatedErrOnce[key]
+	delete(s.CreateErrOnce, key)
+	delete(s.CreatedErrOnce, key)
+	s.mu.Unlock()
+	if failed != nil {
+		return store.NoVersion, failed
+	}
+	version, err := s.inner().Create(ctx, key, data)
+	if err == nil && created != nil {
+		return store.NoVersion, created
+	}
+	return version, err
 }
 
 func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
