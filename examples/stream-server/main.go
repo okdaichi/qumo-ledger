@@ -14,7 +14,7 @@ import (
 	"os/signal"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fs"
 	"github.com/okdaichi/qumo-ledger/stream"
 )
 
@@ -42,7 +42,7 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	objects, err := fsstore.New(*root)
+	objects, err := fs.New(*root)
 	if err != nil {
 		return err
 	}

@@ -18,7 +18,7 @@ import (
 
 	"github.com/okdaichi/qumo-ledger/internal/version"
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fs"
 )
 
 func main() {
@@ -202,7 +202,7 @@ func follow(ctx context.Context, args []string) error {
 }
 
 func openTrack(ctx context.Context, root, path string) (*ledger.Track, error) {
-	objects, err := fsstore.New(root)
+	objects, err := fs.New(root)
 	if err != nil {
 		return nil, err
 	}

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 )
 
 // FakeStore is an object store that behaves like a real one until told
@@ -85,7 +85,7 @@ func (s *FakeStore) inner() store.Store {
 	defer s.mu.Unlock()
 
 	if s.Inner == nil {
-		s.Inner = memstore.New()
+		s.Inner = mem.New()
 	}
 
 	return s.Inner
