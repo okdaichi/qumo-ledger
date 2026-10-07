@@ -1,28 +1,28 @@
-package memstore_test
+package mem_test
 
 import (
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/okdaichi/qumo-ledger/ledger/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestStore_Conformance(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) *memstore.Store {
-		return memstore.New()
+	storetest.Run(t, func(t *testing.T) *mem.Store {
+		return mem.New()
 	})
 }
 
 func TestStore_ListerConformance(t *testing.T) {
-	storetest.RunLister(t, func(t *testing.T) *memstore.Store {
-		return memstore.New()
+	storetest.RunLister(t, func(t *testing.T) *mem.Store {
+		return mem.New()
 	})
 }
 
 func TestStore_Len(t *testing.T) {
-	store := memstore.New()
+	store := mem.New()
 	assert.Equal(t, 0, store.Len())
 
 	_, err := store.Create(t.Context(), "a", []byte("x"))
@@ -38,7 +38,7 @@ func TestStore_Len(t *testing.T) {
 // Versions are unique across the store rather than per key, so a version taken
 // from one object can never accidentally satisfy a swap on another.
 func TestStore_VersionsAreStoreWide(t *testing.T) {
-	store := memstore.New()
+	store := mem.New()
 
 	first, err := store.Create(t.Context(), "a", []byte("same"))
 	require.NoError(t, err)

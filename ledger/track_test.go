@@ -3,7 +3,7 @@ package ledger
 import (
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -89,7 +89,7 @@ func TestTrackSchema_validate(t *testing.T) {
 // TrackInfo embeds the schema, so its fields read directly and the whole
 // schema can be handed back to Create to make another track like this one.
 func TestTrackInfo_TrackSchema(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 
 	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})
 	require.NoError(t, err)

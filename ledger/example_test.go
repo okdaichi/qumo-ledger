@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 )
 
 // videoTimescale is the usual 90 kHz media clock; ticksPerGroup is two seconds
@@ -29,7 +29,7 @@ var exampleStart = time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 func Example() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
+	track, err := ledger.Create(ctx, mem.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 		MIME:       "video/mp4",
@@ -84,7 +84,7 @@ func Example() {
 // incomparable media clocks — is what lines the two recordings up.
 func ExampleReader_RangeWallclock() {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 
 	// A 90 kHz video track in two-second groups.
 	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
@@ -126,7 +126,7 @@ func ExampleReader_RangeWallclock() {
 // any frames inside the window at all.
 func ExampleReader_RangeMedia() {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
 	opened, err := ledger.Open(ctx, store, "live/cam1/video", ledger.Config{})
@@ -162,7 +162,7 @@ func ExampleReader_RangeMedia() {
 func ExampleReader_SeekMedia() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
+	track, err := ledger.Create(ctx, mem.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})
@@ -221,7 +221,7 @@ func ExampleReader_SeekMedia() {
 // to the caller.
 func ExampleReader_Next() {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	writeTrack(ctx, store, "live/cam1/video", videoTimescale, 2*time.Second, 4)
 
 	opened, err := ledger.Open(ctx, store, "live/cam1/video", ledger.Config{})
@@ -289,7 +289,7 @@ func ExampleReader_Next() {
 func ExampleWriter_AppendGroup() {
 	ctx := context.Background()
 
-	track, err := ledger.Create(ctx, memstore.New(), "live/cam1/video", ledger.TrackSchema{
+	track, err := ledger.Create(ctx, mem.New(), "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
 		TimeSource: ledger.TimeSourceFrame,
 	}, ledger.Config{})
@@ -355,7 +355,7 @@ func ExampleTrack_Writer() {
 
 	// Kept separately here only so the example can delete the head pointer
 	// behind the ledger's back.
-	objects := memstore.New()
+	objects := mem.New()
 
 	track, err := ledger.Create(ctx, objects, "live/cam1/video", ledger.TrackSchema{
 		Timescale:  videoTimescale,
@@ -430,7 +430,7 @@ func ExampleTrack_Writer() {
 
 // writeTrack creates a track and appends count groups of the given wallclock
 // duration, with media time in the track's own timescale.
-func writeTrack(ctx context.Context, store *memstore.Store, track ledger.TrackPath, timescale uint32, every time.Duration, count uint64) {
+func writeTrack(ctx context.Context, store *mem.Store, track ledger.TrackPath, timescale uint32, every time.Duration, count uint64) {
 	created, err := ledger.Create(ctx, store, track, ledger.TrackSchema{
 		Timescale:  timescale,
 		TimeSource: ledger.TimeSourceFrame,

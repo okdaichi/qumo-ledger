@@ -376,8 +376,9 @@ func TestTimescaleForTrack_Version1Tkhd_NonMatch(t *testing.T) {
 		"a track_ID present in neither v1 trak must not match")
 }
 
-// An mdhd whose version is neither 0 nor 1 is unrecognized, and the walk must
-// report the track as absent rather than interpret unknown layout.
+// An mdhd whose version is neither 0 nor 1 is unrecognized, and reading it must
+// fail outright rather than interpret an unknown layout. It is not ErrNotFound:
+// the box is there, so "absent" would send a caller looking elsewhere for it.
 func TestTimescale_MdhdVersion2(t *testing.T) {
 	mdhd := box("mdhd",
 		[]byte{2, 0, 0, 0}, // version 2, flags
@@ -388,7 +389,9 @@ func TestTimescale_MdhdVersion2(t *testing.T) {
 	init := box("moov", box("trak", box("mdia", mdhd)))
 
 	_, err := fmp4.Timescale(init)
-	assert.ErrorIs(t, err, fmp4.ErrNotFound)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "unsupported mdhd version 2")
+	assert.NotErrorIs(t, err, fmp4.ErrNotFound)
 }
 
 // A trak with an mdia but no tkhd has no identity. TimescaleForTrack must skip
@@ -424,7 +427,7 @@ func FuzzTimescale(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Fuzz target: must never panic on any input.
-		_, _ = fmp4.Timescale(data)         //nolint:errcheck
+		_, _ = fmp4.Timescale(data)            //nolint:errcheck
 		_, _ = fmp4.TimescaleForTrack(data, 1) //nolint:errcheck
 	})
 }

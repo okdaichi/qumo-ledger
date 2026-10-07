@@ -1,9 +1,9 @@
-// Package memstore provides an in-memory [store.Store].
+// Package mem provides an in-memory [store.Store].
 //
 // It implements the full contract, including compare-and-swap and listing, so
-// it doubles as the reference backend: if behaviour differs between memstore
+// it doubles as the reference backend: if behaviour differs between mem
 // and a real backend, the real backend is wrong.
-package memstore
+package mem
 
 import (
 	"context"
@@ -54,7 +54,7 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, err
 
 	obj, ok := s.objects[key]
 	if !ok {
-		return nil, store.NoVersion, fmt.Errorf("memstore: get %q: %w", key, store.ErrNotExist)
+		return nil, store.NoVersion, fmt.Errorf("mem: get %q: %w", key, store.ErrNotExist)
 	}
 
 	return slices.Clone(obj.data), obj.version, nil
@@ -70,7 +70,7 @@ func (s *Store) Create(ctx context.Context, key string, data []byte) (store.Vers
 	defer s.mu.Unlock()
 
 	if _, ok := s.objects[key]; ok {
-		return store.NoVersion, fmt.Errorf("memstore: create %q: %w", key, store.ErrExist)
+		return store.NoVersion, fmt.Errorf("mem: create %q: %w", key, store.ErrExist)
 	}
 
 	return s.storeLocked(key, data), nil
@@ -88,9 +88,9 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 	obj, ok := s.objects[key]
 	switch {
 	case !ok && expect != store.NoVersion:
-		return store.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, store.ErrNotExist)
+		return store.NoVersion, fmt.Errorf("mem: swap %q: %w", key, store.ErrNotExist)
 	case ok && obj.version != expect:
-		return store.NoVersion, fmt.Errorf("memstore: swap %q: %w", key, store.ErrVersionMismatch)
+		return store.NoVersion, fmt.Errorf("mem: swap %q: %w", key, store.ErrVersionMismatch)
 	}
 
 	return s.storeLocked(key, data), nil

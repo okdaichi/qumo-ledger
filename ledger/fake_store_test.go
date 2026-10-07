@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 )
 
 // FakeStore is an object store that behaves like a real one until told
@@ -35,6 +35,14 @@ type FakeStore struct {
 	// SwapErrOnce fails the first Swap of a key and is then consumed, which is
 	// how a transient failure followed by a retry is modelled.
 	SwapErrOnce map[string]error
+
+	// CreateErrOnce fails the first Create of a key and is then consumed.
+	// CreatedErrOnce stores the first Create of a key and then fails it, which
+	// is how a write the store took but whose answer was lost is modelled.
+	// GetErrOnce fails the first Get of a key and is then consumed.
+	CreateErrOnce  map[string]error
+	CreatedErrOnce map[string]error
+	GetErrOnce     map[string]error
 
 	mu sync.Mutex
 	// gets, creates, swaps and deletes record the keys each operation was
@@ -85,7 +93,7 @@ func (s *FakeStore) inner() store.Store {
 	defer s.mu.Unlock()
 
 	if s.Inner == nil {
-		s.Inner = memstore.New()
+		s.Inner = mem.New()
 	}
 
 	return s.Inner
@@ -103,6 +111,13 @@ func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, store.Version,
 	if err := s.GetErr[key]; err != nil {
 		return nil, store.NoVersion, err
 	}
+	s.mu.Lock()
+	once := s.GetErrOnce[key]
+	delete(s.GetErrOnce, key)
+	s.mu.Unlock()
+	if once != nil {
+		return nil, store.NoVersion, once
+	}
 
 	return s.inner().Get(ctx, key)
 }
@@ -113,7 +128,19 @@ func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (store.
 		return store.NoVersion, err
 	}
 
-	return s.inner().Create(ctx, key, data)
+	s.mu.Lock()
+	failed, created := s.CreateErrOnce[key], s.CreatedErrOnce[key]
+	delete(s.CreateErrOnce, key)
+	delete(s.CreatedErrOnce, key)
+	s.mu.Unlock()
+	if failed != nil {
+		return store.NoVersion, failed
+	}
+	version, err := s.inner().Create(ctx, key, data)
+	if err == nil && created != nil {
+		return store.NoVersion, created
+	}
+	return version, err
 }
 
 func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
