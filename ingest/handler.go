@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -229,6 +230,9 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 		badBody(w, err)
 		return
 	}
+	// One track has one broadcast path: "room/123" and "/room/123/" are
+	// "/room/123", so its contributors and hooks agree on the path.
+	a.BroadcastPath = "/" + strings.Trim(a.BroadcastPath, "/")
 	if msg := validate(a); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -274,8 +278,10 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 // validate returns why an announcement is unusable, or "".
 func validate(a Announcement) string {
 	switch {
-	case strings.Trim(a.BroadcastPath, "/") == "":
+	case a.BroadcastPath == "/":
 		return "broadcast_path is required"
+	case path.Clean(a.BroadcastPath) != a.BroadcastPath:
+		return "broadcast_path must be clean: no empty, \".\" or \"..\" segments"
 	case a.TrackName == "" || strings.Contains(a.TrackName, "/"):
 		return "track_name is required and must not contain a slash"
 	case a.Name == "" || a.Name == "." || a.Name == ".." || strings.Contains(a.Name, "/"):
@@ -317,15 +323,25 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 
 	// Committing and notifying under one lock delivers a track's records to
 	// OnRecord in commit order.
+	//
+	// The append outlives a client that leaves mid-request: an append cut
+	// short between storing the group and committing it leaves the group's
+	// object behind, and the next append of the track would collide with it.
 	c.track.mu.Lock()
-	group, err := c.track.writer.Append(r.Context(), 0, data)
-	if err == nil && h.opts.OnRecord != nil {
+	group, err := c.track.writer.Append(context.WithoutCancel(r.Context()), 0, data)
+	// An append that committed but could not seal returns the group with its
+	// error: the record is stored, so it is delivered and answered as such.
+	committed := group.ObjectKey != ""
+	if committed && h.opts.OnRecord != nil {
 		h.opts.OnRecord(r.Context(), Recorded{Contribution: c.Contribution, Group: group, Data: data})
 	}
 	c.track.mu.Unlock()
-	if err != nil {
+	switch {
+	case !committed:
 		h.internalError(w, r, "append record", err)
 		return
+	case err != nil:
+		h.logger.Warn("record committed with an error", "method", r.Method, "url", r.URL.Path, "error", err)
 	}
 
 	writeJSON(w, http.StatusCreated, recordResponse{
@@ -432,11 +448,14 @@ func (h *Handler) expire(c *contribution) {
 	delete(h.contributions, c.ID)
 }
 
-// writerFor returns the track's writer, opening it on first use.
+// writerFor returns the track's writer, opening it on first use. Opening reads
+// the store, so it runs without h.mu; when two requests open the same track at
+// once, the first to finish is kept.
 func (h *Handler) writerFor(ctx context.Context, track ledger.TrackPath) (*trackWriter, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if tw, ok := h.tracks[track]; ok {
+	tw, ok := h.tracks[track]
+	h.mu.Unlock()
+	if ok {
 		return tw, nil
 	}
 	t, err := ledger.Open(ctx, h.store, track, h.opts.Config)
@@ -447,7 +466,12 @@ func (h *Handler) writerFor(ctx context.Context, track ledger.TrackPath) (*track
 	if err != nil {
 		return nil, fmt.Errorf("ingest: open writer of %s: %w", track, err)
 	}
-	tw := &trackWriter{writer: writer}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if tw, ok := h.tracks[track]; ok {
+		return tw, nil
+	}
+	tw = &trackWriter{writer: writer}
 	h.tracks[track] = tw
 	return tw, nil
 }
