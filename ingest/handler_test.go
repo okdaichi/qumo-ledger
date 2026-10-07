@@ -165,6 +165,8 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 
 	require.Len(t, seen, 2)
 	assert.Equal(t, chatTrack, seen[0].Track)
+	assert.Equal(t, "/room/123", seen[0].BroadcastPath)
+	assert.Equal(t, "chat", seen[0].TrackName)
 	assert.Equal(t, "alice", seen[0].Name)
 	assert.JSONEq(t, `"one"`, string(seen[0].Payload))
 	assert.Equal(t, uint64(0), seen[0].Group.ID.Sequence())
@@ -182,8 +184,8 @@ func TestHandler_OnAnnounce_ReportsWhetherTheTrackIsNew(t *testing.T) {
 	post(h, "announce", request("bob", ""))
 
 	assert.Equal(t, []ingest.Announced{
-		{Track: chatTrack, Name: "alice", Created: true},
-		{Track: chatTrack, Name: "bob", Created: false},
+		{BroadcastPath: "/room/123", TrackName: "chat", Track: chatTrack, Name: "alice", Created: true},
+		{BroadcastPath: "/room/123", TrackName: "chat", Track: chatTrack, Name: "bob", Created: false},
 	}, seen)
 }
 

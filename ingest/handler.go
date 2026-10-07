@@ -57,8 +57,13 @@ type Record struct {
 
 // Announced describes a track an announce request established.
 type Announced struct {
-	Track ledger.TrackPath
-	Name  string
+	// BroadcastPath and TrackName are the request's, and Track is the ledger
+	// track they name.
+	BroadcastPath string
+	TrackName     string
+	Track         ledger.TrackPath
+
+	Name string
 
 	// Created reports whether this request created the track.
 	Created bool
@@ -66,7 +71,12 @@ type Announced struct {
 
 // Recorded describes a committed record.
 type Recorded struct {
-	Track ledger.TrackPath
+	// BroadcastPath and TrackName are the request's, and Track is the ledger
+	// track they name.
+	BroadcastPath string
+	TrackName     string
+	Track         ledger.TrackPath
+
 	Group ledger.GroupInfo
 	Record
 }
@@ -229,7 +239,13 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request, req *Req
 	}
 
 	if h.opts.OnAnnounce != nil {
-		h.opts.OnAnnounce(r.Context(), Announced{Track: track, Name: req.Name, Created: created})
+		h.opts.OnAnnounce(r.Context(), Announced{
+			BroadcastPath: req.BroadcastPath,
+			TrackName:     req.TrackName,
+			Track:         track,
+			Name:          req.Name,
+			Created:       created,
+		})
 	}
 	status := http.StatusOK
 	if created {
@@ -280,7 +296,13 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request, req *Reque
 	tw.mu.Lock()
 	group, err := tw.writer.Append(r.Context(), 0, data)
 	if err == nil && h.opts.OnRecord != nil {
-		h.opts.OnRecord(r.Context(), Recorded{Track: track, Group: group, Record: record})
+		h.opts.OnRecord(r.Context(), Recorded{
+			BroadcastPath: req.BroadcastPath,
+			TrackName:     req.TrackName,
+			Track:         track,
+			Group:         group,
+			Record:        record,
+		})
 	}
 	tw.mu.Unlock()
 	if err != nil {
