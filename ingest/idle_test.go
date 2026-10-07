@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -82,9 +83,9 @@ func TestHandler_CloseIdle_AtMostEveryHalfTimeout(t *testing.T) {
 		tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/1", TrackName: "chat"})
 		require.NoError(t, err)
 		h.release(tr)
-		tr.lastUsed = time.Now().Add(-2 * idle)
 
 		h.mu.Lock()
+		tr.lastUsed = time.Now().Add(-2 * idle)
 		h.closeIdle(time.Now())
 		_, open := h.tracks[tr.Path()]
 		h.mu.Unlock()
@@ -93,9 +94,82 @@ func TestHandler_CloseIdle_AtMostEveryHalfTimeout(t *testing.T) {
 	})
 }
 
-func TestNewHandler_TrackIdleTimeoutDefault(t *testing.T) {
-	h, err := NewHandler(mem.New(), Options{})
-	require.NoError(t, err)
+func TestHandler_IdleTracksAreClosedByReads(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const idle = time.Minute
+		h, err := NewHandler(mem.New(), Options{TrackIdleTimeout: idle})
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, serve(h, http.MethodPost, "/tracks/room/1/chat", `"first"`).Code)
 
-	assert.Equal(t, DefaultTrackIdleTimeout, h.idle)
+		time.Sleep(2 * idle)
+		require.Equal(t, http.StatusOK, serve(h, http.MethodGet, "/tracks/room/1/chat", "").Code)
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		assert.Empty(t, h.tracks, "a handler that is only read from still closes idle tracks")
+	})
+}
+
+func TestHandler_OnOpenComesBeforeTheFirstRecord(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+	logEvent := func(e string) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
+	opening := make(chan struct{})
+	h, err := NewHandler(mem.New(), Options{
+		OnOpen: func(context.Context, Track) {
+			<-opening
+			logEvent("open")
+		},
+		OnRecord: func(context.Context, Track, ledger.GroupInfo, []byte) { logEvent("record") },
+	})
+	require.NoError(t, err)
+	tr := Track{BroadcastPath: "/room/1", TrackName: "chat"}
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() { serve(h, http.MethodPost, "/tracks/room/1/chat", `"hello"`) })
+	}
+	// Both requests hold the track while the first is still in OnOpen.
+	require.Eventually(t, func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		opened, ok := h.tracks[tr.Path()]
+		return ok && opened.users == 2
+	}, time.Second, time.Millisecond)
+	assert.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) > 0
+	}, 50*time.Millisecond, time.Millisecond, "no record is delivered before OnOpen returns")
+	close(opening)
+	wg.Wait()
+
+	assert.Equal(t, []string{"open", "record", "record"}, events)
+}
+
+func TestNewHandler_TrackIdleTimeout(t *testing.T) {
+	tests := map[string]struct {
+		timeout time.Duration
+		want    time.Duration
+		wantErr bool
+	}{
+		"zero is the default": {timeout: 0, want: DefaultTrackIdleTimeout},
+		"positive":            {timeout: time.Second, want: time.Second},
+		"negative":            {timeout: -time.Second, wantErr: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h, err := NewHandler(mem.New(), Options{TrackIdleTimeout: tt.timeout})
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, h.idle)
+		})
+	}
 }

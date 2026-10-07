@@ -132,7 +132,7 @@ type Options struct {
 
 	// TrackIdleTimeout closes a track the handler has not written to for this
 	// long, releasing its writer, idempotency keys and limits. Zero means
-	// [DefaultTrackIdleTimeout].
+	// [DefaultTrackIdleTimeout]; a negative timeout is an error.
 	TrackIdleTimeout time.Duration
 
 	// OnRecord is called after record, the JSON encoding of a [Record], was
@@ -204,6 +204,9 @@ type track struct {
 func NewHandler(s store.Store, opts Options) (*Handler, error) {
 	if s == nil {
 		return nil, errors.New("ingest: nil store")
+	}
+	if opts.TrackIdleTimeout < 0 {
+		return nil, fmt.Errorf("ingest: negative TrackIdleTimeout %v", opts.TrackIdleTimeout)
 	}
 	h := &Handler{
 		store:   s,
@@ -318,9 +321,9 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		return
 	}
-	// The append outlives a client that leaves mid-request: an append cut
-	// short between storing the group and committing it leaves the group's
-	// object behind, and the next append of the track would collide with it.
+	// The append outlives a client that leaves mid-request: cut short, it
+	// could not tell whether the store took the commit, and a record that was
+	// committed is still delivered to OnRecord.
 	group, err := tr.writer.Append(context.WithoutCancel(r.Context()), 0, data)
 	// An append that committed but could not seal returns the group with its
 	// error: the record is stored, so it is delivered and answered as such.
@@ -437,6 +440,10 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		page.Before = groups[0].ID.String()
 	}
 	writeJSON(w, http.StatusOK, page)
+	// A handler that is only read from still lets go of the tracks it wrote.
+	h.mu.Lock()
+	h.closeIdle(time.Now())
+	h.mu.Unlock()
 }
 
 // resolve reads the request's track and authorizes the access on it, answering
@@ -511,6 +518,10 @@ func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
 		return tr, false, nil
 	}
 	tr = &track{Track: t, writer: writer, users: 1}
+	// Holding the new track until OnOpen returns keeps the requests that find
+	// it meanwhile from recording, so OnOpen comes before its first OnRecord.
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
 	h.tracks[key] = tr
 	h.mu.Unlock()
 	if h.opts.OnOpen != nil {
