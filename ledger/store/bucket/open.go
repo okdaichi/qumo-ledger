@@ -1,4 +1,4 @@
-package s3store
+package bucket
 
 import (
 	"context"
@@ -26,7 +26,7 @@ func init() {
 	store.Register(Scheme, func(_ context.Context, u *url.URL) (store.Store, error) {
 		cfg, err := configFromURI(u, os.Getenv)
 		if err != nil {
-			return nil, fmt.Errorf("s3store: %q: %w", u.Redacted(), err)
+			return nil, fmt.Errorf("bucket: %q: %w", u.Redacted(), err)
 		}
 		return New(cfg)
 	})

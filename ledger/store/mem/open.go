@@ -1,4 +1,4 @@
-package memstore
+package mem
 
 import (
 	"context"

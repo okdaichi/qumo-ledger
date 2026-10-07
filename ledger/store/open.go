@@ -28,7 +28,7 @@ var (
 // calls it from an init function, so importing the backend's package is what
 // enables its scheme:
 //
-//	import _ "github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
+//	import _ "github.com/okdaichi/qumo-ledger/ledger/store/fs"
 //
 // Register panics if open is nil or the scheme is already registered.
 func Register(scheme string, open Opener) {
@@ -59,10 +59,10 @@ func Schemes() []string {
 // be registered:
 //
 //	""                                  memory, the same as "mem:"
-//	mem:                                memory                 (memstore)
-//	file:///var/lib/ledger              a directory            (fsstore)
-//	s3://bucket/prefix                  an S3-compatible store (s3store)
-//	postgres://user@host:26257/db       a SQL table            (sqlstore)
+//	mem:                                memory                 (mem)
+//	file:///var/lib/ledger              a directory            (fs)
+//	s3://bucket/prefix                  an S3-compatible store (bucket)
+//	postgres://user@host:26257/db       a SQL table            (db)
 //
 // A URI with no scheme other than the empty string is an error, so a bare path
 // is never mistaken for a backend. Open returns [ErrUnknownScheme] when no

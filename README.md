@@ -34,7 +34,7 @@ go get github.com/okdaichi/qumo-ledger
 ## Usage
 
 ```go
-objects, _ := fsstore.New("/var/lib/qumo-ledger")
+objects, _ := fs.New("/var/lib/qumo-ledger")
 
 // Or open a backend by URI. Each backend package registers its scheme when it
 // is imported: "" or mem:, file:///var/lib/qumo-ledger,
@@ -153,10 +153,10 @@ A supported client CLI for accessing a ledger lives in a separate repository.
 |---|---|
 | `ledger` | The core. Depends on no transport and no cloud SDK. |
 | `ledger/store` | The storage contract: conditional create, compare-and-swap, optional listing. A leaf, so a backend never imports the ledger. |
-| `ledger/store/memstore` | In-memory backend; also the reference implementation. |
-| `ledger/store/fsstore` | Local filesystem backend. |
-| `ledger/store/sqlstore` | PostgreSQL / CockroachDB backend: one table, one row per object. |
-| `ledger/store/s3store` | Amazon S3 / S3-compatible backend over conditional PUTs. |
+| `ledger/store/mem` | In-memory backend; also the reference implementation. |
+| `ledger/store/fs` | Local filesystem backend. |
+| `ledger/store/db` | PostgreSQL / CockroachDB backend: one table, one row per object. |
+| `ledger/store/bucket` | Amazon S3 / S3-compatible backend over conditional PUTs. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
 | `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
 | `ingest` | Record over HTTP: senders POST JSON records to a track's URL, `/tracks/room/123/chat`. Authorization and live delivery are hooks. |

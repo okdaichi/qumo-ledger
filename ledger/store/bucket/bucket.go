@@ -1,4 +1,4 @@
-// Package s3store provides a [store.Store] over a bucket of Amazon S3 or an
+// Package bucket provides a [store.Store] over a bucket of Amazon S3 or an
 // S3-compatible object store.
 //
 // Objects are stored under a key prefix in one bucket. Create and Swap are
@@ -8,7 +8,7 @@
 // It is a simple default: it speaks the S3 REST API directly with Signature
 // Version 4 and static credentials, reads and writes objects whole, and
 // addresses the bucket path-style when an endpoint is given.
-package s3store
+package bucket
 
 import (
 	"bytes"
@@ -75,13 +75,13 @@ var (
 // New returns a Store over the bucket cfg names. It sends no request.
 func New(cfg Config) (*Store, error) {
 	if cfg.Bucket == "" {
-		return nil, errors.New("s3store: no bucket")
+		return nil, errors.New("bucket: no bucket")
 	}
 	if cfg.Region == "" {
-		return nil, errors.New("s3store: no region")
+		return nil, errors.New("bucket: no region")
 	}
 	if cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" {
-		return nil, errors.New("s3store: no credentials")
+		return nil, errors.New("bucket: no credentials")
 	}
 
 	var bucket *url.URL
@@ -90,7 +90,7 @@ func New(cfg Config) (*Store, error) {
 	} else {
 		endpoint, err := url.Parse(cfg.Endpoint)
 		if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
-			return nil, fmt.Errorf("s3store: invalid endpoint %q", cfg.Endpoint)
+			return nil, fmt.Errorf("bucket: invalid endpoint %q", cfg.Endpoint)
 		}
 		bucket = endpoint.JoinPath(cfg.Bucket)
 		bucket.Path = "/" + strings.TrimPrefix(bucket.Path, "/") + "/"
@@ -122,7 +122,7 @@ func New(cfg Config) (*Store, error) {
 func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	resp, err := s.do(ctx, http.MethodGet, s.prefix+key, nil, nil, nil)
 	if err != nil {
-		return nil, store.NoVersion, fmt.Errorf("s3store: get %s: %w", key, err)
+		return nil, store.NoVersion, fmt.Errorf("bucket: get %s: %w", key, err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -130,11 +130,11 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, err
 	case http.StatusNotFound:
 		return nil, store.NoVersion, fmt.Errorf("%w: %s", store.ErrNotExist, key)
 	default:
-		return nil, store.NoVersion, fmt.Errorf("s3store: get %s: %w", key, responseError(resp))
+		return nil, store.NoVersion, fmt.Errorf("bucket: get %s: %w", key, responseError(resp))
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, store.NoVersion, fmt.Errorf("s3store: get %s: %w", key, err)
+		return nil, store.NoVersion, fmt.Errorf("bucket: get %s: %w", key, err)
 	}
 	return data, store.Version(resp.Header.Get("ETag")), nil
 }
@@ -143,7 +143,7 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, err
 func (s *Store) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	version, status, err := s.put(ctx, key, data, http.Header{"If-None-Match": {"*"}})
 	if err != nil {
-		return store.NoVersion, fmt.Errorf("s3store: create %s: %w", key, err)
+		return store.NoVersion, fmt.Errorf("bucket: create %s: %w", key, err)
 	}
 	if status == http.StatusPreconditionFailed {
 		return store.NoVersion, fmt.Errorf("%w: %s", store.ErrExist, key)
@@ -159,7 +159,7 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 	}
 	version, status, err := s.put(ctx, key, data, header)
 	if err != nil {
-		return store.NoVersion, fmt.Errorf("s3store: swap %s: %w", key, err)
+		return store.NoVersion, fmt.Errorf("bucket: swap %s: %w", key, err)
 	}
 	switch status {
 	case http.StatusPreconditionFailed:
@@ -174,14 +174,14 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 func (s *Store) Delete(ctx context.Context, key string) error {
 	resp, err := s.do(ctx, http.MethodDelete, s.prefix+key, nil, nil, nil)
 	if err != nil {
-		return fmt.Errorf("s3store: delete %s: %w", key, err)
+		return fmt.Errorf("bucket: delete %s: %w", key, err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
 		return nil
 	}
-	return fmt.Errorf("s3store: delete %s: %w", key, responseError(resp))
+	return fmt.Errorf("bucket: delete %s: %w", key, responseError(resp))
 }
 
 // List implements [store.Lister].
@@ -191,7 +191,7 @@ func (s *Store) List(ctx context.Context, prefix string) iter.Seq2[string, error
 		for {
 			page, err := s.listPage(ctx, query)
 			if err != nil {
-				yield("", fmt.Errorf("s3store: list %s: %w", prefix, err))
+				yield("", fmt.Errorf("bucket: list %s: %w", prefix, err))
 				return
 			}
 			for _, object := range page.Contents {

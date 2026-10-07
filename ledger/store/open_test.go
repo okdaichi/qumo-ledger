@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fs"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +20,7 @@ func TestOpen_Memory(t *testing.T) {
 			s, err := store.Open(t.Context(), uri)
 
 			require.NoError(t, err)
-			assert.IsType(t, &memstore.Store{}, s)
+			assert.IsType(t, &mem.Store{}, s)
 		})
 	}
 }
@@ -32,7 +32,7 @@ func TestOpen_File(t *testing.T) {
 	s, err := store.Open(t.Context(), uri)
 
 	require.NoError(t, err)
-	assert.IsType(t, &fsstore.Store{}, s)
+	assert.IsType(t, &fs.Store{}, s)
 	assert.DirExists(t, dir)
 }
 
@@ -74,14 +74,14 @@ func TestOpen_ErrorsHideThePassword(t *testing.T) {
 func TestSchemes_ListsRegisteredBackends(t *testing.T) {
 	schemes := store.Schemes()
 
-	assert.Contains(t, schemes, memstore.Scheme)
-	assert.Contains(t, schemes, fsstore.Scheme)
+	assert.Contains(t, schemes, mem.Scheme)
+	assert.Contains(t, schemes, fs.Scheme)
 	assert.IsIncreasing(t, schemes)
 }
 
 func TestRegister_Panics(t *testing.T) {
-	opener := func(context.Context, *url.URL) (store.Store, error) { return memstore.New(), nil }
+	opener := func(context.Context, *url.URL) (store.Store, error) { return mem.New(), nil }
 
 	assert.Panics(t, func() { store.Register("nil-opener", nil) })
-	assert.Panics(t, func() { store.Register(memstore.Scheme, opener) }, "a scheme is registered once")
+	assert.Panics(t, func() { store.Register(mem.Scheme, opener) }, "a scheme is registered once")
 }

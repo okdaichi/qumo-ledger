@@ -1,4 +1,4 @@
-package s3store
+package bucket
 
 import (
 	"context"
@@ -270,7 +270,7 @@ func TestStore_LiveConformance(t *testing.T) {
 	if uri == "" {
 		t.Skipf("%s is not set", liveURIEnv)
 	}
-	run := fmt.Sprintf("s3store-test-%d", time.Now().UnixNano())
+	run := fmt.Sprintf("bucket-test-%d", time.Now().UnixNano())
 	newLive := func(t *testing.T) storetest.ListerStore {
 		u := strings.Replace(uri, "?", fmt.Sprintf("/%s/%d?", run, liveCount.Add(1)), 1)
 		s, err := store.Open(t.Context(), u)

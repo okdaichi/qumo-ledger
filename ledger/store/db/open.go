@@ -1,4 +1,4 @@
-package sqlstore
+package db
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func Open(ctx context.Context, uri string) (*Store, error) {
 	}
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("sqlstore: open database: %w", err)
+		return nil, fmt.Errorf("db: open database: %w", err)
 	}
 	s, err := New(ctx, db, table)
 	if err != nil {
@@ -54,7 +54,7 @@ func Open(ctx context.Context, uri string) (*Store, error) {
 func splitTable(uri string) (dsn, table string, err error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return "", "", fmt.Errorf("sqlstore: parse connection URI: %w", err)
+		return "", "", fmt.Errorf("db: parse connection URI: %w", err)
 	}
 	query := u.Query()
 	table = query.Get("table")

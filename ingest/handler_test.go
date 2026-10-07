@@ -15,7 +15,7 @@ import (
 	"github.com/okdaichi/qumo-ledger/ingest"
 	"github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -106,7 +106,7 @@ func TestTrack_Path(t *testing.T) {
 }
 
 func TestHandler_Create(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	var opened []ingest.Track
 	h := newHandler(t, s, ingest.Options{
 		OnOpen: func(_ context.Context, tr ingest.Track) { opened = append(opened, tr) },
@@ -129,7 +129,7 @@ func TestHandler_Create(t *testing.T) {
 }
 
 func TestHandler_Create_ExistingTrackInAnotherHandler(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	require.Equal(t, http.StatusCreated, send(newHandler(t, s, ingest.Options{}), http.MethodPut, chatURL, "").Code)
 
 	rr := send(newHandler(t, s, ingest.Options{}), http.MethodPut, chatURL, "")
@@ -138,7 +138,7 @@ func TestHandler_Create_ExistingTrackInAnotherHandler(t *testing.T) {
 }
 
 func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	var opened []ingest.Track
 	h := newHandler(t, s, ingest.Options{
 		OnOpen: func(_ context.Context, tr ingest.Track) { opened = append(opened, tr) },
@@ -167,7 +167,7 @@ func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 }
 
 func TestHandler_Record_CarriesTheSenderAuthorizeNames(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	var delivered []string
 	h := newHandler(t, s, ingest.Options{
 		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
@@ -192,7 +192,7 @@ func TestHandler_Record_CarriesTheSenderAuthorizeNames(t *testing.T) {
 }
 
 func TestHandler_Record_TracksAreSeparate(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	h := newHandler(t, s, ingest.Options{})
 
 	require.Equal(t, http.StatusCreated, record(h, `"chat"`).Code)
@@ -203,7 +203,7 @@ func TestHandler_Record_TracksAreSeparate(t *testing.T) {
 }
 
 func TestHandler_Record_IdempotencyKey(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	var delivered int
 	h := newHandler(t, s, ingest.Options{
 		OnRecord: func(context.Context, ingest.Track, ledger.GroupInfo, []byte) { delivered++ },
@@ -226,7 +226,7 @@ func TestHandler_Record_IdempotencyKey(t *testing.T) {
 }
 
 func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	h := newHandler(t, s, ingest.Options{})
 	const remembered = 1024
 
@@ -242,7 +242,7 @@ func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
 }
 
 func TestHandler_Record_ConcurrentSendersAllCommit(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	h := newHandler(t, s, ingest.Options{})
 	const senders, each = 8, 10
 
@@ -276,7 +276,7 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 		record string
 	}
 	var seen []delivery
-	h := newHandler(t, memstore.New(), ingest.Options{
+	h := newHandler(t, mem.New(), ingest.Options{
 		OnRecord: func(_ context.Context, tr ingest.Track, g ledger.GroupInfo, rec []byte) {
 			seen = append(seen, delivery{track: tr, group: g, record: string(rec)})
 		},
@@ -294,7 +294,7 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 }
 
 func TestHandler_Authorize(t *testing.T) {
-	s := memstore.New()
+	s := mem.New()
 	type ask struct {
 		track  ingest.Track
 		access ingest.Access
@@ -362,7 +362,7 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			s := memstore.New()
+			s := mem.New()
 			h := newHandler(t, s, ingest.Options{MaxBodyBytes: 128})
 
 			rr := send(h, tt.method, tt.path, tt.body, tt.header...)

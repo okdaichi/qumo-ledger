@@ -1,4 +1,4 @@
-package sqlstore
+package db
 
 import (
 	"database/sql"

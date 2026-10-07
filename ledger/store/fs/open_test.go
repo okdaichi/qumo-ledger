@@ -1,4 +1,4 @@
-package fsstore
+package fs
 
 import (
 	"net/url"

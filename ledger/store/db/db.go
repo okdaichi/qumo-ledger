@@ -1,4 +1,4 @@
-// Package sqlstore provides a [store.Store] over one table of a PostgreSQL or
+// Package db provides a [store.Store] over one table of a PostgreSQL or
 // CockroachDB database.
 //
 // It exists for deployments that already run such a database and no object
@@ -9,7 +9,7 @@
 // It is a simple default: objects are stored whole in a BYTEA column and are
 // read back whole, which suits small objects such as manifests and short
 // groups.
-package sqlstore
+package db
 
 import (
 	"context"
@@ -50,13 +50,13 @@ var (
 // exist. An empty table means [DefaultTable]. The caller keeps ownership of db.
 func New(ctx context.Context, db *sql.DB, table string) (*Store, error) {
 	if db == nil {
-		return nil, errors.New("sqlstore: nil database")
+		return nil, errors.New("db: nil database")
 	}
 	if table == "" {
 		table = DefaultTable
 	}
 	if !tableName.MatchString(table) {
-		return nil, fmt.Errorf("sqlstore: invalid table name %q", table)
+		return nil, fmt.Errorf("db: invalid table name %q", table)
 	}
 	s := &Store{db: db, table: table}
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS `+table+` (
@@ -65,7 +65,7 @@ func New(ctx context.Context, db *sql.DB, table string) (*Store, error) {
 		version BIGINT NOT NULL
 	)`)
 	if err != nil {
-		return nil, fmt.Errorf("sqlstore: create table %s: %w", table, err)
+		return nil, fmt.Errorf("db: create table %s: %w", table, err)
 	}
 	return s, nil
 }
@@ -81,7 +81,7 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, err
 		return nil, store.NoVersion, fmt.Errorf("%w: %s", store.ErrNotExist, key)
 	}
 	if err != nil {
-		return nil, store.NoVersion, fmt.Errorf("sqlstore: get %s: %w", key, err)
+		return nil, store.NoVersion, fmt.Errorf("db: get %s: %w", key, err)
 	}
 	return data, formatVersion(version), nil
 }
@@ -90,7 +90,7 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, err
 func (s *Store) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	created, err := s.insert(ctx, key, data)
 	if err != nil {
-		return store.NoVersion, fmt.Errorf("sqlstore: create %s: %w", key, err)
+		return store.NoVersion, fmt.Errorf("db: create %s: %w", key, err)
 	}
 	if !created {
 		return store.NoVersion, fmt.Errorf("%w: %s", store.ErrExist, key)
@@ -103,7 +103,7 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 	if expect == store.NoVersion {
 		created, err := s.insert(ctx, key, data)
 		if err != nil {
-			return store.NoVersion, fmt.Errorf("sqlstore: swap %s: %w", key, err)
+			return store.NoVersion, fmt.Errorf("db: swap %s: %w", key, err)
 		}
 		if !created {
 			return store.NoVersion, fmt.Errorf("%w: %s", store.ErrVersionMismatch, key)
@@ -121,7 +121,7 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 			return formatVersion(next), nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return store.NoVersion, fmt.Errorf("sqlstore: swap %s: %w", key, err)
+			return store.NoVersion, fmt.Errorf("db: swap %s: %w", key, err)
 		}
 	}
 
@@ -129,7 +129,7 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 	var present bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+s.table+` WHERE key = $1)`, key).Scan(&present)
 	if err != nil {
-		return store.NoVersion, fmt.Errorf("sqlstore: swap %s: %w", key, err)
+		return store.NoVersion, fmt.Errorf("db: swap %s: %w", key, err)
 	}
 	if !present {
 		return store.NoVersion, fmt.Errorf("%w: %s", store.ErrNotExist, key)
@@ -140,7 +140,7 @@ func (s *Store) Swap(ctx context.Context, key string, data []byte, expect store.
 // Delete implements [store.Store].
 func (s *Store) Delete(ctx context.Context, key string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+s.table+` WHERE key = $1`, key); err != nil {
-		return fmt.Errorf("sqlstore: delete %s: %w", key, err)
+		return fmt.Errorf("db: delete %s: %w", key, err)
 	}
 	return nil
 }
@@ -151,14 +151,14 @@ func (s *Store) List(ctx context.Context, prefix string) iter.Seq2[string, error
 		rows, err := s.db.QueryContext(ctx,
 			`SELECT key FROM `+s.table+` WHERE left(key, length($1::TEXT)) = $1::TEXT ORDER BY key`, prefix)
 		if err != nil {
-			yield("", fmt.Errorf("sqlstore: list %s: %w", prefix, err))
+			yield("", fmt.Errorf("db: list %s: %w", prefix, err))
 			return
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var key string
 			if err := rows.Scan(&key); err != nil {
-				yield("", fmt.Errorf("sqlstore: list %s: %w", prefix, err))
+				yield("", fmt.Errorf("db: list %s: %w", prefix, err))
 				return
 			}
 			if !yield(key, nil) {
@@ -166,7 +166,7 @@ func (s *Store) List(ctx context.Context, prefix string) iter.Seq2[string, error
 			}
 		}
 		if err := rows.Err(); err != nil {
-			yield("", fmt.Errorf("sqlstore: list %s: %w", prefix, err))
+			yield("", fmt.Errorf("db: list %s: %w", prefix, err))
 		}
 	}
 }

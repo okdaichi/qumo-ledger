@@ -1,4 +1,4 @@
-package sqlstore_test
+package db_test
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/sqlstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/db"
 	"github.com/okdaichi/qumo-ledger/ledger/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,21 +23,21 @@ const uriEnv = "SQLSTORE_TEST_URI"
 var tableCount atomic.Int64
 
 // newStore returns a Store over a table of its own, dropped when the test ends.
-func newStore(t *testing.T) *sqlstore.Store {
+func newStore(t *testing.T) *db.Store {
 	t.Helper()
 	uri := os.Getenv(uriEnv)
 	if uri == "" {
 		t.Skipf("%s is not set", uriEnv)
 	}
-	db, err := sql.Open("pgx", uri)
+	conn, err := sql.Open("pgx", uri)
 	require.NoError(t, err)
 	table := fmt.Sprintf("ledger_test_%d_%d", time.Now().UnixNano(), tableCount.Add(1))
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table)
-		_ = db.Close()
+		_, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table)
+		_ = conn.Close()
 	})
 
-	s, err := sqlstore.New(t.Context(), db, table)
+	s, err := db.New(t.Context(), conn, table)
 	require.NoError(t, err)
 	return s
 }
@@ -66,11 +66,11 @@ func TestOpen_UsesTheNamedTable(t *testing.T) {
 		t.Skipf("%s is not set", uriEnv)
 	}
 	table := fmt.Sprintf("ledger_test_open_%d", time.Now().UnixNano())
-	db, err := sql.Open("pgx", uri)
+	conn, err := sql.Open("pgx", uri)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table)
-		_ = db.Close()
+		_, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table)
+		_ = conn.Close()
 	})
 
 	opened, err := store.Open(t.Context(), uri+"&table="+table)
@@ -79,7 +79,7 @@ func TestOpen_UsesTheNamedTable(t *testing.T) {
 	require.NoError(t, err)
 
 	var n int
-	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT count(*) FROM `+table).Scan(&n))
+	require.NoError(t, conn.QueryRowContext(t.Context(), `SELECT count(*) FROM `+table).Scan(&n))
 	assert.Equal(t, 1, n)
 }
 
@@ -88,11 +88,11 @@ func TestStore_DatabaseErrors(t *testing.T) {
 	if uri == "" {
 		t.Skipf("%s is not set", uriEnv)
 	}
-	db, err := sql.Open("pgx", uri)
+	conn, err := sql.Open("pgx", uri)
 	require.NoError(t, err)
-	s, err := sqlstore.New(t.Context(), db, "")
+	s, err := db.New(t.Context(), conn, "")
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(t, conn.Close())
 
 	calls := map[string]func(ctx context.Context) error{
 		"get":                func(ctx context.Context) error { _, _, err := s.Get(ctx, "k"); return err },
@@ -113,7 +113,7 @@ func TestStore_DatabaseErrors(t *testing.T) {
 			err := call(t.Context())
 
 			require.Error(t, err)
-			assert.ErrorContains(t, err, "sqlstore:")
+			assert.ErrorContains(t, err, "db:")
 			assert.NotErrorIs(t, err, store.ErrNotExist)
 			assert.NotErrorIs(t, err, store.ErrVersionMismatch)
 		})

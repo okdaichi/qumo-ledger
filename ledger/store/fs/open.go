@@ -1,4 +1,4 @@
-package fsstore
+package fs
 
 import (
 	"context"
@@ -21,7 +21,7 @@ func init() {
 	store.Register(Scheme, func(_ context.Context, u *url.URL) (store.Store, error) {
 		dir, err := uriPath(u)
 		if err != nil {
-			return nil, fmt.Errorf("fsstore: %q: %w", u.Redacted(), err)
+			return nil, fmt.Errorf("fs: %q: %w", u.Redacted(), err)
 		}
 		return New(dir)
 	})
