@@ -28,7 +28,7 @@ const DefaultMaxBodyBytes = 64 << 10
 const DefaultIdleTimeout = 5 * time.Minute
 
 // Encoding and MIME of the tracks a [Handler] creates: every group is one JSON
-// [Record].
+// value, the payload of one record.
 const (
 	Encoding = "json"
 	MIME     = "application/json"
@@ -37,85 +37,49 @@ const (
 // timescale is the media timescale of the tracks a Handler creates.
 const timescale = 1000
 
+// Idempotency keys: a contribution remembers the replies to this many of its
+// most recent keyed records, and a key is at most this long.
+const (
+	idempotencyKeys      = 256
+	maxIdempotencyKeyLen = 255
+)
+
 // ErrUnauthenticated is what [Options.Authorize] returns, or wraps, to refuse
 // a request with 401 Unauthorized rather than 403 Forbidden.
 var ErrUnauthenticated = errors.New("ingest: unauthenticated")
 
-// Announcement is the body of an announce request: the track to record into
-// and the contributor's name within it.
-type Announcement struct {
-	// BroadcastPath and TrackName together name the track.
+// Track names a track by its broadcast path and track name. It is the body of
+// an announce request.
+type Track struct {
 	BroadcastPath string `json:"broadcast_path"`
 	TrackName     string `json:"track_name"`
-
-	// Name identifies the contributor within the track. It is one path
-	// segment.
-	Name string `json:"name"`
 }
 
-// Track returns the ledger track the announcement names.
-func (a Announcement) Track() ledger.TrackPath {
-	return trackPath(a.BroadcastPath, a.TrackName)
-}
-
-// trackPath joins a broadcast path and a track name into the single key a
-// ledger track is stored under: the broadcast path without its leading slash,
-// followed by the track name.
-func trackPath(broadcastPath, trackName string) ledger.TrackPath {
-	return ledger.TrackPath(strings.Trim(broadcastPath, "/") + "/" + trackName)
-}
-
-// Contribution is an announced contributor's standing to record into a track.
-// Its ID addresses it in the URLs of its records.
-type Contribution struct {
-	ID string
-	Announcement
-}
-
-// Record is what one group of an ingested track stores: the contributor and
-// the payload it sent.
-type Record struct {
-	Name    string          `json:"name"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-// Announced describes a contribution an announce request started.
-type Announced struct {
-	Contribution
-
-	// Created reports whether this request created the track.
-	Created bool
-}
-
-// Recorded describes a committed record.
-type Recorded struct {
-	Contribution
-
-	Group ledger.GroupInfo
-
-	// Data is the committed group's content: the JSON encoding of a [Record].
-	Data []byte
+// Path returns the single key the ledger stores the track under: the broadcast
+// path without its leading slash, followed by the track name.
+func (t Track) Path() ledger.TrackPath {
+	return ledger.TrackPath(strings.Trim(t.BroadcastPath, "/") + "/" + t.TrackName)
 }
 
 // Options configures a [Handler]. The zero value accepts every request.
 type Options struct {
-	// Authorize decides whether a request on behalf of an announcement may
-	// proceed: the announce itself, and every record and end of the
-	// contribution it starts. A non-nil error refuses the request with 403
-	// Forbidden, or 401 Unauthorized when it is [ErrUnauthenticated]. Nil
-	// allows every request.
-	Authorize func(r *http.Request, a Announcement) error
+	// Authorize decides whether a request on a track may proceed: an
+	// announce, and every record and end of the contribution it starts. A
+	// non-nil error refuses the request with 403 Forbidden, or 401
+	// Unauthorized when it is [ErrUnauthenticated]. Nil allows every request.
+	Authorize func(r *http.Request, t Track) error
 
 	// Challenge is the WWW-Authenticate header sent with a 401, naming the
 	// scheme Authorize expects, such as "Bearer". Empty sends none.
 	Challenge string
 
-	// OnAnnounce is called after an announce request started a contribution.
-	OnAnnounce func(ctx context.Context, a Announced)
+	// OnAnnounce is called after an announce started a contribution to t.
+	OnAnnounce func(ctx context.Context, t Track)
 
-	// OnRecord is called after a record was committed, before the request is
-	// answered. Records of one track are delivered in commit order.
-	OnRecord func(ctx context.Context, rec Recorded)
+	// OnRecord is called after payload was committed to t as group g, before
+	// the request is answered. Records of one track are delivered in commit
+	// order.
+	OnRecord func(ctx context.Context, t Track, g ledger.GroupInfo, payload []byte)
 
 	// IdleTimeout ends a contribution that has recorded nothing for this
 	// long. Zero means [DefaultIdleTimeout].
@@ -139,12 +103,15 @@ type Options struct {
 //	mux.Handle("/ingest/", http.StripPrefix("/ingest", handler))
 //
 //	POST   /announce                    start a contribution: 201 with its Location
-//	POST   /contributions/{id}/records  append the body, any JSON value, as one record
+//	POST   /contributions/{id}/records  append the body, one JSON value, as one record
 //	DELETE /contributions/{id}          end the contribution
 //
-// One contributor holds one contribution per track: announcing again ends the
-// previous one, whose URLs then answer 410 Gone, as do those of a contribution
-// that ended or went idle.
+// Any number of contributions record into one track. A contribution ends when
+// it is deleted or has recorded nothing for [Options.IdleTimeout]; its URLs
+// then answer 410 Gone.
+//
+// A record sent with an Idempotency-Key header is stored once per
+// contribution: a retry with the same key is answered as the first was.
 type Handler struct {
 	store store.Store
 	opts  Options
@@ -157,7 +124,6 @@ type Handler struct {
 	mu            sync.Mutex
 	tracks        map[ledger.TrackPath]*trackWriter
 	contributions map[string]*contribution
-	current       map[contributor]*contribution
 }
 
 // trackWriter serializes the records of one track.
@@ -166,18 +132,19 @@ type trackWriter struct {
 	writer *ledger.Writer
 }
 
-// contributor identifies a contributor within a track.
-type contributor struct {
-	track ledger.TrackPath
-	name  string
-}
-
-// contribution is a Contribution as the handler tracks it. An ended one is
-// kept for one idle timeout so that its URLs answer 410 rather than 404.
+// contribution is one announce's standing to record into a track. An ended one
+// is kept for one idle timeout so that its URLs answer 410 rather than 404.
 type contribution struct {
-	Contribution
-	track *trackWriter
+	id    string
+	track Track
+	tw    *trackWriter
 
+	// replies holds the answers to keyed records, oldest key first in keys.
+	// Guarded by tw.mu.
+	replies map[string]recordResponse
+	keys    []string
+
+	// Guarded by Handler.mu.
 	ended    bool
 	deadline time.Time
 	timer    *time.Timer
@@ -197,7 +164,6 @@ func NewHandler(s store.Store, opts Options) (*Handler, error) {
 		mux:           http.NewServeMux(),
 		tracks:        make(map[ledger.TrackPath]*trackWriter),
 		contributions: make(map[string]*contribution),
-		current:       make(map[contributor]*contribution),
 	}
 	if h.maxBody == 0 {
 		h.maxBody = DefaultMaxBodyBytes
@@ -223,32 +189,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type announceResponse struct {
 	ID    string           `json:"id"`
 	Track ledger.TrackPath `json:"track"`
-	// Created reports whether the announce created the track.
-	Created bool `json:"created"`
 }
 
 // serveAnnounce starts a contribution to the announced track, creating the
 // track when it does not exist.
 func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
-	var a Announcement
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, h.maxBody)).Decode(&a); err != nil {
+	var t Track
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, h.maxBody)).Decode(&t); err != nil {
 		badBody(w, err)
 		return
 	}
 	// One track has one broadcast path: "room/123" and "/room/123/" are
 	// "/room/123", so its contributors and hooks agree on the path.
-	a.BroadcastPath = "/" + strings.Trim(a.BroadcastPath, "/")
-	if msg := validate(a); msg != "" {
+	t.BroadcastPath = "/" + strings.Trim(t.BroadcastPath, "/")
+	if msg := validate(t); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
-	if !h.authorize(w, r, a) {
+	if !h.authorize(w, r, t) {
 		return
 	}
 
-	track := a.Track()
-	created := true
-	_, err := ledger.Create(r.Context(), h.store, track, ledger.TrackSchema{
+	_, err := ledger.Create(r.Context(), h.store, t.Path(), ledger.TrackSchema{
 		Timescale:  timescale,
 		TimeSource: ledger.TimeSourceIngest,
 		MIME:       MIME,
@@ -256,7 +218,6 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 	}, h.opts.Config)
 	switch {
 	case errors.Is(err, ledger.ErrTrackExists):
-		created = false
 	case errors.Is(err, ledger.ErrInvalidTrackPath):
 		http.Error(w, "invalid track path", http.StatusBadRequest)
 		return
@@ -264,33 +225,31 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "create track", err)
 		return
 	}
-	tw, err := h.writerFor(r.Context(), track)
+	tw, err := h.writerFor(r.Context(), t.Path())
 	if err != nil {
 		h.internalError(w, r, "open track writer", err)
 		return
 	}
 
-	c := h.start(a, tw)
+	id := h.start(t, tw)
 	if h.opts.OnAnnounce != nil {
-		h.opts.OnAnnounce(r.Context(), Announced{Contribution: c, Created: created})
+		h.opts.OnAnnounce(r.Context(), t)
 	}
 	// A relative reference resolves against the announce URL, wherever the
 	// handler is mounted.
-	w.Header().Set("Location", "contributions/"+c.ID)
-	writeJSON(w, http.StatusCreated, announceResponse{ID: c.ID, Track: track, Created: created})
+	w.Header().Set("Location", "contributions/"+id)
+	writeJSON(w, http.StatusCreated, announceResponse{ID: id, Track: t.Path()})
 }
 
-// validate returns why an announcement is unusable, or "".
-func validate(a Announcement) string {
+// validate returns why a track name is unusable, or "".
+func validate(t Track) string {
 	switch {
-	case a.BroadcastPath == "/":
+	case t.BroadcastPath == "/":
 		return "broadcast_path is required"
-	case path.Clean(a.BroadcastPath) != a.BroadcastPath:
+	case path.Clean(t.BroadcastPath) != t.BroadcastPath:
 		return "broadcast_path must be clean: no empty, \".\" or \"..\" segments"
-	case a.TrackName == "" || strings.Contains(a.TrackName, "/"):
+	case t.TrackName == "" || strings.Contains(t.TrackName, "/"):
 		return "track_name is required and must not contain a slash"
-	case a.Name == "" || a.Name == "." || a.Name == ".." || strings.Contains(a.Name, "/"):
-		return "name is required and must be one path segment"
 	}
 	return ""
 }
@@ -308,7 +267,12 @@ type recordResponse struct {
 // before the body is read.
 func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 	c, ok := h.lookup(w, r)
-	if !ok || !h.authorize(w, r, c.Announcement) {
+	if !ok || !h.authorize(w, r, c.track) {
+		return
+	}
+	key := r.Header.Get("Idempotency-Key")
+	if len(key) > maxIdempotencyKeyLen {
+		http.Error(w, "Idempotency-Key is too long", http.StatusBadRequest)
 		return
 	}
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBody))
@@ -322,27 +286,32 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the body must be one JSON value in UTF-8", http.StatusBadRequest)
 		return
 	}
-	data, err := json.Marshal(Record{Name: c.Name, Payload: payload})
-	if err != nil {
-		h.internalError(w, r, "encode record", err)
-		return
-	}
 
 	// Committing and notifying under one lock delivers a track's records to
-	// OnRecord in commit order.
-	//
+	// OnRecord in commit order, and lets a retry find the reply to its key.
+	c.tw.mu.Lock()
+	if reply, seen := c.replies[key]; seen && key != "" {
+		c.tw.mu.Unlock()
+		writeJSON(w, http.StatusCreated, reply)
+		return
+	}
 	// The append outlives a client that leaves mid-request: an append cut
 	// short between storing the group and committing it leaves the group's
 	// object behind, and the next append of the track would collide with it.
-	c.track.mu.Lock()
-	group, err := c.track.writer.Append(context.WithoutCancel(r.Context()), 0, data)
+	group, err := c.tw.writer.Append(context.WithoutCancel(r.Context()), 0, payload)
 	// An append that committed but could not seal returns the group with its
 	// error: the record is stored, so it is delivered and answered as such.
 	committed := group.ObjectKey != ""
-	if committed && h.opts.OnRecord != nil {
-		h.opts.OnRecord(r.Context(), Recorded{Contribution: c.Contribution, Group: group, Data: data})
+	reply := recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock}
+	if committed {
+		if key != "" {
+			c.remember(key, reply)
+		}
+		if h.opts.OnRecord != nil {
+			h.opts.OnRecord(r.Context(), c.track, group, payload)
+		}
 	}
-	c.track.mu.Unlock()
+	c.tw.mu.Unlock()
 	switch {
 	case !committed:
 		h.internalError(w, r, "append record", err)
@@ -350,17 +319,27 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.logger.Warn("record committed with an error", "method", r.Method, "url", r.URL.Path, "error", err)
 	}
+	writeJSON(w, http.StatusCreated, reply)
+}
 
-	writeJSON(w, http.StatusCreated, recordResponse{
-		Group:     group.ID.String(),
-		Wallclock: group.Wallclock,
-	})
+// remember keeps the reply to a keyed record, forgetting the oldest key past
+// the limit. c.tw.mu is held.
+func (c *contribution) remember(key string, reply recordResponse) {
+	if c.replies == nil {
+		c.replies = make(map[string]recordResponse)
+	}
+	if len(c.keys) == idempotencyKeys {
+		delete(c.replies, c.keys[0])
+		c.keys = c.keys[1:]
+	}
+	c.replies[key] = reply
+	c.keys = append(c.keys, key)
 }
 
 // serveEnd ends a contribution.
 func (h *Handler) serveEnd(w http.ResponseWriter, r *http.Request) {
 	c, ok := h.lookup(w, r)
-	if !ok || !h.authorize(w, r, c.Announcement) {
+	if !ok || !h.authorize(w, r, c.track) {
 		return
 	}
 	h.mu.Lock()
@@ -370,11 +349,11 @@ func (h *Handler) serveEnd(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorize applies Options.Authorize, answering the request when it refuses.
-func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, a Announcement) bool {
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, t Track) bool {
 	if h.opts.Authorize == nil {
 		return true
 	}
-	err := h.opts.Authorize(r, a)
+	err := h.opts.Authorize(r, t)
 	switch {
 	case err == nil:
 		return true
@@ -389,25 +368,19 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, a Announceme
 	return false
 }
 
-// start registers a new contribution, ending the contributor's previous one in
-// the same track.
-func (h *Handler) start(a Announcement, tw *trackWriter) Contribution {
+// start registers a new contribution to t and returns its ID.
+func (h *Handler) start(t Track, tw *trackWriter) string {
 	c := &contribution{
-		Contribution: Contribution{ID: rand.Text(), Announcement: a},
-		track:        tw,
-		deadline:     time.Now().Add(h.idle),
+		id:       rand.Text(),
+		track:    t,
+		tw:       tw,
+		deadline: time.Now().Add(h.idle),
 	}
-	key := contributor{track: a.Track(), name: a.Name}
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if previous, ok := h.current[key]; ok {
-		h.end(previous)
-	}
-	h.contributions[c.ID] = c
-	h.current[key] = c
+	h.contributions[c.id] = c
 	c.timer = time.AfterFunc(h.idle, func() { h.expire(c) })
-	return c.Contribution
+	return c.id
 }
 
 // lookup resolves the request's contribution and extends it, answering 404 for
@@ -434,10 +407,6 @@ func (h *Handler) end(c *contribution) {
 		return
 	}
 	c.ended = true
-	key := contributor{track: c.Track(), name: c.Name}
-	if h.current[key] == c {
-		delete(h.current, key)
-	}
 	c.deadline = time.Now().Add(h.idle)
 	c.timer.Reset(h.idle)
 }
@@ -455,7 +424,7 @@ func (h *Handler) expire(c *contribution) {
 		h.end(c)
 		return
 	}
-	delete(h.contributions, c.ID)
+	delete(h.contributions, c.id)
 }
 
 // writerFor returns the track's writer, opening it on first use. Opening reads
