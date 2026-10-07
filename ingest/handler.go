@@ -42,10 +42,16 @@ type Request struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// Track returns the ledger track the request names: the broadcast path without
-// its leading slash, followed by the track name.
+// Track returns the ledger track the request names.
 func (r *Request) Track() ledger.TrackPath {
-	return ledger.TrackPath(strings.Trim(r.BroadcastPath, "/") + "/" + r.TrackName)
+	return trackPath(r.BroadcastPath, r.TrackName)
+}
+
+// trackPath joins a broadcast path and a track name into the single key a
+// ledger track is stored under: the broadcast path without its leading slash,
+// followed by the track name.
+func trackPath(broadcastPath, trackName string) ledger.TrackPath {
+	return ledger.TrackPath(strings.Trim(broadcastPath, "/") + "/" + trackName)
 }
 
 // Record is what one group of an ingested track stores: the contributor and
@@ -57,28 +63,31 @@ type Record struct {
 
 // Announced describes a track an announce request established.
 type Announced struct {
-	// BroadcastPath and TrackName are the request's, and Track is the ledger
-	// track they name.
 	BroadcastPath string
 	TrackName     string
-	Track         ledger.TrackPath
-
-	Name string
+	Name          string
 
 	// Created reports whether this request created the track.
 	Created bool
 }
 
+// Track returns the ledger track that was announced.
+func (a Announced) Track() ledger.TrackPath {
+	return trackPath(a.BroadcastPath, a.TrackName)
+}
+
 // Recorded describes a committed record.
 type Recorded struct {
-	// BroadcastPath and TrackName are the request's, and Track is the ledger
-	// track they name.
 	BroadcastPath string
 	TrackName     string
-	Track         ledger.TrackPath
 
 	Group ledger.GroupInfo
 	Record
+}
+
+// Track returns the ledger track the record was committed to.
+func (r Recorded) Track() ledger.TrackPath {
+	return trackPath(r.BroadcastPath, r.TrackName)
 }
 
 // Options configures a [Handler]. The zero value accepts every request.
@@ -242,7 +251,6 @@ func (h *Handler) serveAnnounce(w http.ResponseWriter, r *http.Request, req *Req
 		h.opts.OnAnnounce(r.Context(), Announced{
 			BroadcastPath: req.BroadcastPath,
 			TrackName:     req.TrackName,
-			Track:         track,
 			Name:          req.Name,
 			Created:       created,
 		})
@@ -299,7 +307,6 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request, req *Reque
 		h.opts.OnRecord(r.Context(), Recorded{
 			BroadcastPath: req.BroadcastPath,
 			TrackName:     req.TrackName,
-			Track:         track,
 			Group:         group,
 			Record:        record,
 		})

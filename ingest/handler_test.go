@@ -164,7 +164,7 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 	post(h, "record", request("bob", `"two"`))
 
 	require.Len(t, seen, 2)
-	assert.Equal(t, chatTrack, seen[0].Track)
+	assert.Equal(t, chatTrack, seen[0].Track())
 	assert.Equal(t, "/room/123", seen[0].BroadcastPath)
 	assert.Equal(t, "chat", seen[0].TrackName)
 	assert.Equal(t, "alice", seen[0].Name)
@@ -184,9 +184,10 @@ func TestHandler_OnAnnounce_ReportsWhetherTheTrackIsNew(t *testing.T) {
 	post(h, "announce", request("bob", ""))
 
 	assert.Equal(t, []ingest.Announced{
-		{BroadcastPath: "/room/123", TrackName: "chat", Track: chatTrack, Name: "alice", Created: true},
-		{BroadcastPath: "/room/123", TrackName: "chat", Track: chatTrack, Name: "bob", Created: false},
+		{BroadcastPath: "/room/123", TrackName: "chat", Name: "alice", Created: true},
+		{BroadcastPath: "/room/123", TrackName: "chat", Name: "bob", Created: false},
 	}, seen)
+	assert.Equal(t, chatTrack, seen[0].Track())
 }
 
 func TestHandler_Authorize_RefusalStoresNothing(t *testing.T) {
