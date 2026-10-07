@@ -240,8 +240,10 @@ func (s *Store) put(ctx context.Context, key string, data []byte, header http.He
 		if err != nil {
 			return store.NoVersion, 0, err
 		}
+		// not actionable: draining only lets the connection be reused, and
+		// the status below is the outcome.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusOK:
 			return store.Version(resp.Header.Get("ETag")), resp.StatusCode, nil

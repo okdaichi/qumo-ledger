@@ -9,17 +9,21 @@ import (
 	"github.com/okdaichi/qumo-ledger/ledger/store"
 )
 
-// Schemes are the URI schemes [store.Open] opens with this backend. The URI is
-// an ordinary PostgreSQL connection URI, which CockroachDB accepts too:
+// Scheme and SchemeAlias are the URI schemes [store.Open] opens with this
+// backend. The URI is an ordinary PostgreSQL connection URI, which CockroachDB
+// accepts too:
 //
 //	postgres://user:password@host:5432/database?sslmode=verify-full
 //
 // The query parameter "table" names the table and is not passed to the
 // database; without it the table is [DefaultTable].
-var Schemes = []string{"postgres", "postgresql"}
+const (
+	Scheme      = "postgres"
+	SchemeAlias = "postgresql"
+)
 
 func init() {
-	for _, scheme := range Schemes {
+	for _, scheme := range []string{Scheme, SchemeAlias} {
 		store.Register(scheme, func(ctx context.Context, u *url.URL) (store.Store, error) {
 			return Open(ctx, u.String())
 		})
@@ -39,7 +43,7 @@ func Open(ctx context.Context, uri string) (*Store, error) {
 	}
 	s, err := New(ctx, db, table)
 	if err != nil {
-		_ = db.Close()
+		_ = db.Close() // not actionable: the error from New is the one to report
 		return nil, err
 	}
 	return s, nil
