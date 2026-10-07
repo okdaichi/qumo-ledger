@@ -23,6 +23,10 @@ func TestParseGroupID(t *testing.T) {
 		"no sequence":     {input: "e1-g", wantErr: true},
 		"non-numeric":     {input: "ex-gy", wantErr: true},
 		"negative":        {input: "e-1-g1", wantErr: true},
+		"max sequence":    {input: "e1-g1099511627775", expected: NewGroupID(1, groupSeqMask), wantErr: false},
+		// One past the 40 sequence bits would spill into the epoch.
+		"sequence overflow": {input: "e1-g1099511627776", wantErr: true},
+		"trailing garbage":  {input: "e1-g42.m4s", wantErr: true},
 	}
 
 	for name, tt := range tests {

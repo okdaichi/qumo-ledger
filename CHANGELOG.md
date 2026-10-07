@@ -12,6 +12,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **store:** `store.Open` opens a backend from a URI, so a deployment chooses
+  its storage in configuration. A backend registers its scheme with
+  `store.Register` when its package is imported; `store.Schemes` lists them, and
+  an unregistered scheme is `ErrUnknownScheme`. An empty URI opens the memory
+  store.
+  - `mem:` — `mem`.
+  - `file:///var/lib/ledger`, `file:ledger` — `fs` over that directory.
+  - `postgres://…`, `postgresql://…` — `db`.
+  - `s3://bucket/prefix?region=…&endpoint=…` — `bucket`.
+
+- **ledger/store/db:** A backend over one table of a PostgreSQL or CockroachDB
+  database, created when absent (`ledger_objects`, or the URI's `table`
+  parameter). An object is one row with an integer version; `Create` is an
+  insert that does nothing on conflict and `Swap` an update conditioned on the
+  version, so the database enforces both across processes. Objects are read and
+  written whole.
+
+- **ledger/store/bucket:** A backend over a bucket of Amazon S3 or an S3-compatible
+  service, under a key prefix. `Create` and `Swap` are conditional PUTs
+  (`If-None-Match: *`, `If-Match`) and the version is the ETag. Requests are
+  signed with Signature Version 4 from static credentials (`AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`); with an `endpoint` the bucket
+  is addressed path-style.
+
+- **ingest:** A new package that accepts records over HTTP, appends them to
+  ledger tracks and reads them back, the inbound counterpart of `stream`. A
+  `Handler` is an `http.Handler` over a store, mounted with `http.StripPrefix`.
+  - A track is named by its broadcast path and track name, a `Track`, and
+    addressed by its ledger key: `/tracks/room/123/chat` is the track `chat` of
+    the broadcast `/room/123`.
+  - `POST /tracks/{track}` appends the body, one JSON value in UTF-8, as one
+    group and answers `201` once it is committed, creating the track when it
+    does not exist. Requests are routed by the URL, so a track is resolved and
+    authorized before the body is read.
+  - Each group stores a `Record`, `{"sender": …, "payload": …}`: the payload
+    as sent, and the sender `Options.Authorize` named for the request, so a
+    record's sender comes from its credential rather than from its content. A
+    record with no sender was written by a party trusted with the whole track.
+  - `PUT /tracks/{track}` creates the track ahead of its first record (`201`,
+    or `204` when it exists).
+  - `GET /tracks/{track}` answers a page of records, oldest first: the newest,
+    or those before `?before=<group>`, at most `?limit=` (default 50, at most
+    200), with the cursor for the next older page.
+  - A record with an `Idempotency-Key` header is stored once per sender and
+    track; a retry with the same key gets the first reply. A track remembers
+    its 1024 most recent keys.
+  - `Options.SenderLimit` and `Options.TrackLimit` bound records per sender and
+    per track as token buckets; a record past either is answered `429` with a
+    `Retry-After`.
+  - Any number of senders record into one track. Records of one track are
+    serialized within a handler, and two processes recording into the same
+    track are not coordinated.
+  - A handler closes a track no request holds that it has not written to for
+    `Options.TrackIdleTimeout` (default 10 min), so a long-running one holds
+    only the tracks in use; the next request opens it again from the store,
+    and `OnOpen` returns before any record of it reaches `OnRecord`. A
+    negative timeout is an error.
+  - `Options.Authorize(r, track, access)` is asked on every request, for a
+    `Write` or a `Read`, and returns a write's sender; it refuses with `403`, or
+    `401` for `ErrUnauthenticated`, with `Options.Challenge` as its
+    `WWW-Authenticate` header. `Options.OnOpen(ctx, track)` observes a track
+    the handler starts writing to, and
+    `Options.OnRecord(ctx, track, group, record)` what was committed, which is
+    where a caller forwards a record to live subscribers.
+  - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
+    `json`. A record has no media time, so each group is anchored by the wall
+    clock at commit; read a window back with `Reader.RangeWallclock`. The
+    `stream` renderers need a duration per group and do not serve these tracks.
+
+- **ledger:** `Reader.Before(ctx, id, n)` returns up to n groups committed
+  before id, oldest first, or the newest n for the zero id: the way to page
+  backwards through a track. It reads backwards from each epoch's newest delta
+  and skips sealed runs that start at or after id.
+
 - **stream:** HLS and DASH renderers over a ledger track — derived views, not a
   storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
   `@d`; a new producer epoch is an HLS `EXT-X-DISCONTINUITY` and a DASH timeline
@@ -39,6 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source can order them by identity.
 
 ### Changed
+
+- **build:** The minimum Go version is now 1.27.
+
+- **ledger/store:** The backend packages are named for the storage they keep
+  objects in, beneath the `store` package whose interface they implement:
+  `memstore` is now `mem` and `fsstore` is now `fs`, joined by `db` and
+  `bucket`. Imports change from `ledger/store/memstore` and
+  `ledger/store/fsstore` to `ledger/store/mem` and `ledger/store/fs`.
 
 - **stream:** `Handler` answers internal failures with a generic 500 instead of
   echoing the error to the client, and records the detail — the error, the
@@ -76,6 +158,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was a second spelling of `<` rather than access to something otherwise
   unreachable. Keeping it would have invited a matching `After` and a
   permanently asymmetric API.
+
+### Fixed
+
+- **ledger:** A failed write no longer stops a writer's later appends.
+  - A commit that fails is read back: one the store took though its answer was
+    lost is returned as committed, so the caller does not store it again.
+  - A commit or seal whose outcome stays unknown, and a commit or group object
+    another writer claimed, make the next append reload the writer's state
+    from the store first rather than claiming the same delta again.
+  - `Writer.Append` steps past a sequence an earlier failed append left an
+    uncommitted group object at, up to 16 of them, instead of failing with
+    `ErrGroupExists` on every later append and after every restart. It
+    re-reads the epoch before each step, so a sequence another writer
+    committed is followed rather than stepped past. The object is reclaimed
+    with the other unreferenced ones. `AppendGroup`, whose caller chose the
+    sequence, still reports the collision.
 
 ## [0.1.0] - unreleased
 ## [0.1.0] - 2026-08-07

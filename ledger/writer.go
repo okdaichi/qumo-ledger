@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -66,6 +67,31 @@ type Writer struct {
 	// zero-valued group.
 	last    GroupInfo
 	hasLast bool
+
+	// stale reports that a write failed in a way that leaves the store's state
+	// unknown — it may have taken the write before the error — so the next
+	// append reloads the writer's state from the store first.
+	stale bool
+}
+
+// reloadIfStale re-reads the epoch's log root and open region, replacing what
+// the writer believed, when a failed write left it unknown. Requires w.mu.
+func (w *Writer) reloadIfStale(ctx context.Context) error {
+	if !w.stale {
+		return nil
+	}
+	logRoot, logVersion, err := fetchEpochLog(ctx, w.objects, w.path, w.epoch)
+	if err != nil {
+		return fmt.Errorf("ledger: reload %s after a failed write: %w", w.path, err)
+	}
+	w.logRoot, w.logVersion = logRoot, logVersion
+	w.openGroups, w.openBytes = nil, 0
+	w.last, w.hasLast = GroupInfo{}, false
+	if err := w.recover(ctx); err != nil {
+		return fmt.Errorf("ledger: reload %s after a failed write: %w", w.path, err)
+	}
+	w.stale = false
+	return nil
 }
 
 // recover replays the epoch's open region so the seal threshold and group rows
@@ -173,22 +199,56 @@ func (w *Writer) Root() TrackInfo {
 // when a group is dropped (a gap is real data), when the producer's own sequence
 // numbers must be preserved for live-replay alignment, or when the media anchor
 // is not simply the previous group's end.
+//
+// Because Append chooses the sequence, it steps past one an earlier failed
+// append left an uncommitted group object at, rather than failing on it: the
+// sequence was never committed, and the object is reclaimed with the rest of
+// the unreferenced ones. Each collision first re-reads the epoch, so a sequence
+// another writer committed in the meantime is followed rather than stepped
+// past.
 func (w *Writer) Append(ctx context.Context, duration int64, payload []byte) (GroupInfo, error) {
-	w.mu.Lock()
-	var seq uint64
-	var mediaStart int64
-	if w.hasLast {
-		seq = w.last.ID.Sequence() + 1
-		mediaStart = w.last.mediaEnd()
-	}
-	w.mu.Unlock()
+	wallclock := w.now().UnixNano()
+	// floor is the lowest sequence not yet found taken by a group object.
+	var floor uint64
+	for attempt := 0; ; attempt++ {
+		w.mu.Lock()
+		// The sequence follows the last committed group, so learn it from
+		// the store first if a failed write left it unknown.
+		if err := w.reloadIfStale(ctx); err != nil {
+			w.mu.Unlock()
+			return GroupInfo{}, err
+		}
+		var seq uint64
+		var mediaStart int64
+		if w.hasLast {
+			seq = w.last.ID.Sequence() + 1
+			mediaStart = w.last.mediaEnd()
+		}
+		w.mu.Unlock()
 
-	return w.AppendGroup(ctx, GroupInfo{
-		ID:        NewGroupID(0, seq),
-		MediaTime: mediaStart,
-		Duration:  duration,
-		Wallclock: w.now().UnixNano(),
-	}, payload)
+		seq = max(seq, floor)
+		group, err := w.AppendGroup(ctx, GroupInfo{
+			ID:        NewGroupID(0, seq),
+			MediaTime: mediaStart,
+			Duration:  duration,
+			Wallclock: wallclock,
+		}, payload)
+		if !isGroupObjectCollision(err) || attempt == maxSkippedSequences {
+			return group, err
+		}
+		floor = seq + 1
+	}
+}
+
+// maxSkippedSequences bounds how many uncommitted group objects one Append
+// steps past before it reports the collision.
+const maxSkippedSequences = 16
+
+// isGroupObjectCollision reports whether err is AppendGroup finding a group
+// object already stored under the sequence, as opposed to the sequence being
+// the group just committed or the commit itself colliding.
+func isGroupObjectCollision(err error) bool {
+	return errors.Is(err, ErrGroupExists) && errors.Is(err, store.ErrExist)
 }
 
 // AppendGroup stores a sealed group and commits it.
@@ -214,6 +274,10 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if err := w.reloadIfStale(ctx); err != nil {
+		return GroupInfo{}, err
+	}
+
 	// A track that declares its timestamps come from the ledger's own clock is
 	// stamped here. One that declares them frame-derived is left alone, so an
 	// absent anchor stays absent rather than being invented.
@@ -237,8 +301,13 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 
 	if _, err := w.objects.Create(ctx, meta.ObjectKey, payload); err != nil {
 		if errors.Is(err, store.ErrExist) {
-			return GroupInfo{}, fmt.Errorf("%w: %s in %s", ErrGroupExists, meta.ID, w.path)
+			// Another writer may be appending to the epoch, so the next
+			// append learns from the store what it has committed.
+			w.stale = true
+			return GroupInfo{}, fmt.Errorf("%w: %s in %s: %w", ErrGroupExists, meta.ID, w.path, err)
 		}
+		// Nothing is committed without its delta, so what the writer knows
+		// still holds; a group object the store took anyway is stepped past.
 		return GroupInfo{}, fmt.Errorf("ledger: write group %s: %w", meta.ID, err)
 	}
 
@@ -254,8 +323,13 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 		return GroupInfo{}, err
 	}
 
-	// This create is the commit point.
-	if _, err := w.objects.Create(ctx, deltaKey(w.path, w.epoch, w.nextDelta), data); err != nil {
+	// This create is the commit point. The store may have taken the delta
+	// before failing to say so, which reading it back tells apart.
+	key := deltaKey(w.path, w.epoch, w.nextDelta)
+	if _, err := w.objects.Create(ctx, key, data); err != nil && !w.holds(ctx, key, data) {
+		// Either way the next append learns the epoch from the store rather
+		// than claiming the same delta again.
+		w.stale = true
 		if errors.Is(err, store.ErrExist) {
 			// Another writer claimed this delta number. Immutability turned a
 			// silent split-brain into a clean failure.
@@ -282,11 +356,20 @@ func (w *Writer) AppendGroup(ctx context.Context, meta GroupInfo, payload []byte
 		if err := w.seal(ctx); err != nil {
 			// The group is committed and durable; only the rotation failed.
 			// Report it so the caller can retry, but do not imply data loss.
+			// How far the seal got is unknown, so the next append reloads.
+			w.stale = true
 			return meta, fmt.Errorf("ledger: group committed but seal failed: %w", err)
 		}
 	}
 
 	return meta, nil
+}
+
+// holds reports whether the object at key is data. A delta carries its commit
+// time, so only the write that produced data can have stored it.
+func (w *Writer) holds(ctx context.Context, key string, data []byte) bool {
+	got, _, err := w.objects.Get(ctx, key)
+	return err == nil && bytes.Equal(got, data)
 }
 
 // NewEpoch begins a new producer lifetime, advancing this writer to the next

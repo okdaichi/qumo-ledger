@@ -1,19 +1,19 @@
-package fsstore_test
+package fs_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/ledger/store/fsstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/fs"
 	"github.com/okdaichi/qumo-ledger/ledger/store/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestStore_Conformance(t *testing.T) {
-	storetest.Run(t, func(t *testing.T) *fsstore.Store {
-		store, err := fsstore.New(t.TempDir())
+	storetest.Run(t, func(t *testing.T) *fs.Store {
+		store, err := fs.New(t.TempDir())
 		require.NoError(t, err)
 
 		return store
@@ -21,8 +21,8 @@ func TestStore_Conformance(t *testing.T) {
 }
 
 func TestStore_ListerConformance(t *testing.T) {
-	storetest.RunLister(t, func(t *testing.T) *fsstore.Store {
-		store, err := fsstore.New(t.TempDir())
+	storetest.RunLister(t, func(t *testing.T) *fs.Store {
+		store, err := fs.New(t.TempDir())
 		require.NoError(t, err)
 
 		return store
@@ -32,7 +32,7 @@ func TestStore_ListerConformance(t *testing.T) {
 func TestNew_CreatesRoot(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "root")
 
-	_, err := fsstore.New(dir)
+	_, err := fs.New(dir)
 	require.NoError(t, err)
 
 	info, err := os.Stat(dir)
@@ -45,7 +45,7 @@ func TestNew_CreatesRoot(t *testing.T) {
 func TestStore_RejectsEscapingKeys(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "store")
-	store, err := fsstore.New(root)
+	store, err := fs.New(root)
 	require.NoError(t, err)
 
 	tests := map[string]string{
@@ -68,10 +68,10 @@ func TestStore_RejectsEscapingKeys(t *testing.T) {
 	for name, key := range tests {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := store.Get(t.Context(), key)
-			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+			assert.ErrorIs(t, err, fs.ErrInvalidKey)
 
 			_, err = store.Create(t.Context(), key, []byte("x"))
-			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+			assert.ErrorIs(t, err, fs.ErrInvalidKey)
 		})
 	}
 
@@ -84,7 +84,7 @@ func TestStore_RejectsEscapingKeys(t *testing.T) {
 // Windows reserved device names look like ordinary relative keys but open a
 // device, so Get would report a phantom empty object.
 func TestStore_RejectsReservedDeviceNames(t *testing.T) {
-	store, err := fsstore.New(t.TempDir())
+	store, err := fs.New(t.TempDir())
 	require.NoError(t, err)
 
 	if filepath.IsLocal("NUL") {
@@ -94,10 +94,10 @@ func TestStore_RejectsReservedDeviceNames(t *testing.T) {
 	for _, key := range []string{"NUL", "COM1", "live/cam1/CON"} {
 		t.Run(key, func(t *testing.T) {
 			_, err := store.Create(t.Context(), key, []byte("x"))
-			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+			assert.ErrorIs(t, err, fs.ErrInvalidKey)
 
 			_, _, err = store.Get(t.Context(), key)
-			assert.ErrorIs(t, err, fsstore.ErrInvalidKey)
+			assert.ErrorIs(t, err, fs.ErrInvalidKey)
 		})
 	}
 }
@@ -106,7 +106,7 @@ func TestStore_RejectsReservedDeviceNames(t *testing.T) {
 // ordinary tools, which is much of the point of having a local backend.
 func TestStore_MapsKeysOntoPaths(t *testing.T) {
 	dir := t.TempDir()
-	store, err := fsstore.New(dir)
+	store, err := fs.New(dir)
 	require.NoError(t, err)
 
 	_, err = store.Create(t.Context(), "live/cam1/video/groups/e000001-g00000042", []byte("frames"))
@@ -121,7 +121,7 @@ func TestStore_MapsKeysOntoPaths(t *testing.T) {
 // behind where a later listing would mistake it for an object.
 func TestStore_SwapLeavesNoTemporaryFiles(t *testing.T) {
 	dir := t.TempDir()
-	store, err := fsstore.New(dir)
+	store, err := fs.New(dir)
 	require.NoError(t, err)
 
 	version, err := store.Create(t.Context(), "head", []byte("v1"))

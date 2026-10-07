@@ -3,6 +3,7 @@ package stream_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,7 +16,7 @@ import (
 
 	"github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/okdaichi/qumo-ledger/stream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,7 @@ func newTrackFixtureEncoding(tb testing.TB, encoding string) trackFixture {
 
 func newTrackFixtureGroups(tb testing.TB, encoding string, groups int64) trackFixture {
 	tb.Helper()
-	return newTrackFixtureStore(tb, encoding, groups, memstore.New())
+	return newTrackFixtureStore(tb, encoding, groups, mem.New())
 }
 
 // newTrackFixtureStore is newTrackFixtureGroups over a caller-supplied backend,
@@ -327,7 +328,7 @@ func TestHandler_WindowLargerThanTrack(t *testing.T) {
 // have to be counted so discontinuity numbering survives them.
 func TestHandler_WindowAcrossEpochs(t *testing.T) {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -384,7 +385,7 @@ func TestHandler_WindowAcrossEpochs(t *testing.T) {
 // open the stream on a finished session and watch it through.
 func TestHandler_EpochWindow(t *testing.T) {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -499,7 +500,7 @@ func newEpochFixture(tb testing.TB, perEpoch ...int64) (*ledger.Track, [][]ledge
 	tb.Helper()
 	ctx := context.Background()
 
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -783,7 +784,7 @@ func (s *brokenStore) Get(ctx context.Context, key string) ([]byte, store.Versio
 // status text — the store errors underneath carry object keys and store paths,
 // which have no business in a response.
 func TestHandler_StoreFailureIsServerError(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 
@@ -819,7 +820,7 @@ func TestHandler_StoreFailureIsServerError(t *testing.T) {
 // reader open cleanly and makes Lookup fail for a reason that is neither
 // ErrGroupNotFound nor the open — the arm that must answer 500 rather than 404.
 func TestHandler_LookupFailureIsServerError(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 1, backend)
 
 	// A second lifetime, so the fixture's groups sit in epoch 1 and a segment
@@ -850,11 +851,167 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 		"a Lookup failure that is not an absence answers 500")
 }
 
+// The read after a successful Lookup: the manifest row is there but the payload
+// object cannot be fetched. The segment exists, so this is a 500, not a 404.
+func TestHandler_ReadGroupFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
+	backend.failKey = fix.metas[0].ObjectKey
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+		"a payload that cannot be read is not a missing segment")
+
+	// The other segment's payload is untouched and still serves.
+	resp, err = http.Get(ts.URL + "/" + fix.metas[1].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// The manifest walk failing partway: the reader opens on epoch 1's log, and the
+// walk into epoch 2 hits a log that cannot be fetched. A truncated manifest
+// would tell a player the stream ended there, so neither format is served.
+func TestHandler_GatherFailureIsServerError(t *testing.T) {
+	backend := &brokenStore{Store: mem.New()}
+	fix := newTrackFixtureStore(t, "fmp4", 1, backend)
+
+	ctx := context.Background()
+	writer, err := fix.track.Writer(ctx)
+	require.NoError(t, err)
+	require.NoError(t, writer.NewEpoch(ctx))
+	_, err = writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 1),
+		MediaTime: 0,
+		Duration:  180000,
+	}, []byte("frames"))
+	require.NoError(t, err)
+
+	// Armed only now: NewEpoch itself reads epoch 2's log back after writing it.
+	backend.failKey = "live/cam1/video/e000002/log.manifest"
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, path := range map[string]string{
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// fakeResolver is a SegmentResolver whose answer is fixed: url and err are
+// returned for every group. The zero value proxies, like ProxyResolver.
+type fakeResolver struct {
+	url string
+	err error
+}
+
+var _ stream.SegmentResolver = (*fakeResolver)(nil)
+
+func (f *fakeResolver) ResolveSegment(context.Context, ledger.GroupInfo) (string, error) {
+	return f.url, f.err
+}
+
+// A resolver that cannot produce a URL — a signing backend that is down, say —
+// is a failure to answer. The handler must not fall back to proxying the bytes
+// a deployment chose not to serve itself, nor report the segment missing.
+func TestHandler_ResolverFailureIsServerError(t *testing.T) {
+	fix := newTrackFixture(t)
+	handler, err := stream.NewHandler(fix.track, stream.Options{
+		InitSegment: testInit,
+		Resolver:    &fakeResolver{err: errors.New("signer unavailable: key live/cam1/video")},
+	})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/" + fix.metas[0].ID.String() + ".m4s")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusText(http.StatusInternalServerError)+"\n", string(body),
+		"the resolver's error must not reach the response")
+}
+
+// A name that is not a group id never reaches the ledger: it is answered 404
+// from the URL alone.
+func TestHandler_MalformedSegmentNotFound(t *testing.T) {
+	fix := newTrackFixture(t)
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, path := range map[string]string{
+		"not a group id":  "/segment.m4s",
+		"zero id":         "/e000000-g00000000.m4s",
+		"wrong extension": "/" + fix.metas[0].ID.String() + ".ts",
+		"no name":         "/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		})
+	}
+}
+
+// A group without a duration cannot be given an EXTINF or an @d. Rendering it
+// anyway would publish a manifest a player cannot time, so both formats refuse.
+func TestHandler_GroupWithoutDurationIsServerError(t *testing.T) {
+	fix := newTrackFixture(t)
+	ctx := context.Background()
+	writer, err := fix.track.Writer(ctx)
+	require.NoError(t, err)
+	_, err = writer.AppendGroup(ctx, ledger.GroupInfo{
+		ID:        ledger.NewGroupID(0, 2),
+		MediaTime: 2 * 180000,
+	}, []byte("frames"))
+	require.NoError(t, err)
+
+	handler, err := stream.NewHandler(fix.track, stream.Options{InitSegment: testInit})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	for name, path := range map[string]string{
+		"playlist": "/playlist.m3u8",
+		"manifest": "/manifest.mpd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.Get(ts.URL + path)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
 // With a logger supplied, the generic 500 is accompanied by a record carrying
 // what broke and which request broke it — the log is the only place the detail
 // survives.
 func TestHandler_InternalErrorsAreLogged(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 
@@ -883,7 +1040,7 @@ func TestHandler_InternalErrorsAreLogged(t *testing.T) {
 // failure: the handler still answers 500, but writes no record, so the log the
 // option carries stays a signal of real outages.
 func TestHandler_CanceledRequestNotLogged(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 	backend.err = context.Canceled
