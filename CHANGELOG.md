@@ -15,27 +15,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ingest:** A new package that accepts records over HTTP and appends them to
   ledger tracks, the inbound counterpart of `stream`. A `Handler` is an
   `http.Handler` over a store, mounted with `http.StripPrefix`.
-  - `POST /announce` with
-    `{"broadcast_path": "/room/123", "track_name": "chat", "name": "alice"}`
+  - A track is named by its broadcast path and track name, a `Track`.
+    `POST /announce` with `{"broadcast_path": "/room/123", "track_name": "chat"}`
     creates the track when it does not exist and starts a contribution:
     `201 Created`, `Location: contributions/{id}`.
-  - `POST /contributions/{id}/records` appends the body, any JSON value in
-    UTF-8, as one group and answers `201` once it is committed. Requests are routed by the
-    URL, so a contribution is resolved and authorized before the body is read.
-  - `DELETE /contributions/{id}` ends a contribution, as do a new announce under
-    the same name in the same track and `Options.IdleTimeout` (default 5 min)
-    without a record. An ended contribution answers `410 Gone`, an unknown one
-    `404`.
-  - Many contributors record into one track; each group stores a `Record`, the
-    contributor's name and its payload. Records of one track are serialized
-    within a handler, and two processes recording into the same track are not
-    coordinated.
-  - `Options.Authorize` is asked with the announcement for the announce and
-    for every request to the contribution; it refuses with `403`, or `401` for
+  - `POST /contributions/{id}/records` appends the body, one JSON value in
+    UTF-8, as one group and answers `201` once it is committed. The payload is
+    stored and delivered as sent. Requests are routed by the URL, so a
+    contribution is resolved and authorized before the body is read.
+  - A record with an `Idempotency-Key` header is stored once per contribution;
+    a retry with the same key gets the first reply. A contribution remembers
+    its 256 most recent keys.
+  - `DELETE /contributions/{id}` ends a contribution, as does
+    `Options.IdleTimeout` (default 5 min) without a record. An ended
+    contribution answers `410 Gone`, an unknown one `404`.
+  - Any number of contributions record into one track. Records of one track
+    are serialized within a handler, and two processes recording into the same
+    track are not coordinated.
+  - `Options.Authorize(r, track)` is asked for the announce and for every
+    request to the contribution; it refuses with `403`, or `401` for
     `ErrUnauthenticated`, with `Options.Challenge` as its `WWW-Authenticate`
-    header. `Options.OnAnnounce` and `Options.OnRecord` observe
-    what was committed (`Recorded.Data` is the committed bytes), which is where
-    a caller forwards a record to live subscribers.
+    header. `Options.OnAnnounce(ctx, track)` and
+    `Options.OnRecord(ctx, track, group, payload)` observe what was committed,
+    which is where a caller forwards a record to live subscribers.
   - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
     `json`. A record has no media time, so each group is anchored by the wall
     clock at commit; read a window back with `Reader.RangeWallclock`. The

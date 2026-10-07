@@ -22,7 +22,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const chatTrack = ledger.TrackPath("room/123/chat")
+const (
+	chatTrack        = ledger.TrackPath("room/123/chat")
+	chatAnnouncement = `{"broadcast_path":"/room/123","track_name":"chat"}`
+)
 
 func newHandler(tb testing.TB, s store.Store, opts ingest.Options) http.Handler {
 	tb.Helper()
@@ -31,21 +34,22 @@ func newHandler(tb testing.TB, s store.Store, opts ingest.Options) http.Handler 
 	return http.StripPrefix("/ingest", h)
 }
 
-// send sends body to the handler at path, below its mount point.
-func send(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+// send sends body to the handler at path, below its mount point, with the
+// given headers as name-value pairs.
+func send(h http.Handler, method, path, body string, header ...string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "/ingest/"+path, strings.NewReader(body))
+	for i := 0; i+1 < len(header); i += 2 {
+		req.Header.Set(header[i], header[i+1])
+	}
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(method, "/ingest/"+path, strings.NewReader(body)))
+	h.ServeHTTP(rr, req)
 	return rr
 }
 
-func announcement(name string) string {
-	return `{"broadcast_path":"/room/123","track_name":"chat","name":"` + name + `"`
-}
-
-// announce starts a contribution for name and returns its ID.
-func announce(tb testing.TB, h http.Handler, name string) string {
+// announce starts a contribution to the chat track and returns its ID.
+func announce(tb testing.TB, h http.Handler) string {
 	tb.Helper()
-	rr := send(h, http.MethodPost, "announce", announcement(name)+"}")
+	rr := send(h, http.MethodPost, "announce", chatAnnouncement)
 	require.Equal(tb, http.StatusCreated, rr.Code, rr.Body.String())
 	var response struct {
 		ID string `json:"id"`
@@ -55,12 +59,12 @@ func announce(tb testing.TB, h http.Handler, name string) string {
 	return response.ID
 }
 
-func record(h http.Handler, id, payload string) *httptest.ResponseRecorder {
-	return send(h, http.MethodPost, "contributions/"+id+"/records", payload)
+func record(h http.Handler, id, payload string, header ...string) *httptest.ResponseRecorder {
+	return send(h, http.MethodPost, "contributions/"+id+"/records", payload, header...)
 }
 
-// stored reads every record committed to the chat track, in commit order.
-func stored(tb testing.TB, s store.Store) []ingest.Record {
+// stored reads every payload committed to the chat track, in commit order.
+func stored(tb testing.TB, s store.Store) []string {
 	tb.Helper()
 	ctx := context.Background()
 	track, err := ledger.Open(ctx, s, chatTrack, ledger.Config{})
@@ -72,18 +76,31 @@ func stored(tb testing.TB, s store.Store) []ingest.Record {
 	require.NoError(tb, err)
 	reader.SeekStart()
 
-	var records []ingest.Record
+	var payloads []string
 	for {
 		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return records
+			return payloads
 		}
 		require.NoError(tb, err)
 		data, err := reader.ReadGroup(ctx, group.ObjectKey)
 		require.NoError(tb, err)
-		var record ingest.Record
-		require.NoError(tb, json.Unmarshal(data, &record))
-		records = append(records, record)
+		payloads = append(payloads, string(data))
+	}
+}
+
+func TestTrack_Path(t *testing.T) {
+	tests := map[string]struct {
+		track ingest.Track
+		want  ledger.TrackPath
+	}{
+		"rooted":     {track: ingest.Track{BroadcastPath: "/room/123", TrackName: "chat"}, want: "room/123/chat"},
+		"not rooted": {track: ingest.Track{BroadcastPath: "room/123", TrackName: "chat"}, want: "room/123/chat"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.track.Path())
+		})
 	}
 }
 
@@ -91,13 +108,12 @@ func TestHandler_Announce_CreatesTheTrackOnce(t *testing.T) {
 	s := memstore.New()
 	h := newHandler(t, s, ingest.Options{})
 
-	first := send(h, http.MethodPost, "announce", announcement("alice")+"}")
-	second := send(h, http.MethodPost, "announce", announcement("bob")+"}")
+	first := send(h, http.MethodPost, "announce", chatAnnouncement)
+	second := send(h, http.MethodPost, "announce", chatAnnouncement)
 
 	require.Equal(t, http.StatusCreated, first.Code)
-	assert.Contains(t, first.Body.String(), `"track":"room/123/chat","created":true`)
-	require.Equal(t, http.StatusCreated, second.Code, "another contributor starts its own contribution")
-	assert.Contains(t, second.Body.String(), `"created":false`)
+	assert.Contains(t, first.Body.String(), `"track":"room/123/chat"`)
+	require.Equal(t, http.StatusCreated, second.Code, "another contribution to a track that exists")
 	assert.NotEqual(t, first.Header().Get("Location"), second.Header().Get("Location"))
 
 	track, err := ledger.Open(context.Background(), s, chatTrack, ledger.Config{})
@@ -108,27 +124,41 @@ func TestHandler_Announce_CreatesTheTrackOnce(t *testing.T) {
 	assert.Equal(t, ingest.MIME, root.MIME)
 }
 
-func TestHandler_Record_AppendsInCommitOrder(t *testing.T) {
+func TestHandler_Announce_CanonicalBroadcastPath(t *testing.T) {
+	var announced []ingest.Track
+	h := newHandler(t, memstore.New(), ingest.Options{
+		OnAnnounce: func(_ context.Context, tr ingest.Track) { announced = append(announced, tr) },
+	})
+
+	for _, path := range []string{"room/123", "/room/123/", "/room/123"} {
+		rr := send(h, http.MethodPost, "announce", `{"broadcast_path":"`+path+`","track_name":"chat"}`)
+		require.Equal(t, http.StatusCreated, rr.Code, path)
+	}
+
+	require.Len(t, announced, 3)
+	for _, tr := range announced {
+		assert.Equal(t, ingest.Track{BroadcastPath: "/room/123", TrackName: "chat"}, tr)
+	}
+}
+
+func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 	s := memstore.New()
 	h := newHandler(t, s, ingest.Options{})
-	alice := announce(t, h, "alice")
-	bob := announce(t, h, "bob")
+	first, second := announce(t, h), announce(t, h)
 
-	first := record(h, alice, `{"text":"hello"}`)
-	second := record(h, bob, `"hi"`)
+	one := record(h, first, `{"user":"alice","text":"hello"}`)
+	two := record(h, second, `"hi"`)
 
-	require.Equal(t, http.StatusCreated, first.Code)
-	require.Equal(t, http.StatusCreated, second.Code)
-	assert.Equal(t, []ingest.Record{
-		{Name: "alice", Payload: json.RawMessage(`{"text":"hello"}`)},
-		{Name: "bob", Payload: json.RawMessage(`"hi"`)},
-	}, stored(t, s))
+	require.Equal(t, http.StatusCreated, one.Code)
+	require.Equal(t, http.StatusCreated, two.Code)
+	assert.Equal(t, []string{`{"user":"alice","text":"hello"}`, `"hi"`}, stored(t, s),
+		"the payload is stored as it was sent")
 
 	var response struct {
 		Group     string `json:"group"`
 		Wallclock int64  `json:"wallclock"`
 	}
-	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &response))
+	require.NoError(t, json.Unmarshal(two.Body.Bytes(), &response))
 	id, err := ledger.ParseGroupID(response.Group)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), id.Sequence(), "the second record is the track's second group")
@@ -145,247 +175,233 @@ func TestHandler_Record_UnknownContributionIsNotFound(t *testing.T) {
 	assert.Empty(t, stored(t, s))
 }
 
-func TestHandler_AnnounceAgain_EndsThePreviousContribution(t *testing.T) {
+func TestHandler_End_StopsTheContribution(t *testing.T) {
 	s := memstore.New()
 	h := newHandler(t, s, ingest.Options{})
-	old := announce(t, h, "alice")
-	current := announce(t, h, "alice")
+	ended, other := announce(t, h), announce(t, h)
 
-	assert.Equal(t, http.StatusGone, record(h, old, `"stale"`).Code)
-	assert.Equal(t, http.StatusCreated, record(h, current, `"fresh"`).Code)
-	assert.Equal(t, []ingest.Record{{Name: "alice", Payload: json.RawMessage(`"fresh"`)}}, stored(t, s))
-}
-
-func TestHandler_End_StopsTheContribution(t *testing.T) {
-	h := newHandler(t, memstore.New(), ingest.Options{})
-	alice := announce(t, h, "alice")
-
-	end := send(h, http.MethodDelete, "contributions/"+alice, "")
+	end := send(h, http.MethodDelete, "contributions/"+ended, "")
 
 	assert.Equal(t, http.StatusNoContent, end.Code)
-	assert.Equal(t, http.StatusGone, record(h, alice, `"late"`).Code)
-	assert.Equal(t, http.StatusGone, send(h, http.MethodDelete, "contributions/"+alice, "").Code)
+	assert.Equal(t, http.StatusGone, record(h, ended, `"late"`).Code)
+	assert.Equal(t, http.StatusGone, send(h, http.MethodDelete, "contributions/"+ended, "").Code)
+	assert.Equal(t, http.StatusCreated, record(h, other, `"still here"`).Code, "other contributions are unaffected")
+	assert.Equal(t, []string{`"still here"`}, stored(t, s))
 }
 
 func TestHandler_IdleContributionEnds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const idle = time.Minute
 		h := newHandler(t, memstore.New(), ingest.Options{IdleTimeout: idle})
-		alice := announce(t, h, "alice")
-		bob := announce(t, h, "bob")
+		quiet, busy := announce(t, h), announce(t, h)
 
-		// Bob records every half idle timeout; alice goes quiet.
+		// The busy one records every half idle timeout; the quiet one does not.
 		for range 3 {
 			time.Sleep(idle / 2)
 			synctest.Wait()
-			require.Equal(t, http.StatusCreated, record(h, bob, `"still here"`).Code)
+			require.Equal(t, http.StatusCreated, record(h, busy, `"still here"`).Code)
 		}
 
-		// At 1.5 idle timeouts alice has ended; her contribution is kept so
-		// its URLs answer 410.
-		assert.Equal(t, http.StatusGone, record(h, alice, `"back"`).Code)
+		// At 1.5 idle timeouts the quiet one has ended; it is kept so its URLs
+		// answer 410.
+		assert.Equal(t, http.StatusGone, record(h, quiet, `"back"`).Code)
 
 		// One idle timeout after it ended (at 2 idle timeouts) it is forgotten,
-		// while bob, last heard at 1.5, is still live.
+		// while the busy one, last heard at 1.5, is still live.
 		time.Sleep(idle/2 + time.Second)
 		synctest.Wait()
-		assert.Equal(t, http.StatusNotFound, record(h, alice, `"back"`).Code)
-		assert.Equal(t, http.StatusCreated, record(h, bob, `"still here"`).Code, "recording kept bob's contribution alive")
+		assert.Equal(t, http.StatusNotFound, record(h, quiet, `"back"`).Code)
+		assert.Equal(t, http.StatusCreated, record(h, busy, `"still here"`).Code)
 	})
 }
 
 func TestHandler_IdleTimeoutDefault(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newHandler(t, memstore.New(), ingest.Options{})
-		alice := announce(t, h, "alice")
+		id := announce(t, h)
 
 		time.Sleep(ingest.DefaultIdleTimeout - time.Second)
 		synctest.Wait()
-		assert.Equal(t, http.StatusCreated, record(h, alice, `"just in time"`).Code)
+		assert.Equal(t, http.StatusCreated, record(h, id, `"just in time"`).Code)
 
 		time.Sleep(ingest.DefaultIdleTimeout + time.Second)
 		synctest.Wait()
-		assert.Equal(t, http.StatusGone, record(h, alice, `"too late"`).Code)
+		assert.Equal(t, http.StatusGone, record(h, id, `"too late"`).Code)
 	})
 }
 
-func TestHandler_Record_ConcurrentContributorsAllCommit(t *testing.T) {
+func TestHandler_Record_IdempotencyKey(t *testing.T) {
+	s := memstore.New()
+	var delivered int
+	h := newHandler(t, s, ingest.Options{
+		OnRecord: func(context.Context, ingest.Track, ledger.GroupInfo, []byte) { delivered++ },
+	})
+	first, second := announce(t, h), announce(t, h)
+
+	original := record(h, first, `"hello"`, "Idempotency-Key", "k1")
+	retry := record(h, first, `"hello"`, "Idempotency-Key", "k1")
+	otherKey := record(h, first, `"again"`, "Idempotency-Key", "k2")
+	otherContribution := record(h, second, `"hello"`, "Idempotency-Key", "k1")
+	unkeyed := record(h, first, `"unkeyed"`)
+	unkeyedAgain := record(h, first, `"unkeyed"`)
+
+	for _, rr := range []*httptest.ResponseRecorder{original, retry, otherKey, otherContribution, unkeyed, unkeyedAgain} {
+		require.Equal(t, http.StatusCreated, rr.Code)
+	}
+	assert.JSONEq(t, original.Body.String(), retry.Body.String(), "a retry is answered as the first was")
+	assert.Equal(t, []string{`"hello"`, `"again"`, `"hello"`, `"unkeyed"`, `"unkeyed"`}, stored(t, s),
+		"a key is scoped to its contribution, and records without one are never merged")
+	assert.Equal(t, 5, delivered, "a retry is not delivered again")
+}
+
+func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
 	s := memstore.New()
 	h := newHandler(t, s, ingest.Options{})
-	const contributors, each = 8, 10
-	ids := make([]string, contributors)
-	for c := range contributors {
-		ids[c] = announce(t, h, fmt.Sprintf("user-%d", c))
+	id := announce(t, h)
+	const remembered = 256
+
+	for i := range remembered + 1 {
+		require.Equal(t, http.StatusCreated, record(h, id, fmt.Sprintf("%d", i), "Idempotency-Key", fmt.Sprintf("k%d", i)).Code)
+	}
+	newest := record(h, id, "0", "Idempotency-Key", fmt.Sprintf("k%d", remembered))
+	oldest := record(h, id, "0", "Idempotency-Key", "k0")
+
+	require.Equal(t, http.StatusCreated, newest.Code)
+	require.Equal(t, http.StatusCreated, oldest.Code)
+	assert.Len(t, stored(t, s), remembered+2, "the oldest key was forgotten, so its retry is stored again")
+}
+
+func TestHandler_Record_ConcurrentContributionsAllCommit(t *testing.T) {
+	s := memstore.New()
+	h := newHandler(t, s, ingest.Options{})
+	const contributions, each = 8, 10
+	ids := make([]string, contributions)
+	for c := range ids {
+		ids[c] = announce(t, h)
 	}
 
 	var wg sync.WaitGroup
-	for _, id := range ids {
+	for c, id := range ids {
 		wg.Go(func() {
 			for i := range each {
-				rr := record(h, id, fmt.Sprintf(`"%d"`, i))
+				rr := record(h, id, fmt.Sprintf(`{"c":%d,"i":%d}`, c, i))
 				assert.Equal(t, http.StatusCreated, rr.Code)
 			}
 		})
 	}
 	wg.Wait()
 
-	records := stored(t, s)
-	require.Len(t, records, contributors*each)
-	// Each contributor's own records keep the order it sent them in.
-	next := make(map[string]int)
-	for _, record := range records {
-		assert.JSONEq(t, fmt.Sprintf(`"%d"`, next[record.Name]), string(record.Payload))
-		next[record.Name]++
+	payloads := stored(t, s)
+	require.Len(t, payloads, contributions*each)
+	// Each contribution's own records keep the order it sent them in.
+	next := make(map[int]int)
+	for _, payload := range payloads {
+		var p struct{ C, I int }
+		require.NoError(t, json.Unmarshal([]byte(payload), &p))
+		assert.Equal(t, next[p.C], p.I)
+		next[p.C]++
 	}
 }
 
 func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
-	s := memstore.New()
-	var seen []ingest.Recorded
-	h := newHandler(t, s, ingest.Options{
-		OnRecord: func(_ context.Context, rec ingest.Recorded) { seen = append(seen, rec) },
-	})
-	alice := announce(t, h, "alice")
-	bob := announce(t, h, "bob")
-
-	record(h, alice, `"one"`)
-	record(h, bob, `"two"`)
-
-	require.Len(t, seen, 2)
-	assert.Equal(t, alice, seen[0].ID)
-	assert.Equal(t, chatTrack, seen[0].Track())
-	assert.Equal(t, "/room/123", seen[0].BroadcastPath)
-	assert.Equal(t, "chat", seen[0].TrackName)
-	assert.Equal(t, "alice", seen[0].Name)
-	assert.JSONEq(t, `{"name":"alice","payload":"one"}`, string(seen[0].Data))
-	assert.Equal(t, uint64(0), seen[0].Group.ID.Sequence())
-	assert.Equal(t, uint64(1), seen[1].Group.ID.Sequence())
-	assert.NotEmpty(t, seen[1].Group.ObjectKey, "the hook sees the group as committed")
-}
-
-func TestHandler_OnAnnounce_ReportsWhetherTheTrackIsNew(t *testing.T) {
-	var seen []ingest.Announced
+	type delivery struct {
+		track   ingest.Track
+		group   ledger.GroupInfo
+		payload string
+	}
+	var seen []delivery
 	h := newHandler(t, memstore.New(), ingest.Options{
-		OnAnnounce: func(_ context.Context, a ingest.Announced) { seen = append(seen, a) },
-	})
-
-	alice := announce(t, h, "alice")
-	bob := announce(t, h, "bob")
-
-	require.Len(t, seen, 2)
-	assert.Equal(t, ingest.Announced{
-		Contribution: ingest.Contribution{
-			ID:           alice,
-			Announcement: ingest.Announcement{BroadcastPath: "/room/123", TrackName: "chat", Name: "alice"},
+		OnRecord: func(_ context.Context, tr ingest.Track, g ledger.GroupInfo, payload []byte) {
+			seen = append(seen, delivery{track: tr, group: g, payload: string(payload)})
 		},
-		Created: true,
-	}, seen[0])
-	assert.Equal(t, bob, seen[1].ID)
-	assert.False(t, seen[1].Created)
-}
-
-func TestHandler_Announce_CanonicalBroadcastPath(t *testing.T) {
-	var seen []ingest.Announced
-	h := newHandler(t, memstore.New(), ingest.Options{
-		OnAnnounce: func(_ context.Context, a ingest.Announced) { seen = append(seen, a) },
 	})
+	id := announce(t, h)
 
-	for _, path := range []string{"room/123", "/room/123/"} {
-		rr := send(h, http.MethodPost, "announce", `{"broadcast_path":"`+path+`","track_name":"chat","name":"alice"}`)
-		require.Equal(t, http.StatusCreated, rr.Code, path)
-	}
+	record(h, id, `"one"`)
+	record(h, id, `"two"`)
 
 	require.Len(t, seen, 2)
-	for _, a := range seen {
-		assert.Equal(t, "/room/123", a.BroadcastPath)
-		assert.Equal(t, chatTrack, a.Track())
-	}
+	assert.Equal(t, ingest.Track{BroadcastPath: "/room/123", TrackName: "chat"}, seen[0].track)
+	assert.Equal(t, `"one"`, seen[0].payload)
+	assert.Equal(t, uint64(0), seen[0].group.ID.Sequence())
+	assert.Equal(t, uint64(1), seen[1].group.ID.Sequence())
+	assert.NotEmpty(t, seen[1].group.ObjectKey, "the hook sees the group as committed")
 }
 
 func TestHandler_Authorize(t *testing.T) {
 	s := memstore.New()
-	var asked []ingest.Announcement
-	allowed := map[string]bool{"alice": true}
+	var asked []ingest.Track
+	allowed := true
 	h := newHandler(t, s, ingest.Options{
-		Authorize: func(r *http.Request, a ingest.Announcement) error {
-			asked = append(asked, a)
+		Authorize: func(r *http.Request, tr ingest.Track) error {
+			asked = append(asked, tr)
 			switch {
 			case r.Header.Get("Authorization") == "":
 				return fmt.Errorf("no credential: %w", ingest.ErrUnauthenticated)
-			case !allowed[a.Name]:
+			case !allowed:
 				return errors.New("not allowed")
 			}
 			return nil
 		},
 		Challenge: "Bearer",
 	})
-	signed := func(method, path, body string) int {
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(method, "/ingest/"+path, strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer credential")
-		h.ServeHTTP(rr, req)
-		return rr.Code
-	}
+	const credential = "Bearer credential"
 
-	unauthenticated := send(h, http.MethodPost, "announce", announcement("alice")+"}")
+	unauthenticated := send(h, http.MethodPost, "announce", chatAnnouncement)
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 	assert.Equal(t, "Bearer", unauthenticated.Header().Get("WWW-Authenticate"), "a 401 names the scheme")
-	assert.Equal(t, http.StatusForbidden, signed(http.MethodPost, "announce", announcement("mallory")+"}"))
 
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/ingest/announce", strings.NewReader(announcement("alice")+"}"))
-	req.Header.Set("Authorization", "Bearer credential")
-	h.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusCreated, rr.Code)
-	var response struct {
-		ID string `json:"id"`
-	}
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	signed := send(h, http.MethodPost, "announce", chatAnnouncement, "Authorization", credential)
+	require.Equal(t, http.StatusCreated, signed.Code)
+	location := signed.Header().Get("Location")
 
-	// Every record is authorized again, as the contribution's announcement.
-	assert.Equal(t, http.StatusUnauthorized, record(h, response.ID, `"unsigned"`).Code)
-	allowed["alice"] = false
-	assert.Equal(t, http.StatusForbidden, signed(http.MethodPost, "contributions/"+response.ID+"/records", `"revoked"`))
-	assert.Equal(t, http.StatusForbidden, signed(http.MethodDelete, "contributions/"+response.ID, ""))
+	// Every record and end is authorized again, on the contribution's track.
+	assert.Equal(t, http.StatusUnauthorized, send(h, http.MethodPost, location+"/records", `"unsigned"`).Code)
+	allowed = false
+	assert.Equal(t, http.StatusForbidden, send(h, http.MethodPost, location+"/records", `"revoked"`, "Authorization", credential).Code)
+	assert.Equal(t, http.StatusForbidden, send(h, http.MethodDelete, location, "", "Authorization", credential).Code)
+	assert.Equal(t, http.StatusForbidden, send(h, http.MethodPost, "announce", chatAnnouncement, "Authorization", credential).Code)
 
 	assert.Empty(t, stored(t, s))
 	require.Len(t, asked, 6)
-	assert.Equal(t, ingest.Announcement{BroadcastPath: "/room/123", TrackName: "chat", Name: "alice"}, asked[5])
+	for _, tr := range asked {
+		assert.Equal(t, ingest.Track{BroadcastPath: "/room/123", TrackName: "chat"}, tr)
+	}
 }
 
 func TestHandler_RejectsUnusableRequests(t *testing.T) {
 	tests := map[string]struct {
 		method string
-		path   string // "{id}" stands for alice's contribution
+		path   string // "{id}" stands for an announced contribution
 		body   string
+		header []string
 		want   int
 	}{
-		"unknown endpoint":             {method: http.MethodPost, path: "playlist.m3u8", body: "{}", want: http.StatusNotFound},
-		"announce not a POST":          {method: http.MethodGet, path: "announce", want: http.StatusMethodNotAllowed},
-		"record not a POST":            {method: http.MethodPut, path: "contributions/{id}/records", body: `"x"`, want: http.StatusMethodNotAllowed},
-		"body is not JSON":             {method: http.MethodPost, path: "announce", body: "hello", want: http.StatusBadRequest},
-		"no broadcast path":            {method: http.MethodPost, path: "announce", body: `{"track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
-		"broadcast path not clean":     {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/456/../123","track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
-		"broadcast path empty segment": {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room//123","track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
-		"no track name":                {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","name":"bob"}`, want: http.StatusBadRequest},
-		"track name has a slash":       {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"a/b","name":"bob"}`, want: http.StatusBadRequest},
-		"no name":                      {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"chat"}`, want: http.StatusBadRequest},
-		"name has a slash":             {method: http.MethodPost, path: "announce", body: announcement("bob/carol") + "}", want: http.StatusBadRequest},
-		"name is a dot segment":        {method: http.MethodPost, path: "announce", body: announcement("..") + "}", want: http.StatusBadRequest},
-		"record with no body":          {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
-		"record body not UTF-8":        {method: http.MethodPost, path: "contributions/{id}/records", body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
-		"record body not JSON":         {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
-		"announce over the limit":      {method: http.MethodPost, path: "announce", body: announcement(strings.Repeat("b", 200)) + "}", want: http.StatusRequestEntityTooLarge},
-		"end not a DELETE":             {method: http.MethodPost, path: "contributions/{id}", want: http.StatusMethodNotAllowed},
-		"record over the limit":        {method: http.MethodPost, path: "contributions/{id}/records", body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
+		"unknown endpoint":         {method: http.MethodPost, path: "playlist.m3u8", body: "{}", want: http.StatusNotFound},
+		"announce not a POST":      {method: http.MethodGet, path: "announce", want: http.StatusMethodNotAllowed},
+		"record not a POST":        {method: http.MethodPut, path: "contributions/{id}/records", body: `"x"`, want: http.StatusMethodNotAllowed},
+		"end not a DELETE":         {method: http.MethodPost, path: "contributions/{id}", want: http.StatusMethodNotAllowed},
+		"body is not JSON":         {method: http.MethodPost, path: "announce", body: "hello", want: http.StatusBadRequest},
+		"no broadcast path":        {method: http.MethodPost, path: "announce", body: `{"track_name":"chat"}`, want: http.StatusBadRequest},
+		"empty path segment":       {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room//123","track_name":"chat"}`, want: http.StatusBadRequest},
+		"dot-dot path segment":     {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/../123","track_name":"chat"}`, want: http.StatusBadRequest},
+		"no track name":            {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123"}`, want: http.StatusBadRequest},
+		"track name has a slash":   {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"a/b"}`, want: http.StatusBadRequest},
+		"announce over the limit":  {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/` + strings.Repeat("b", 200) + `","track_name":"chat"}`, want: http.StatusRequestEntityTooLarge},
+		"record with no body":      {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
+		"record body not JSON":     {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
+		"record body two values":   {method: http.MethodPost, path: "contributions/{id}/records", body: "1 2", want: http.StatusBadRequest},
+		"record body not UTF-8":    {method: http.MethodPost, path: "contributions/{id}/records", body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
+		"record over the limit":    {method: http.MethodPost, path: "contributions/{id}/records", body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
+		"idempotency key too long": {method: http.MethodPost, path: "contributions/{id}/records", body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := memstore.New()
 			h := newHandler(t, s, ingest.Options{MaxBodyBytes: 128})
-			alice := announce(t, h, "alice")
+			id := announce(t, h)
 
-			rr := send(h, tt.method, strings.ReplaceAll(tt.path, "{id}", alice), tt.body)
+			rr := send(h, tt.method, strings.ReplaceAll(tt.path, "{id}", id), tt.body, tt.header...)
 
 			assert.Equal(t, tt.want, rr.Code)
 			assert.Empty(t, stored(t, s))

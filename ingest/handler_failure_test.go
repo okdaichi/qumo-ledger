@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const chatAnnouncement = `{"broadcast_path":"/room/123","track_name":"chat","name":"alice"}`
+const chatAnnouncement = `{"broadcast_path":"/room/123","track_name":"chat"}`
 
 // serve sends one request to h and returns the response.
 func serve(h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -55,12 +55,14 @@ func TestHandler_StoreFailures(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			var logs bytes.Buffer
-			var delivered []Recorded
+			var delivered []string
 			h, err := NewHandler(&fakeStore{createErr: tt.createErr}, Options{
 				// A threshold of one byte seals after every record.
-				Config:   ledger.Config{SealThreshold: 1},
-				Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
-				OnRecord: func(_ context.Context, rec Recorded) { delivered = append(delivered, rec) },
+				Config: ledger.Config{SealThreshold: 1},
+				Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+				OnRecord: func(_ context.Context, _ Track, _ ledger.GroupInfo, payload []byte) {
+					delivered = append(delivered, string(payload))
+				},
 			})
 			require.NoError(t, err)
 
@@ -83,7 +85,7 @@ func TestHandler_StoreFailures(t *testing.T) {
 			}
 			if tt.wantRecord == http.StatusCreated {
 				require.Len(t, delivered, 1, "a committed record is delivered even when the seal failed")
-				assert.JSONEq(t, `{"name":"alice","payload":"hello"}`, string(delivered[0].Data))
+				assert.Equal(t, `"hello"`, delivered[0])
 			} else {
 				assert.Empty(t, delivered, "a record that was not committed is not delivered")
 			}
