@@ -109,6 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **build:** The minimum Go version is now 1.27.
+
 - **ledger/store:** The backend packages are named for the storage they keep
   objects in, beneath the `store` package whose interface they implement:
   `memstore` is now `mem` and `fsstore` is now `fs`, joined by `db` and
