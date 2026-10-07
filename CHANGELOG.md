@@ -154,6 +154,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreachable. Keeping it would have invited a matching `After` and a
   permanently asymmetric API.
 
+### Fixed
+
+- **ledger:** A failed write no longer stops a writer's later appends.
+  - A commit that fails is read back: one the store took though its answer was
+    lost is returned as committed, so the caller does not store it again.
+  - A commit or seal whose outcome stays unknown, and a commit or group object
+    another writer claimed, make the next append reload the writer's state
+    from the store first rather than claiming the same delta again.
+  - `Writer.Append` steps past a sequence an earlier failed append left an
+    uncommitted group object at, up to 16 of them, instead of failing with
+    `ErrGroupExists` on every later append and after every restart. It
+    re-reads the epoch before each step, so a sequence another writer
+    committed is followed rather than stepped past. The object is reclaimed
+    with the other unreferenced ones. `AppendGroup`, whose caller chose the
+    sequence, still reports the collision.
+
 ## [0.1.0] - unreleased
 ## [0.1.0] - 2026-08-07
 
