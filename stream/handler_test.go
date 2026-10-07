@@ -15,7 +15,7 @@ import (
 
 	"github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/okdaichi/qumo-ledger/stream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +49,7 @@ func newTrackFixtureEncoding(tb testing.TB, encoding string) trackFixture {
 
 func newTrackFixtureGroups(tb testing.TB, encoding string, groups int64) trackFixture {
 	tb.Helper()
-	return newTrackFixtureStore(tb, encoding, groups, memstore.New())
+	return newTrackFixtureStore(tb, encoding, groups, mem.New())
 }
 
 // newTrackFixtureStore is newTrackFixtureGroups over a caller-supplied backend,
@@ -327,7 +327,7 @@ func TestHandler_WindowLargerThanTrack(t *testing.T) {
 // have to be counted so discontinuity numbering survives them.
 func TestHandler_WindowAcrossEpochs(t *testing.T) {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -384,7 +384,7 @@ func TestHandler_WindowAcrossEpochs(t *testing.T) {
 // open the stream on a finished session and watch it through.
 func TestHandler_EpochWindow(t *testing.T) {
 	ctx := context.Background()
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -499,7 +499,7 @@ func newEpochFixture(tb testing.TB, perEpoch ...int64) (*ledger.Track, [][]ledge
 	tb.Helper()
 	ctx := context.Background()
 
-	store := memstore.New()
+	store := mem.New()
 	track, err := ledger.Create(ctx, store, "live/cam1/video", ledger.TrackSchema{
 		Timescale: 90000, TimeSource: ledger.TimeSourceFrame,
 		MIME: "video/mp4", Encoding: "fmp4",
@@ -783,7 +783,7 @@ func (s *brokenStore) Get(ctx context.Context, key string) ([]byte, store.Versio
 // status text — the store errors underneath carry object keys and store paths,
 // which have no business in a response.
 func TestHandler_StoreFailureIsServerError(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 
@@ -819,7 +819,7 @@ func TestHandler_StoreFailureIsServerError(t *testing.T) {
 // reader open cleanly and makes Lookup fail for a reason that is neither
 // ErrGroupNotFound nor the open — the arm that must answer 500 rather than 404.
 func TestHandler_LookupFailureIsServerError(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 1, backend)
 
 	// A second lifetime, so the fixture's groups sit in epoch 1 and a segment
@@ -854,7 +854,7 @@ func TestHandler_LookupFailureIsServerError(t *testing.T) {
 // what broke and which request broke it — the log is the only place the detail
 // survives.
 func TestHandler_InternalErrorsAreLogged(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 
@@ -883,7 +883,7 @@ func TestHandler_InternalErrorsAreLogged(t *testing.T) {
 // failure: the handler still answers 500, but writes no record, so the log the
 // option carries stays a signal of real outages.
 func TestHandler_CanceledRequestNotLogged(t *testing.T) {
-	backend := &brokenStore{Store: memstore.New()}
+	backend := &brokenStore{Store: mem.New()}
 	fix := newTrackFixtureStore(t, "fmp4", 2, backend)
 	backend.failAll = true
 	backend.err = context.Canceled

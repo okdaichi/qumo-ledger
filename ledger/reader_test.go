@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // newPopulatedTrack writes count groups and seals everything before sealAt, so
 // the resulting track exercises both the sealed history and the open region.
-func newPopulatedTrack(tb testing.TB, count, sealAt uint64) (*memstore.Store, *Writer) {
+func newPopulatedTrack(tb testing.TB, count, sealAt uint64) (*mem.Store, *Writer) {
 	tb.Helper()
 
 	w, objects := newTestWriter(tb)
@@ -381,7 +381,7 @@ func TestReader_sealed_RejectsMismatchedManifest(t *testing.T) {
 }
 
 func TestOpen_RejectsManifestForAnotherTrack(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 
 	_, err := Create(t.Context(), objects, "live/cam1/video", testSchema(t), Config{})
 	require.NoError(t, err)
@@ -705,7 +705,7 @@ func TestReader_MultipleReadersIndependent(t *testing.T) {
 // A reader spans epochs: draining after a NewEpoch yields the first lifetime's
 // groups then the second's, as one ascending run of IDs.
 func TestReader_Next_SpansEpochs(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
@@ -744,7 +744,7 @@ func TestReader_Next_SpansEpochs(t *testing.T) {
 // does not see a producer's restart until it Reloads, and a reader built after
 // the reload spans the new lifetime.
 func TestTrack_RootAndReload(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
@@ -791,7 +791,7 @@ func TestTrack_RootAndReload(t *testing.T) {
 // anchor falls inside the window, where a group with an extent would also reach
 // backward from an earlier anchor.
 func TestReader_RangeMedia_PointGroups(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
