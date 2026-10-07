@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ingest"
@@ -167,23 +168,45 @@ func TestHandler_End_StopsTheContribution(t *testing.T) {
 }
 
 func TestHandler_IdleContributionEnds(t *testing.T) {
-	const idle = 20 * time.Millisecond
-	h := newHandler(t, memstore.New(), ingest.Options{IdleTimeout: idle})
-	alice := announce(t, h, "alice")
-	bob := announce(t, h, "bob")
+	synctest.Test(t, func(t *testing.T) {
+		const idle = time.Minute
+		h := newHandler(t, memstore.New(), ingest.Options{IdleTimeout: idle})
+		alice := announce(t, h, "alice")
+		bob := announce(t, h, "bob")
 
-	// Bob keeps recording; alice goes quiet.
-	for range 4 {
-		time.Sleep(idle / 2)
-		require.Equal(t, http.StatusCreated, record(h, bob, `"still here"`).Code)
-	}
+		// Bob records every half idle timeout; alice goes quiet.
+		for range 3 {
+			time.Sleep(idle / 2)
+			synctest.Wait()
+			require.Equal(t, http.StatusCreated, record(h, bob, `"still here"`).Code)
+		}
 
-	// Alice has ended (410), or already been forgotten after a second idle
-	// timeout (404).
-	assert.Contains(t, []int{http.StatusGone, http.StatusNotFound}, record(h, alice, `"back"`).Code)
-	assert.Eventually(t, func() bool {
-		return record(h, alice, `"back"`).Code == http.StatusNotFound
-	}, time.Second, idle/4, "an ended contribution is forgotten after another idle timeout")
+		// At 1.5 idle timeouts alice has ended; her contribution is kept so
+		// its URLs answer 410.
+		assert.Equal(t, http.StatusGone, record(h, alice, `"back"`).Code)
+
+		// One idle timeout after it ended (at 2 idle timeouts) it is forgotten,
+		// while bob, last heard at 1.5, is still live.
+		time.Sleep(idle/2 + time.Second)
+		synctest.Wait()
+		assert.Equal(t, http.StatusNotFound, record(h, alice, `"back"`).Code)
+		assert.Equal(t, http.StatusCreated, record(h, bob, `"still here"`).Code, "recording kept bob's contribution alive")
+	})
+}
+
+func TestHandler_IdleTimeoutDefault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHandler(t, memstore.New(), ingest.Options{})
+		alice := announce(t, h, "alice")
+
+		time.Sleep(ingest.DefaultIdleTimeout - time.Second)
+		synctest.Wait()
+		assert.Equal(t, http.StatusCreated, record(h, alice, `"just in time"`).Code)
+
+		time.Sleep(ingest.DefaultIdleTimeout + time.Second)
+		synctest.Wait()
+		assert.Equal(t, http.StatusGone, record(h, alice, `"too late"`).Code)
+	})
 }
 
 func TestHandler_Record_ConcurrentContributorsAllCommit(t *testing.T) {
@@ -348,6 +371,8 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		"name is a dot segment":        {method: http.MethodPost, path: "announce", body: announcement("..") + "}", want: http.StatusBadRequest},
 		"record with no body":          {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
 		"record body not JSON":         {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
+		"announce over the limit":      {method: http.MethodPost, path: "announce", body: announcement(strings.Repeat("b", 200)) + "}", want: http.StatusRequestEntityTooLarge},
+		"end not a DELETE":             {method: http.MethodPost, path: "contributions/{id}", want: http.StatusMethodNotAllowed},
 		"record over the limit":        {method: http.MethodPost, path: "contributions/{id}/records", body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
 	}
 	for name, tt := range tests {
