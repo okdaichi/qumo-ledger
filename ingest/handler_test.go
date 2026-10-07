@@ -261,6 +261,24 @@ func TestHandler_OnAnnounce_ReportsWhetherTheTrackIsNew(t *testing.T) {
 	assert.False(t, seen[1].Created)
 }
 
+func TestHandler_Announce_CanonicalBroadcastPath(t *testing.T) {
+	var seen []ingest.Announced
+	h := newHandler(t, memstore.New(), ingest.Options{
+		OnAnnounce: func(_ context.Context, a ingest.Announced) { seen = append(seen, a) },
+	})
+
+	for _, path := range []string{"room/123", "/room/123/"} {
+		rr := send(h, http.MethodPost, "announce", `{"broadcast_path":"`+path+`","track_name":"chat","name":"alice"}`)
+		require.Equal(t, http.StatusCreated, rr.Code, path)
+	}
+
+	require.Len(t, seen, 2)
+	for _, a := range seen {
+		assert.Equal(t, "/room/123", a.BroadcastPath)
+		assert.Equal(t, chatTrack, a.Track())
+	}
+}
+
 func TestHandler_Authorize(t *testing.T) {
 	s := memstore.New()
 	var asked []ingest.Announcement
@@ -316,19 +334,21 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		body   string
 		want   int
 	}{
-		"unknown endpoint":       {method: http.MethodPost, path: "playlist.m3u8", body: "{}", want: http.StatusNotFound},
-		"announce not a POST":    {method: http.MethodGet, path: "announce", want: http.StatusMethodNotAllowed},
-		"record not a POST":      {method: http.MethodPut, path: "contributions/{id}/records", body: `"x"`, want: http.StatusMethodNotAllowed},
-		"body is not JSON":       {method: http.MethodPost, path: "announce", body: "hello", want: http.StatusBadRequest},
-		"no broadcast path":      {method: http.MethodPost, path: "announce", body: `{"track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
-		"no track name":          {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","name":"bob"}`, want: http.StatusBadRequest},
-		"track name has a slash": {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"a/b","name":"bob"}`, want: http.StatusBadRequest},
-		"no name":                {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"chat"}`, want: http.StatusBadRequest},
-		"name has a slash":       {method: http.MethodPost, path: "announce", body: announcement("bob/carol") + "}", want: http.StatusBadRequest},
-		"name is a dot segment":  {method: http.MethodPost, path: "announce", body: announcement("..") + "}", want: http.StatusBadRequest},
-		"record with no body":    {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
-		"record body not JSON":   {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
-		"record over the limit":  {method: http.MethodPost, path: "contributions/{id}/records", body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
+		"unknown endpoint":             {method: http.MethodPost, path: "playlist.m3u8", body: "{}", want: http.StatusNotFound},
+		"announce not a POST":          {method: http.MethodGet, path: "announce", want: http.StatusMethodNotAllowed},
+		"record not a POST":            {method: http.MethodPut, path: "contributions/{id}/records", body: `"x"`, want: http.StatusMethodNotAllowed},
+		"body is not JSON":             {method: http.MethodPost, path: "announce", body: "hello", want: http.StatusBadRequest},
+		"no broadcast path":            {method: http.MethodPost, path: "announce", body: `{"track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
+		"broadcast path not clean":     {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/456/../123","track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
+		"broadcast path empty segment": {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room//123","track_name":"chat","name":"bob"}`, want: http.StatusBadRequest},
+		"no track name":                {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","name":"bob"}`, want: http.StatusBadRequest},
+		"track name has a slash":       {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"a/b","name":"bob"}`, want: http.StatusBadRequest},
+		"no name":                      {method: http.MethodPost, path: "announce", body: `{"broadcast_path":"/room/123","track_name":"chat"}`, want: http.StatusBadRequest},
+		"name has a slash":             {method: http.MethodPost, path: "announce", body: announcement("bob/carol") + "}", want: http.StatusBadRequest},
+		"name is a dot segment":        {method: http.MethodPost, path: "announce", body: announcement("..") + "}", want: http.StatusBadRequest},
+		"record with no body":          {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
+		"record body not JSON":         {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
+		"record over the limit":        {method: http.MethodPost, path: "contributions/{id}/records", body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
