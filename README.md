@@ -36,6 +36,11 @@ go get github.com/okdaichi/qumo-ledger
 ```go
 objects, _ := fsstore.New("/var/lib/qumo-ledger")
 
+// Or open a backend by URI. Each backend package registers its scheme when it
+// is imported: "" or mem:, file:///var/lib/qumo-ledger,
+// postgres://user@host/db, s3://bucket/prefix?region=ap-northeast-1.
+objects, _ = store.Open(ctx, os.Getenv("LEDGER_URI"))
+
 // Create establishes a new track, like os.Create: it fixes the schema once and
 // returns a handle. Re-creating an existing track fails rather than truncating
 // it — a track is an immutable, append-only log. The empty Config is the common
@@ -150,6 +155,8 @@ A supported client CLI for accessing a ledger lives in a separate repository.
 | `ledger/store` | The storage contract: conditional create, compare-and-swap, optional listing. A leaf, so a backend never imports the ledger. |
 | `ledger/store/memstore` | In-memory backend; also the reference implementation. |
 | `ledger/store/fsstore` | Local filesystem backend. |
+| `ledger/store/sqlstore` | PostgreSQL / CockroachDB backend: one table, one row per object. |
+| `ledger/store/s3store` | Amazon S3 / S3-compatible backend over conditional PUTs. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
 | `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
 | `ingest` | Announce and record over HTTP: a contributor announces into a track, then posts JSON records to its contribution's URL. Authorization and live delivery are hooks. |
