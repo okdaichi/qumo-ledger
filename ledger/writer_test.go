@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/okdaichi/qumo-ledger/ledger/store"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,16 +54,16 @@ func testGroup(tb testing.TB, sequence uint64) GroupInfo {
 
 // newTestWriter creates a fresh track and returns its writer along with the
 // objects backing it.
-func newTestWriter(tb testing.TB) (*Writer, *memstore.Store) {
+func newTestWriter(tb testing.TB) (*Writer, *mem.Store) {
 	tb.Helper()
 
-	objects := memstore.New()
+	objects := mem.New()
 	return newWriter(tb, objects, Config{}), objects
 }
 
 // newWriter creates the standard test track and returns its writer, for the
 // cases that need a fake store or non-default settings. newTestWriter covers
-// the common fresh-memstore case.
+// the common fresh-mem case.
 func newWriter(tb testing.TB, objects store.Store, cfg Config) *Writer {
 	tb.Helper()
 
@@ -77,7 +77,7 @@ func newWriter(tb testing.TB, objects store.Store, cfg Config) *Writer {
 }
 
 func TestCreate(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestCreate(t *testing.T) {
 }
 
 func TestCreate_AlreadyExists(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 
 	_, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
@@ -113,7 +113,7 @@ func TestCreate_AlreadyExists(t *testing.T) {
 // Every Config field means a documented default when left zero, so the smallest
 // usable track is an empty Config.
 func TestCreate_Defaults(t *testing.T) {
-	track, err := Create(t.Context(), memstore.New(), testTrack, testSchema(t), Config{})
+	track, err := Create(t.Context(), mem.New(), testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(DefaultSealThreshold), track.sealThreshold)
@@ -133,7 +133,7 @@ func TestCreate_InvalidInput(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := Create(t.Context(), memstore.New(), tt.track, tt.config, Config{})
+			_, err := Create(t.Context(), mem.New(), tt.track, tt.config, Config{})
 			assert.ErrorIs(t, err, tt.wantErr)
 		})
 	}
@@ -142,7 +142,7 @@ func TestCreate_InvalidInput(t *testing.T) {
 // Append is the sequential default: it derives sequence, media time, and
 // wallclock so a back-to-back producer hands the ledger only a duration.
 func TestWriter_Append(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{Clock: func() time.Time { return now }})
@@ -244,7 +244,7 @@ func TestWriter_AppendGroup_GappySequences(t *testing.T) {
 // keyspace, so a reused sequence under a new epoch gets a fresh object rather
 // than colliding with the immutable one from the previous lifetime.
 func TestWriter_NewEpoch_SeparatesProducerLifetimes(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 
@@ -320,7 +320,7 @@ func TestWriter_NewEpoch_OrderingResets(t *testing.T) {
 // NewEpoch persists a new epoch that survives a reopen, and a reused sequence
 // under it lands in a fresh keyspace.
 func TestWriter_NewEpoch(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.NoError(t, err)
 	w, err := track.Writer(t.Context())
@@ -366,7 +366,7 @@ func TestWriter_AppendGroup_LeavesWallclockUnsetForFrameTracks(t *testing.T) {
 
 // A track declaring ledger-clock timestamps gets one stamped.
 func TestWriter_AppendGroup_StampsWallclockForIngestTracks(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	stamped := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 
 	config := testSchema(t)
@@ -468,7 +468,7 @@ func TestWriter_Seal_Empty(t *testing.T) {
 
 func TestWriter_AppendGroup_SealsAtThreshold(t *testing.T) {
 	// One byte guarantees every append crosses the threshold.
-	w := newWriter(t, memstore.New(), Config{SealThreshold: 1})
+	w := newWriter(t, mem.New(), Config{SealThreshold: 1})
 
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
@@ -550,7 +550,7 @@ func TestTrack_Writer_StaleHead(t *testing.T) {
 }
 
 func TestOpen_TrackNotFound(t *testing.T) {
-	_, err := Open(t.Context(), memstore.New(), testTrack, Config{})
+	_, err := Open(t.Context(), mem.New(), testTrack, Config{})
 
 	assert.ErrorIs(t, err, ErrTrackNotFound)
 }

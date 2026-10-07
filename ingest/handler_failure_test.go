@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
-	"github.com/okdaichi/qumo-ledger/ledger/store/memstore"
+	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -119,7 +119,7 @@ func TestHandler_History_StoreFailures(t *testing.T) {
 }
 
 func TestHandler_History_UndecodableRecord(t *testing.T) {
-	objects := memstore.New()
+	objects := mem.New()
 	h, err := NewHandler(objects, Options{})
 	require.NoError(t, err)
 	tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"})

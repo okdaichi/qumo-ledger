@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **store:** `store.Open` opens a backend from a URI, so a deployment chooses
+  its storage in configuration. A backend registers its scheme with
+  `store.Register` when its package is imported; `store.Schemes` lists them, and
+  an unregistered scheme is `ErrUnknownScheme`. An empty URI opens the memory
+  store.
+  - `mem:` — `mem`.
+  - `file:///var/lib/ledger`, `file:ledger` — `fs` over that directory.
+  - `postgres://…`, `postgresql://…` — `db`.
+  - `s3://bucket/prefix?region=…&endpoint=…` — `bucket`.
+
+- **ledger/store/db:** A backend over one table of a PostgreSQL or CockroachDB
+  database, created when absent (`ledger_objects`, or the URI's `table`
+  parameter). An object is one row with an integer version; `Create` is an
+  insert that does nothing on conflict and `Swap` an update conditioned on the
+  version, so the database enforces both across processes. Objects are read and
+  written whole.
+
+- **ledger/store/bucket:** A backend over a bucket of Amazon S3 or an S3-compatible
+  service, under a key prefix. `Create` and `Swap` are conditional PUTs
+  (`If-None-Match: *`, `If-Match`) and the version is the ETag. Requests are
+  signed with Signature Version 4 from static credentials (`AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`); with an `endpoint` the bucket
+  is addressed path-style.
+
 - **ingest:** A new package that accepts records over HTTP, appends them to
   ledger tracks and reads them back, the inbound counterpart of `stream`. A
   `Handler` is an `http.Handler` over a store, mounted with `http.StripPrefix`.
@@ -84,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source can order them by identity.
 
 ### Changed
+
+- **ledger/store:** The backend packages are named for the storage they keep
+  objects in, beneath the `store` package whose interface they implement:
+  `memstore` is now `mem` and `fsstore` is now `fs`, joined by `db` and
+  `bucket`. Imports change from `ledger/store/memstore` and
+  `ledger/store/fsstore` to `ledger/store/mem` and `ledger/store/fs`.
 
 - **stream:** `Handler` answers internal failures with a generic 500 instead of
   echoing the error to the client, and records the detail — the error, the
