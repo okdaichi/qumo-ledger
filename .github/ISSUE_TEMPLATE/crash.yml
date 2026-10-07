@@ -42,7 +42,7 @@ body:
       placeholder: |
         - OS: Windows 11
         - Architecture: amd64
-        - Go: go1.26.1
+        - Go: go1.27.0
         - Backend: fsstore / memstore
 
   - type: textarea
