@@ -331,6 +331,32 @@ func TestFragmentDuration_MalformedSize(t *testing.T) {
 	assert.ErrorIs(t, err, fmp4.ErrNotFound)
 }
 
+// A trun whose flags declare header fields it is too short to hold has no room
+// for entries at all. The space left for them must not be computed as a negative
+// length, which would wrap and wave any sample_count through to be multiplied
+// into a duration.
+func TestFragmentDuration_TrunShorterThanItsHeader(t *testing.T) {
+	tests := map[string]struct {
+		trun []byte
+	}{
+		// data-offset + sample-size present: the header alone needs 12 bytes.
+		"missing data offset": {trun: box("trun", []byte{0, 0, 0x02, 0x01}, u32(0xFFFFFFFF))},
+		// data-offset + first-sample-flags + sample-size: the header needs 16.
+		"missing first sample flags": {trun: box("trun", []byte{0, 0, 0x02, 0x05}, u32(0xFFFFFFFF), u32(0))},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			tfhd := box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920))
+			fragment := box("moof", box("traf", tfhd, tt.trun))
+
+			duration, err := fmp4.FragmentDuration(fragment)
+			require.Error(t, err)
+			assert.Zero(t, duration)
+		})
+	}
+}
+
 // trakV1Tkhd is a trak whose tkhd is version 1: creation and modification times
 // widen to 64 bits, moving track_ID eight bytes further in. Encoders emit this
 // layout for timestamps that do not fit 32 bits.
@@ -357,14 +383,14 @@ func TestTimescaleForTrack_Version1Tkhd(t *testing.T) {
 	assert.Equal(t, uint32(57600), ts, "the v0 sibling still resolves")
 }
 
-// --- walkTrak coverage gaps -------------------------------------------------
+// --- Track identity edge cases ----------------------------------------------
 
 // A v1 tkhd whose track_ID does not match must be skipped so the walk continues
 // to the next trak. The negative match is as important as the positive one:
 // getting the offset wrong would read garbage as the ID and either falsely match
 // or skip a genuine match.
 func TestTimescaleForTrack_Version1Tkhd_NonMatch(t *testing.T) {
-	// Two v1-tkhd tracks; only track 2 exists.
+	// Two v1-tkhd tracks, IDs 1 and 2.
 	init := box("moov", trakV1Tkhd(1, 57600), trakV1Tkhd(2, 48000))
 
 	ts, err := fmp4.TimescaleForTrack(init, 2)
@@ -395,7 +421,7 @@ func TestTimescale_MdhdVersion2(t *testing.T) {
 }
 
 // A trak with an mdia but no tkhd has no identity. TimescaleForTrack must skip
-// it when a specific track_ID is requested rather than matching the zero value.
+// it rather than treat the missing ID as zero.
 func TestTimescaleForTrack_NoTkhd(t *testing.T) {
 	// A trak without a tkhd — only mdia with a known timescale.
 	init := box("moov",
@@ -406,7 +432,10 @@ func TestTimescaleForTrack_NoTkhd(t *testing.T) {
 	// Asking for track 1 must find the trak that HAS a tkhd.
 	ts, err := fmp4.TimescaleForTrack(init, 1)
 	require.NoError(t, err)
-	assert.Equal(t, uint32(48000), ts,
+	assert.Equal(t, uint32(48000), ts)
+
+	_, err = fmp4.TimescaleForTrack(init, 0)
+	assert.ErrorIs(t, err, fmp4.ErrNotFound,
 		"the trak without a tkhd must not match track_ID 0")
 }
 
@@ -417,6 +446,7 @@ func FuzzTimescale(f *testing.F) {
 	// from known-good inputs and mutates from there.
 	f.Add(initSegment(mdhdV0(57600)))
 	f.Add(initSegment(mdhdV1(90000)))
+	f.Add(box("moov", trak(1, 57600)))
 	f.Add(box("moov", trak(1, 57600), trak(2, 48000)))
 	f.Add(box("moov", trak(1, 57600), trakV1Tkhd(2, 48000)))
 	// Edge cases that must not panic.
@@ -426,9 +456,21 @@ func FuzzTimescale(f *testing.F) {
 	f.Add(box("moov", box("trak", box("mdia"))))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		// Fuzz target: must never panic on any input.
-		_, _ = fmp4.Timescale(data)            //nolint:errcheck
-		_, _ = fmp4.TimescaleForTrack(data, 1) //nolint:errcheck
+		// Neither call may panic, whatever the input.
+		single, singleErr := fmp4.Timescale(data)
+		one, oneErr := fmp4.TimescaleForTrack(data, 1)
+
+		if singleErr != nil && single != 0 {
+			t.Errorf("Timescale returned %d alongside error %v", single, singleErr)
+		}
+		if oneErr != nil && one != 0 {
+			t.Errorf("TimescaleForTrack returned %d alongside error %v", one, oneErr)
+		}
+		// Timescale answers only for an init with a single track, so when both
+		// succeed they are reading the same trak and must agree.
+		if singleErr == nil && oneErr == nil && single != one {
+			t.Errorf("Timescale = %d but TimescaleForTrack(1) = %d", single, one)
+		}
 	})
 }
 
@@ -446,13 +488,30 @@ func FuzzFragmentDuration(f *testing.F) {
 			box("trun", []byte{0, 0, 0x03, 0x01}, u32(2), u32(0), u32(100), u32(500), u32(200), u32(500)),
 		),
 	))
+	// With an mdat, which is what bounds a run that carries no entries.
+	f.Add(append(
+		box("moof", box("traf",
+			box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920)),
+			box("trun", []byte{0, 0, 0, 0x01}, u32(4), u32(0)),
+		)),
+		box("mdat", []byte("payload"))...,
+	))
+	// A trun shorter than the header its flags declare.
+	f.Add(box("moof", box("traf",
+		box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920)),
+		box("trun", []byte{0, 0, 0x02, 0x01}, u32(0xFFFFFFFF)),
+	)))
 	// Edge cases.
 	f.Add([]byte{})
 	f.Add(box("moof"))
 	f.Add(box("moof", box("traf")))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = fmp4.FragmentDuration(data) //nolint:errcheck
+		// Must not panic, and a failure must not also hand back a duration.
+		duration, err := fmp4.FragmentDuration(data)
+		if err != nil && duration != 0 {
+			t.Errorf("FragmentDuration returned %d alongside error %v", duration, err)
+		}
 	})
 }
 
@@ -460,16 +519,16 @@ func FuzzFragmentDuration(f *testing.F) {
 
 func BenchmarkTimescale(b *testing.B) {
 	init := initSegment(mdhdV0(90000))
-	b.ResetTimer()
-	for range b.N {
+	b.ReportAllocs()
+	for b.Loop() {
 		_, _ = fmp4.Timescale(init)
 	}
 }
 
 func BenchmarkTimescaleForTrack(b *testing.B) {
 	init := box("moov", trak(1, 57600), trakV1Tkhd(2, 48000))
-	b.ResetTimer()
-	for range b.N {
+	b.ReportAllocs()
+	for b.Loop() {
 		_, _ = fmp4.TimescaleForTrack(init, 2)
 	}
 }
@@ -478,8 +537,8 @@ func BenchmarkFragmentDuration(b *testing.B) {
 	tfhd := box("tfhd", []byte{0, 0, 0, 0x08}, u32(1), u32(1920))
 	trun := box("trun", []byte{0, 0, 0, 0x01}, u32(30), u32(0))
 	fragment := box("moof", box("traf", tfhd, trun))
-	b.ResetTimer()
-	for range b.N {
+	b.ReportAllocs()
+	for b.Loop() {
 		_, _ = fmp4.FragmentDuration(fragment)
 	}
 }
