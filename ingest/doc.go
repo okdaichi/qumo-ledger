@@ -68,4 +68,9 @@
 // A track has one writer at a time. A Handler serializes the records of each
 // track within its process; two processes recording into the same track are not
 // coordinated here.
+//
+// A Handler closes a track it has not written to for [Options.TrackIdleTimeout],
+// so a long-running one holds only the tracks in use. A closed track is opened
+// again from the store on its next request; its idempotency keys and limits
+// start afresh.
 package ingest

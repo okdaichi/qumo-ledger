@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Any number of senders record into one track. Records of one track are
     serialized within a handler, and two processes recording into the same
     track are not coordinated.
+  - A handler closes a track no request holds that it has not written to for
+    `Options.TrackIdleTimeout` (default 10 min), so a long-running one holds
+    only the tracks in use; the next request opens it again from the store,
+    and `OnOpen` returns before any record of it reaches `OnRecord`. A
+    negative timeout is an error.
   - `Options.Authorize(r, track, access)` is asked on every request, for a
     `Write` or a `Read`, and returns a write's sender; it refuses with `403`, or
     `401` for `ErrUnauthenticated`, with `Options.Challenge` as its
