@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store"
@@ -104,6 +105,10 @@ type Options struct {
 	// Forbidden, or 401 Unauthorized when it is [ErrUnauthenticated]. Nil
 	// allows every request.
 	Authorize func(r *http.Request, a Announcement) error
+
+	// Challenge is the WWW-Authenticate header sent with a 401, naming the
+	// scheme Authorize expects, such as "Bearer". Empty sends none.
+	Challenge string
 
 	// OnAnnounce is called after an announce request started a contribution.
 	OnAnnounce func(ctx context.Context, a Announced)
@@ -311,8 +316,10 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		badBody(w, err)
 		return
 	}
-	if !json.Valid(payload) {
-		http.Error(w, "the body must be one JSON value", http.StatusBadRequest)
+	// encoding/json accepts invalid UTF-8 inside strings; JSON text is UTF-8,
+	// and a record is forwarded as it is stored.
+	if !json.Valid(payload) || !utf8.Valid(payload) {
+		http.Error(w, "the body must be one JSON value in UTF-8", http.StatusBadRequest)
 		return
 	}
 	data, err := json.Marshal(Record{Name: c.Name, Payload: payload})
@@ -372,6 +379,9 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, a Announceme
 	case err == nil:
 		return true
 	case errors.Is(err, ErrUnauthenticated):
+		if h.opts.Challenge != "" {
+			w.Header().Set("WWW-Authenticate", h.opts.Challenge)
+		}
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	default:
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
