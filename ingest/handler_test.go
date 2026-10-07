@@ -50,8 +50,8 @@ func record(h http.Handler, payload string, header ...string) *httptest.Response
 	return send(h, http.MethodPost, chatURL, payload, header...)
 }
 
-// stored reads every payload committed to the chat track, in commit order.
-func stored(tb testing.TB, s store.Store) []string {
+// stored reads every record committed to the chat track, in commit order.
+func stored(tb testing.TB, s store.Store) []ingest.Record {
 	tb.Helper()
 	ctx := context.Background()
 	track, err := ledger.Open(ctx, s, chatTrack, ledger.Config{})
@@ -63,17 +63,31 @@ func stored(tb testing.TB, s store.Store) []string {
 	require.NoError(tb, err)
 	reader.SeekStart()
 
-	var payloads []string
+	var records []ingest.Record
 	for {
 		group, err := reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return payloads
+			return records
 		}
 		require.NoError(tb, err)
 		data, err := reader.ReadGroup(ctx, group.ObjectKey)
 		require.NoError(tb, err)
-		payloads = append(payloads, string(data))
+		var rec ingest.Record
+		require.NoError(tb, json.Unmarshal(data, &rec))
+		records = append(records, rec)
 	}
+}
+
+// payloads returns the payloads of records as strings.
+func payloads(records []ingest.Record) []string {
+	if records == nil {
+		return nil
+	}
+	out := make([]string, len(records))
+	for i, rec := range records {
+		out[i] = string(rec.Payload)
+	}
+	return out
 }
 
 func TestTrack_Path(t *testing.T) {
@@ -130,13 +144,15 @@ func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 		OnOpen: func(_ context.Context, tr ingest.Track) { opened = append(opened, tr) },
 	})
 
-	one := record(h, `{"user":"alice","text":"hello"}`)
+	one := record(h, `{"text":"hello"}`)
 	two := record(h, `"hi"`)
 
 	require.Equal(t, http.StatusCreated, one.Code)
 	require.Equal(t, http.StatusCreated, two.Code)
-	assert.Equal(t, []string{`{"user":"alice","text":"hello"}`, `"hi"`}, stored(t, s),
-		"the payload is stored as it was sent")
+	assert.Equal(t, []ingest.Record{
+		{Payload: json.RawMessage(`{"text":"hello"}`)},
+		{Payload: json.RawMessage(`"hi"`)},
+	}, stored(t, s), "the payload is stored as it was sent, with no sender when none was named")
 	assert.Equal(t, []ingest.Track{chat}, opened, "the first record creates and opens the track")
 
 	var response struct {
@@ -150,6 +166,31 @@ func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 	assert.NotZero(t, response.Wallclock)
 }
 
+func TestHandler_Record_CarriesTheSenderAuthorizeNames(t *testing.T) {
+	s := memstore.New()
+	var delivered []string
+	h := newHandler(t, s, ingest.Options{
+		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
+			return r.Header.Get("X-Sender"), nil
+		},
+		OnRecord: func(_ context.Context, _ ingest.Track, _ ledger.GroupInfo, rec []byte) {
+			delivered = append(delivered, string(rec))
+		},
+	})
+
+	require.Equal(t, http.StatusCreated, record(h, `{"user":"mallory","text":"hi"}`, "X-Sender", "user-42").Code)
+	require.Equal(t, http.StatusCreated, record(h, `{"type":"delete"}`).Code)
+
+	assert.Equal(t, []ingest.Record{
+		{Sender: "user-42", Payload: json.RawMessage(`{"user":"mallory","text":"hi"}`)},
+		{Payload: json.RawMessage(`{"type":"delete"}`)},
+	}, stored(t, s), "the sender comes from Authorize, whatever the payload claims")
+	assert.Equal(t, []string{
+		`{"sender":"user-42","payload":{"user":"mallory","text":"hi"}}`,
+		`{"payload":{"type":"delete"}}`,
+	}, delivered, "OnRecord gets the record as stored")
+}
+
 func TestHandler_Record_TracksAreSeparate(t *testing.T) {
 	s := memstore.New()
 	h := newHandler(t, s, ingest.Options{})
@@ -158,7 +199,7 @@ func TestHandler_Record_TracksAreSeparate(t *testing.T) {
 	require.Equal(t, http.StatusCreated, send(h, http.MethodPost, "tracks/room/123/reactions", `"like"`).Code)
 	require.Equal(t, http.StatusCreated, send(h, http.MethodPost, "tracks/room/9/chat", `"elsewhere"`).Code)
 
-	assert.Equal(t, []string{`"chat"`}, stored(t, s))
+	assert.Equal(t, []string{`"chat"`}, payloads(stored(t, s)))
 }
 
 func TestHandler_Record_IdempotencyKey(t *testing.T) {
@@ -179,7 +220,7 @@ func TestHandler_Record_IdempotencyKey(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rr.Code)
 	}
 	assert.JSONEq(t, original.Body.String(), retry.Body.String(), "a retry is answered as the first was")
-	assert.Equal(t, []string{`"hello"`, `"again"`, `"unkeyed"`, `"unkeyed"`}, stored(t, s),
+	assert.Equal(t, []string{`"hello"`, `"again"`, `"unkeyed"`, `"unkeyed"`}, payloads(stored(t, s)),
 		"records without a key are never merged")
 	assert.Equal(t, 5, delivered, "a retry is not delivered again; the other track's record is")
 }
@@ -216,13 +257,13 @@ func TestHandler_Record_ConcurrentSendersAllCommit(t *testing.T) {
 	}
 	wg.Wait()
 
-	payloads := stored(t, s)
-	require.Len(t, payloads, senders*each)
+	records := stored(t, s)
+	require.Len(t, records, senders*each)
 	// Each sender's own records keep the order it sent them in.
 	next := make(map[int]int)
-	for _, payload := range payloads {
+	for _, rec := range records {
 		var p struct{ C, I int }
-		require.NoError(t, json.Unmarshal([]byte(payload), &p))
+		require.NoError(t, json.Unmarshal(rec.Payload, &p))
 		assert.Equal(t, next[p.C], p.I)
 		next[p.C]++
 	}
@@ -230,14 +271,14 @@ func TestHandler_Record_ConcurrentSendersAllCommit(t *testing.T) {
 
 func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 	type delivery struct {
-		track   ingest.Track
-		group   ledger.GroupInfo
-		payload string
+		track  ingest.Track
+		group  ledger.GroupInfo
+		record string
 	}
 	var seen []delivery
 	h := newHandler(t, memstore.New(), ingest.Options{
-		OnRecord: func(_ context.Context, tr ingest.Track, g ledger.GroupInfo, payload []byte) {
-			seen = append(seen, delivery{track: tr, group: g, payload: string(payload)})
+		OnRecord: func(_ context.Context, tr ingest.Track, g ledger.GroupInfo, rec []byte) {
+			seen = append(seen, delivery{track: tr, group: g, record: string(rec)})
 		},
 	})
 
@@ -246,7 +287,7 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 
 	require.Len(t, seen, 2)
 	assert.Equal(t, chat, seen[0].track)
-	assert.Equal(t, `"one"`, seen[0].payload)
+	assert.Equal(t, `{"payload":"one"}`, seen[0].record)
 	assert.Equal(t, uint64(0), seen[0].group.ID.Sequence())
 	assert.Equal(t, uint64(1), seen[1].group.ID.Sequence())
 	assert.NotEmpty(t, seen[1].group.ObjectKey, "the hook sees the group as committed")
@@ -254,18 +295,22 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 
 func TestHandler_Authorize(t *testing.T) {
 	s := memstore.New()
-	var asked []ingest.Track
+	type ask struct {
+		track  ingest.Track
+		access ingest.Access
+	}
+	var asked []ask
 	allowed := true
 	h := newHandler(t, s, ingest.Options{
-		Authorize: func(r *http.Request, tr ingest.Track) error {
-			asked = append(asked, tr)
+		Authorize: func(r *http.Request, tr ingest.Track, access ingest.Access) (string, error) {
+			asked = append(asked, ask{track: tr, access: access})
 			switch {
 			case r.Header.Get("Authorization") == "":
-				return fmt.Errorf("no credential: %w", ingest.ErrUnauthenticated)
+				return "", fmt.Errorf("no credential: %w", ingest.ErrUnauthenticated)
 			case !allowed:
-				return errors.New("not allowed")
+				return "", errors.New("not allowed")
 			}
-			return nil
+			return "", nil
 		},
 		Challenge: "Bearer",
 	})
@@ -275,19 +320,23 @@ func TestHandler_Authorize(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 	assert.Equal(t, "Bearer", unauthenticated.Header().Get("WWW-Authenticate"), "a 401 names the scheme")
 	assert.Equal(t, http.StatusUnauthorized, send(h, http.MethodPut, chatURL, "").Code)
+	assert.Equal(t, http.StatusUnauthorized, send(h, http.MethodGet, chatURL, "").Code)
 
 	allowed = false
 	assert.Equal(t, http.StatusForbidden, record(h, `"refused"`, "Authorization", credential).Code)
 	assert.Equal(t, http.StatusForbidden, send(h, http.MethodPut, chatURL, "", "Authorization", credential).Code)
+	assert.Equal(t, http.StatusForbidden, send(h, http.MethodGet, chatURL, "", "Authorization", credential).Code)
 
 	allowed = true
 	assert.Equal(t, http.StatusCreated, record(h, `"signed"`, "Authorization", credential).Code)
+	assert.Equal(t, http.StatusOK, send(h, http.MethodGet, chatURL, "", "Authorization", credential).Code)
 
-	assert.Equal(t, []string{`"signed"`}, stored(t, s), "a refused request creates and stores nothing")
-	require.Len(t, asked, 5)
-	for _, tr := range asked {
-		assert.Equal(t, chat, tr)
-	}
+	assert.Equal(t, []string{`"signed"`}, payloads(stored(t, s)), "a refused request creates and stores nothing")
+	assert.Equal(t, []ask{
+		{chat, ingest.Write}, {chat, ingest.Write}, {chat, ingest.Read},
+		{chat, ingest.Write}, {chat, ingest.Write}, {chat, ingest.Read},
+		{chat, ingest.Write}, {chat, ingest.Read},
+	}, asked, "records and creates are writes, history is a read")
 }
 
 func TestHandler_RejectsUnusableRequests(t *testing.T) {
@@ -299,7 +348,7 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		want   int
 	}{
 		"unknown endpoint":         {method: http.MethodPost, path: "playlist.m3u8", body: `"x"`, want: http.StatusNotFound},
-		"not PUT or POST":          {method: http.MethodGet, path: chatURL, want: http.StatusMethodNotAllowed},
+		"not PUT, POST or GET":     {method: http.MethodDelete, path: chatURL, want: http.StatusMethodNotAllowed},
 		"no track":                 {method: http.MethodPost, path: "tracks/", body: `"x"`, want: http.StatusBadRequest},
 		"no broadcast path":        {method: http.MethodPost, path: "tracks/chat", body: `"x"`, want: http.StatusBadRequest},
 		"a trailing slash":         {method: http.MethodPost, path: "tracks/room/123/chat/", body: `"x"`, want: http.StatusBadRequest},
@@ -309,6 +358,7 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		"body not UTF-8":           {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
 		"body over the limit":      {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
 		"idempotency key too long": {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
+		"history of no track":      {method: http.MethodGet, path: chatURL, want: http.StatusNotFound},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
