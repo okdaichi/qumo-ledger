@@ -317,6 +317,7 @@ func TestHandler_Authorize(t *testing.T) {
 			}
 			return nil
 		},
+		Challenge: "Bearer",
 	})
 	signed := func(method, path, body string) int {
 		rr := httptest.NewRecorder()
@@ -326,7 +327,9 @@ func TestHandler_Authorize(t *testing.T) {
 		return rr.Code
 	}
 
-	assert.Equal(t, http.StatusUnauthorized, send(h, http.MethodPost, "announce", announcement("alice")+"}").Code)
+	unauthenticated := send(h, http.MethodPost, "announce", announcement("alice")+"}")
+	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
+	assert.Equal(t, "Bearer", unauthenticated.Header().Get("WWW-Authenticate"), "a 401 names the scheme")
 	assert.Equal(t, http.StatusForbidden, signed(http.MethodPost, "announce", announcement("mallory")+"}"))
 
 	rr := httptest.NewRecorder()
@@ -370,6 +373,7 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		"name has a slash":             {method: http.MethodPost, path: "announce", body: announcement("bob/carol") + "}", want: http.StatusBadRequest},
 		"name is a dot segment":        {method: http.MethodPost, path: "announce", body: announcement("..") + "}", want: http.StatusBadRequest},
 		"record with no body":          {method: http.MethodPost, path: "contributions/{id}/records", want: http.StatusBadRequest},
+		"record body not UTF-8":        {method: http.MethodPost, path: "contributions/{id}/records", body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
 		"record body not JSON":         {method: http.MethodPost, path: "contributions/{id}/records", body: "hello", want: http.StatusBadRequest},
 		"announce over the limit":      {method: http.MethodPost, path: "announce", body: announcement(strings.Repeat("b", 200)) + "}", want: http.StatusRequestEntityTooLarge},
 		"end not a DELETE":             {method: http.MethodPost, path: "contributions/{id}", want: http.StatusMethodNotAllowed},

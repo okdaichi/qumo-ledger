@@ -43,8 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `{"broadcast_path": "/room/123", "track_name": "chat", "name": "alice"}`
     creates the track when it does not exist and starts a contribution:
     `201 Created`, `Location: contributions/{id}`.
-  - `POST /contributions/{id}/records` appends the body, any JSON value, as one
-    group and answers `201` once it is committed. Requests are routed by the
+  - `POST /contributions/{id}/records` appends the body, any JSON value in
+    UTF-8, as one group and answers `201` once it is committed. Requests are routed by the
     URL, so a contribution is resolved and authorized before the body is read.
   - `DELETE /contributions/{id}` ends a contribution, as do a new announce under
     the same name in the same track and `Options.IdleTimeout` (default 5 min)
@@ -56,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     coordinated.
   - `Options.Authorize` is asked with the announcement for the announce and
     for every request to the contribution; it refuses with `403`, or `401` for
-    `ErrUnauthenticated`. `Options.OnAnnounce` and `Options.OnRecord` observe
+    `ErrUnauthenticated`, with `Options.Challenge` as its `WWW-Authenticate`
+    header. `Options.OnAnnounce` and `Options.OnRecord` observe
     what was committed (`Recorded.Data` is the committed bytes), which is where
     a caller forwards a record to live subscribers.
   - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
