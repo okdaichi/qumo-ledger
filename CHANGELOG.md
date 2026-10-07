@@ -47,15 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the handler starts writing to, and
     `Options.OnRecord(ctx, track, group, record)` what was committed, which is
     where a caller forwards a record to live subscribers.
+  - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
+    `json`. A record has no media time, so each group is anchored by the wall
+    clock at commit; read a window back with `Reader.RangeWallclock`. The
+    `stream` renderers need a duration per group and do not serve these tracks.
 
 - **ledger:** `Reader.Before(ctx, id, n)` returns up to n groups committed
   before id, oldest first, or the newest n for the zero id: the way to page
   backwards through a track. It reads backwards from each epoch's newest delta
   and skips sealed runs that start at or after id.
-  - Tracks are created with `TimeSourceIngest`, timescale 1000 and encoding
-    `json`. A record has no media time, so each group is anchored by the wall
-    clock at commit; read a window back with `Reader.RangeWallclock`. The
-    `stream` renderers need a duration per group and do not serve these tracks.
 
 - **stream:** HLS and DASH renderers over a ledger track — derived views, not a
   storage format. A Group is one segment; `Duration` is HLS `EXTINF` and DASH
