@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
@@ -21,6 +22,10 @@ import (
 // DefaultMaxBodyBytes is the largest request body a [Handler] reads when
 // [Options.MaxBodyBytes] is zero.
 const DefaultMaxBodyBytes = 64 << 10
+
+// DefaultTrackIdleTimeout is how long a [Handler] keeps a track it has not
+// written to when [Options.TrackIdleTimeout] is zero.
+const DefaultTrackIdleTimeout = 10 * time.Minute
 
 // Encoding and MIME of the tracks a [Handler] creates: every group is one JSON
 // [Record].
@@ -120,9 +125,15 @@ type Options struct {
 	SenderLimit Limit
 	TrackLimit  Limit
 
-	// OnOpen is called once per track, when the handler first opens it for
-	// writing, before any of its records reach OnRecord.
+	// OnOpen is called when the handler opens a track for writing, before any
+	// of its records reach OnRecord: on first use, and again on the next use
+	// after the handler closed it for idleness.
 	OnOpen func(ctx context.Context, t Track)
+
+	// TrackIdleTimeout closes a track the handler has not written to for this
+	// long, releasing its writer, idempotency keys and limits. Zero means
+	// [DefaultTrackIdleTimeout].
+	TrackIdleTimeout time.Duration
 
 	// OnRecord is called after record, the JSON encoding of a [Record], was
 	// committed to t as group g, before the request is answered. Records of
@@ -158,16 +169,25 @@ type Handler struct {
 	opts  Options
 
 	maxBody int64
+	idle    time.Duration
 	logger  *slog.Logger
 	mux     *http.ServeMux
 
 	mu     sync.Mutex
 	tracks map[ledger.TrackPath]*track
+	// nextSweep is when open next looks for idle tracks to close.
+	nextSweep time.Time
 }
 
 // track is one track the handler writes to.
 type track struct {
 	Track
+
+	// users counts the requests holding the track, and lastUsed is when the
+	// last one let go. A track is closed only when no request holds it.
+	// Guarded by Handler.mu.
+	users    int
+	lastUsed time.Time
 
 	// mu serializes the track's records and guards the fields below.
 	mu     sync.Mutex
@@ -189,12 +209,16 @@ func NewHandler(s store.Store, opts Options) (*Handler, error) {
 		store:   s,
 		opts:    opts,
 		maxBody: opts.MaxBodyBytes,
+		idle:    opts.TrackIdleTimeout,
 		logger:  opts.Logger,
 		mux:     http.NewServeMux(),
 		tracks:  make(map[ledger.TrackPath]*track),
 	}
 	if h.maxBody == 0 {
 		h.maxBody = DefaultMaxBodyBytes
+	}
+	if h.idle == 0 {
+		h.idle = DefaultTrackIdleTimeout
 	}
 	if h.logger == nil {
 		h.logger = slog.New(slog.DiscardHandler)
@@ -217,11 +241,12 @@ func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, created, err := h.open(r.Context(), t)
+	tr, created, err := h.open(r.Context(), t)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
 	}
+	h.release(tr)
 	if created {
 		w.WriteHeader(http.StatusCreated)
 		return
@@ -271,6 +296,7 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "open track", err)
 		return
 	}
+	defer h.release(tr)
 
 	// A key is its sender's: two senders that happen to choose the same key
 	// do not answer each other's records.
@@ -440,13 +466,17 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request, access Access)
 }
 
 // open returns the track's writer, creating the track when it does not exist
-// and reporting whether it did. Opening reads the store, so it runs without
-// h.mu; when two requests open the same track at once, the first to finish is
-// kept.
+// and reporting whether it did. The caller holds the track until it calls
+// release. Opening reads the store, so it runs without h.mu; when two requests
+// open the same track at once, the first to finish is kept.
 func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
 	key := t.Path()
 	h.mu.Lock()
+	h.closeIdle(time.Now())
 	tr, ok := h.tracks[key]
+	if ok {
+		tr.users++
+	}
 	h.mu.Unlock()
 	if ok {
 		return tr, false, nil
@@ -476,16 +506,40 @@ func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
 
 	h.mu.Lock()
 	if tr, ok := h.tracks[key]; ok {
+		tr.users++
 		h.mu.Unlock()
 		return tr, false, nil
 	}
-	tr = &track{Track: t, writer: writer}
+	tr = &track{Track: t, writer: writer, users: 1}
 	h.tracks[key] = tr
 	h.mu.Unlock()
 	if h.opts.OnOpen != nil {
 		h.opts.OnOpen(ctx, t)
 	}
 	return tr, created, nil
+}
+
+// release lets go of a track open returned.
+func (h *Handler) release(tr *track) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	tr.users--
+	tr.lastUsed = time.Now()
+}
+
+// closeIdle forgets the tracks no request holds that have gone unused for the
+// idle timeout, at most every half timeout. A closed track is opened afresh
+// from the store on its next use. h.mu is held.
+func (h *Handler) closeIdle(now time.Time) {
+	if now.Before(h.nextSweep) {
+		return
+	}
+	h.nextSweep = now.Add(h.idle / 2)
+	for key, tr := range h.tracks {
+		if tr.users == 0 && now.Sub(tr.lastUsed) >= h.idle {
+			delete(h.tracks, key)
+		}
+	}
 }
 
 // badBody answers a request whose body could not be read.
