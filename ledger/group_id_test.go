@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,6 +28,11 @@ func TestParseGroupID(t *testing.T) {
 		// One past the 40 sequence bits would spill into the epoch.
 		"sequence overflow": {input: "e1-g1099511627776", wantErr: true},
 		"trailing garbage":  {input: "e1-g42.m4s", wantErr: true},
+		"max epoch":         {input: "e16777215-g1", expected: NewGroupID(maxGroupEpoch, 1), wantErr: false},
+		// One past the 24 epoch bits would be shifted out, leaving epoch 0.
+		"epoch overflow":          {input: "e16777216-g1", wantErr: true},
+		"epoch beyond 64 bits":    {input: "e18446744073709551616-g1", wantErr: true},
+		"both parts at their max": {input: "e16777215-g1099511627775", expected: GroupID(math.MaxUint64), wantErr: false},
 	}
 
 	for name, tt := range tests {
@@ -38,6 +44,31 @@ func TestParseGroupID(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, id)
+		})
+	}
+}
+
+// The two parts share one number, so a part too wide for its field must not
+// change the other: a sequence that reached the epoch bits would move the group
+// to a different lifetime and so to a different place in the track's order.
+func TestNewGroupID(t *testing.T) {
+	tests := map[string]struct {
+		epoch, sequence    uint64
+		wantEpoch, wantSeq uint64
+	}{
+		"zero":                  {epoch: 0, sequence: 0, wantEpoch: 0, wantSeq: 0},
+		"typical":               {epoch: 3, sequence: 42, wantEpoch: 3, wantSeq: 42},
+		"max of both":           {epoch: maxGroupEpoch, sequence: groupSeqMask, wantEpoch: maxGroupEpoch, wantSeq: groupSeqMask},
+		"sequence one too wide": {epoch: 1, sequence: groupSeqMask + 1, wantEpoch: 1, wantSeq: 0},
+		"sequence all ones":     {epoch: 1, sequence: math.MaxUint64, wantEpoch: 1, wantSeq: groupSeqMask},
+		"epoch one too wide":    {epoch: maxGroupEpoch + 1, sequence: 7, wantEpoch: 0, wantSeq: 7},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			id := NewGroupID(tt.epoch, tt.sequence)
+			assert.Equal(t, tt.wantEpoch, id.Epoch())
+			assert.Equal(t, tt.wantSeq, id.Sequence())
 		})
 	}
 }

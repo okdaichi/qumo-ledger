@@ -253,6 +253,54 @@ func TestNewHandler_InitRequired(t *testing.T) {
 	}
 }
 
+func TestNewHandler_NilTrack(t *testing.T) {
+	handler, err := stream.NewHandler(nil, stream.Options{})
+
+	assert.Error(t, err)
+	assert.Nil(t, handler)
+}
+
+// A container that carries its codec configuration in every segment has no
+// init segment, so neither manifest may point a player at one, and segments are
+// addressed by the extension the encoding implies.
+func TestHandler_ContainerWithoutInit(t *testing.T) {
+	fix := newTrackFixtureEncoding(t, "ts")
+	handler, err := stream.NewHandler(fix.track, stream.Options{})
+	require.NoError(t, err)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	get := func(tb testing.TB, path string) (int, string) {
+		tb.Helper()
+		resp, err := http.Get(ts.URL + path)
+		require.NoError(tb, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(tb, err)
+		return resp.StatusCode, string(body)
+	}
+	segment := fix.metas[0].ID.String() + ".ts"
+
+	status, playlist := get(t, "/playlist.m3u8")
+	require.Equal(t, http.StatusOK, status)
+	assert.NotContains(t, playlist, "#EXT-X-MAP")
+	assert.Contains(t, playlist, segment)
+
+	status, manifest := get(t, "/manifest.mpd")
+	require.Equal(t, http.StatusOK, status)
+	assert.NotContains(t, manifest, "<Initialization")
+	assert.Contains(t, manifest, segment)
+
+	status, body := get(t, "/"+segment)
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, string(fix.payload[0]), body)
+
+	// With nothing to serve as an init segment, its name is just another name
+	// that is not a group id.
+	status, _ = get(t, "/init.ts")
+	assert.Equal(t, http.StatusNotFound, status)
+}
+
 // A window caps the playlist at the newest segments and turns it into a sliding
 // live playlist: EVENT forbids removing segments, and EXT-X-MEDIA-SEQUENCE must
 // count the ones that rolled off.

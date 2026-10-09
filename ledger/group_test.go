@@ -181,3 +181,62 @@ func TestGroupInfo_validate(t *testing.T) {
 		})
 	}
 }
+
+func TestMediaToNanos(t *testing.T) {
+	tests := map[string]struct {
+		units     int64
+		timescale uint32
+		expected  int64
+		ok        bool
+	}{
+		"whole seconds":     {units: 180000, timescale: 90000, expected: 2 * nanosPerSecond, ok: true},
+		"fraction":          {units: 45000, timescale: 90000, expected: nanosPerSecond / 2, ok: true},
+		"zero":              {units: 0, timescale: 90000, expected: 0, ok: true},
+		"zero timescale":    {units: 1, timescale: 0, ok: false},
+		"negative":          {units: -1, timescale: 90000, ok: false},
+		"largest that fits": {units: math.MaxInt64 / nanosPerSecond, timescale: 1, expected: math.MaxInt64 / nanosPerSecond * nanosPerSecond, ok: true},
+		// With a timescale of 1 every unit is a second, so the seconds alone
+		// exceed what nanoseconds can count.
+		"seconds overflow": {units: math.MaxInt64/nanosPerSecond + 1, timescale: 1, ok: false},
+		// The whole seconds fit, and so does the fraction, but not their sum:
+		// 9223372036 s leaves room for 854775807 ns and this adds 900000000.
+		"sum overflows": {units: 9223372036*10 + 9, timescale: 10, ok: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			nanos, ok := mediaToNanos(tt.units, tt.timescale)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.expected, nanos)
+		})
+	}
+}
+
+// A group that states where it starts on the wall clock but not how long it
+// runs is a point on that timeline: it is inside an interval exactly when its
+// anchor is, and the half-open end applies to it like any other.
+func TestGroupInfo_overlapsWallclock_NoDuration(t *testing.T) {
+	const at = 1_000
+	point := GroupInfo{ID: NewGroupID(1, 0), Wallclock: at}
+
+	tests := map[string]struct {
+		from, to int64
+		expected bool
+	}{
+		"interval around it":    {from: at - 1, to: at + 1, expected: true},
+		"interval starts on it": {from: at, to: at + 1, expected: true},
+		"interval ends on it":   {from: at - 1, to: at, expected: false},
+		"interval before it":    {from: at - 10, to: at - 1, expected: false},
+		"interval after it":     {from: at + 1, to: at + 10, expected: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, point.overlapsWallclock(tt.from, tt.to, 90000))
+		})
+	}
+
+	unanchored := GroupInfo{ID: NewGroupID(1, 0), Duration: 180000}
+	assert.False(t, unanchored.overlapsWallclock(0, math.MaxInt64, 90000),
+		"a group with no wallclock anchor is nowhere on the shared timeline")
+}

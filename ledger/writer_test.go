@@ -319,6 +319,29 @@ func TestWriter_NewEpoch_OrderingResets(t *testing.T) {
 
 // NewEpoch persists a new epoch that survives a reopen, and a reused sequence
 // under it lands in a fresh keyspace.
+// A GroupID holds 24 bits of epoch. One more lifetime than that cannot be
+// stamped onto a group without wrapping to an earlier epoch, so it is refused
+// and the writer stays where it was.
+func TestWriter_NewEpoch_Exhausted(t *testing.T) {
+	objects := mem.New()
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
+	require.NoError(t, err)
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+
+	// Reaching the last epoch for real would take sixteen million restarts.
+	w.epoch = maxGroupEpoch
+
+	err = w.NewEpoch(t.Context())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "exceeds 24 bits")
+	assert.Equal(t, maxGroupEpoch, w.Epoch(), "a refused epoch must not advance the writer")
+
+	reopened, err := Open(t.Context(), objects, testTrack, Config{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), reopened.LatestEpoch(), "nothing of the refused epoch reaches the store")
+}
+
 func TestWriter_NewEpoch(t *testing.T) {
 	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})

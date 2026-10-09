@@ -385,6 +385,11 @@ func (w *Writer) NewEpoch(ctx context.Context) error {
 	defer w.mu.Unlock()
 
 	next := w.epoch + 1
+	// A GroupID has no room for a larger epoch: stamped onto a group it would
+	// wrap to an earlier one and break the track's ordering.
+	if next > maxGroupEpoch {
+		return fmt.Errorf("ledger: begin epoch %d of %s: epoch exceeds %d bits", next, w.path, groupEpochBits)
+	}
 	if err := w.track.createEpochLog(ctx, next); err != nil {
 		return fmt.Errorf("ledger: begin epoch %d of %s: %w", next, w.path, err)
 	}

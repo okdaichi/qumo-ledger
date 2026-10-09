@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ledger:** A `GroupID` no longer loses the bits that do not fit it.
+  - `ParseGroupID` rejects an epoch wider than the 24 bits an ID holds. It
+    returned the ID of an earlier epoch instead, so `e16777216-g1` parsed as
+    `e000000-g00000001`.
+  - `NewGroupID` keeps a sequence wider than 40 bits out of the epoch, which it
+    used to change.
+  - `Writer.NewEpoch` refuses to begin an epoch past the last one an ID can
+    name.
+- **ledger:** `Reader.SeekMedia` and `Reader.SeekWallclock` return the store's
+  error when a delta or sealed manifest cannot be read. They reported
+  `ErrGroupNotFound`, so an outage read as the target not existing.
+
 ## [0.2.1] - 2026-10-08
 
 ### Fixed

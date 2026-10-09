@@ -144,3 +144,26 @@ func TestReader_Before_ReadsOnlyTheNewestDeltas(t *testing.T) {
 	assert.LessOrEqual(t, len(after)-len(before), 3+3,
 		"a page of the newest three reads the log root, the head, one probe and three deltas")
 }
+
+// A page that starts inside an older epoch never looks at the newer ones, and
+// an epoch with nothing committed yet is passed over rather than read as the
+// end of the track.
+func TestReader_Before_FromAnOlderEpochAndPastAnEmptyOne(t *testing.T) {
+	w, objects := newTestWriter(t)
+	for seq := range uint64(3) {
+		_, err := w.AppendGroup(t.Context(), testGroup(t, seq), []byte("first lifetime"))
+		require.NoError(t, err)
+	}
+	// A second lifetime that has begun but committed nothing.
+	require.NoError(t, w.NewEpoch(t.Context()))
+	r := openReader(t, objects)
+
+	newest, err := r.Before(t.Context(), 0, 2)
+	require.NoError(t, err)
+	inside, err := r.Before(t.Context(), NewGroupID(1, 2), 5)
+	require.NoError(t, err)
+
+	assert.Equal(t, []GroupID{NewGroupID(1, 1), NewGroupID(1, 2)}, ids(newest),
+		"the empty newest epoch contributes nothing and does not stop the page")
+	assert.Equal(t, []GroupID{NewGroupID(1, 0), NewGroupID(1, 1)}, ids(inside))
+}
