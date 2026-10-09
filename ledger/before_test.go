@@ -112,11 +112,11 @@ func TestReader_Before_SealDuringTheRead(t *testing.T) {
 func TestReader_Before_HeadLaggingTheTip(t *testing.T) {
 	// A head update that fails is dropped, leaving the head behind the
 	// committed tip.
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
-	objects.SwapErr = map[string]error{headKey(testTrack, 1): errors.New("head is down")}
+	objects.swapErr = map[string]error{headKey(testTrack, 1): errors.New("head is down")}
 	_, err = w.AppendGroup(t.Context(), testGroup(t, 1), []byte("payload"))
 	require.NoError(t, err)
 
@@ -128,19 +128,19 @@ func TestReader_Before_HeadLaggingTheTip(t *testing.T) {
 }
 
 func TestReader_Before_ReadsOnlyTheNewestDeltas(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	for seq := range uint64(20) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, seq), []byte("payload"))
 		require.NoError(t, err)
 	}
 	r := openReader(t, objects)
-	before, _, _, _ := objects.Calls()
+	before, _, _, _ := objects.calls()
 
 	_, err := r.Before(t.Context(), 0, 3)
 	require.NoError(t, err)
 
-	after, _, _, _ := objects.Calls()
+	after, _, _, _ := objects.calls()
 	assert.LessOrEqual(t, len(after)-len(before), 3+3,
 		"a page of the newest three reads the log root, the head, one probe and three deltas")
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 )
 
-// FakeStore is an object store that behaves like a real one until told
+// fakeStore is an object store that behaves like a real one until told
 // otherwise. It delegates to an in-memory store so that tests exercising a
 // failure on one key still get correct behaviour on every other key, which is
 // what makes it possible to assert that a failed head update leaves a committed
@@ -17,32 +17,32 @@ import (
 //
 // It is safe for concurrent use, because [store.Store] requires that of every
 // implementation and a follower calls it from its own goroutine. Read the
-// recorded calls through [FakeStore.Calls] or [FakeStore.GetCount] rather than
+// recorded calls through [fakeStore.calls] or [fakeStore.getCount] rather than
 // touching the slices directly, which would race a running follower.
 //
 // The zero value is usable.
-type FakeStore struct {
-	// Inner serves every operation that is not failed. It is created on first
+type fakeStore struct {
+	// backend serves every operation that is not failed. It is created on first
 	// use when nil.
-	Inner store.Store
+	backend store.Store
 
-	// CreateErr, SwapErr and GetErr fail the matching operation for a key,
+	// createErr, swapErr and getErr fail the matching operation for a key,
 	// every time it is called. Set them before the store is shared.
-	CreateErr map[string]error
-	SwapErr   map[string]error
-	GetErr    map[string]error
+	createErr map[string]error
+	swapErr   map[string]error
+	getErr    map[string]error
 
-	// SwapErrOnce fails the first Swap of a key and is then consumed, which is
+	// swapErrOnce fails the first Swap of a key and is then consumed, which is
 	// how a transient failure followed by a retry is modelled.
-	SwapErrOnce map[string]error
+	swapErrOnce map[string]error
 
-	// CreateErrOnce fails the first Create of a key and is then consumed.
-	// CreatedErrOnce stores the first Create of a key and then fails it, which
+	// createErrOnce fails the first Create of a key and is then consumed.
+	// createdErrOnce stores the first Create of a key and then fails it, which
 	// is how a write the store took but whose answer was lost is modelled.
-	// GetErrOnce fails the first Get of a key and is then consumed.
-	CreateErrOnce  map[string]error
-	CreatedErrOnce map[string]error
-	GetErrOnce     map[string]error
+	// getErrOnce fails the first Get of a key and is then consumed.
+	createErrOnce  map[string]error
+	createdErrOnce map[string]error
+	getErrOnce     map[string]error
 
 	mu sync.Mutex
 	// gets, creates, swaps and deletes record the keys each operation was
@@ -54,18 +54,18 @@ type FakeStore struct {
 	deletes []string
 }
 
-var _ store.Store = (*FakeStore)(nil)
+var _ store.Store = (*fakeStore)(nil)
 
-// Calls returns a copy of the keys recorded for each operation.
-func (s *FakeStore) Calls() (gets, creates, swaps, deletes []string) {
+// calls returns a copy of the keys recorded for each operation.
+func (s *fakeStore) calls() (gets, creates, swaps, deletes []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return slices.Clone(s.gets), slices.Clone(s.creates), slices.Clone(s.swaps), slices.Clone(s.deletes)
 }
 
-// GetCount reports how many recorded reads satisfy match.
-func (s *FakeStore) GetCount(match func(key string) bool) int {
+// getCount reports how many recorded reads satisfy match.
+func (s *fakeStore) getCount(match func(key string) bool) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -79,41 +79,41 @@ func (s *FakeStore) GetCount(match func(key string) bool) int {
 	return n
 }
 
-// ResetCalls discards the recorded calls, so a test can measure one phase of a
+// resetCalls discards the recorded calls, so a test can measure one phase of a
 // scenario without counting its setup.
-func (s *FakeStore) ResetCalls() {
+func (s *fakeStore) resetCalls() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.gets, s.creates, s.swaps, s.deletes = nil, nil, nil, nil
 }
 
-func (s *FakeStore) inner() store.Store {
+func (s *fakeStore) inner() store.Store {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.Inner == nil {
-		s.Inner = mem.New()
+	if s.backend == nil {
+		s.backend = mem.New()
 	}
 
-	return s.Inner
+	return s.backend
 }
 
-func (s *FakeStore) record(dst *[]string, key string) {
+func (s *fakeStore) record(dst *[]string, key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	*dst = append(*dst, key)
 }
 
-func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+func (s *fakeStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	s.record(&s.gets, key)
-	if err := s.GetErr[key]; err != nil {
+	if err := s.getErr[key]; err != nil {
 		return nil, store.NoVersion, err
 	}
 	s.mu.Lock()
-	once := s.GetErrOnce[key]
-	delete(s.GetErrOnce, key)
+	once := s.getErrOnce[key]
+	delete(s.getErrOnce, key)
 	s.mu.Unlock()
 	if once != nil {
 		return nil, store.NoVersion, once
@@ -122,16 +122,16 @@ func (s *FakeStore) Get(ctx context.Context, key string) ([]byte, store.Version,
 	return s.inner().Get(ctx, key)
 }
 
-func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
+func (s *fakeStore) Create(ctx context.Context, key string, data []byte) (store.Version, error) {
 	s.record(&s.creates, key)
-	if err := s.CreateErr[key]; err != nil {
+	if err := s.createErr[key]; err != nil {
 		return store.NoVersion, err
 	}
 
 	s.mu.Lock()
-	failed, created := s.CreateErrOnce[key], s.CreatedErrOnce[key]
-	delete(s.CreateErrOnce, key)
-	delete(s.CreatedErrOnce, key)
+	failed, created := s.createErrOnce[key], s.createdErrOnce[key]
+	delete(s.createErrOnce, key)
+	delete(s.createdErrOnce, key)
 	s.mu.Unlock()
 	if failed != nil {
 		return store.NoVersion, failed
@@ -143,16 +143,16 @@ func (s *FakeStore) Create(ctx context.Context, key string, data []byte) (store.
 	return version, err
 }
 
-func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
+func (s *fakeStore) Swap(ctx context.Context, key string, data []byte, expect store.Version) (store.Version, error) {
 	s.record(&s.swaps, key)
-	if err := s.SwapErr[key]; err != nil {
+	if err := s.swapErr[key]; err != nil {
 		return store.NoVersion, err
 	}
 
 	s.mu.Lock()
-	once := s.SwapErrOnce[key]
+	once := s.swapErrOnce[key]
 	if once != nil {
-		delete(s.SwapErrOnce, key)
+		delete(s.swapErrOnce, key)
 	}
 	s.mu.Unlock()
 
@@ -163,7 +163,7 @@ func (s *FakeStore) Swap(ctx context.Context, key string, data []byte, expect st
 	return s.inner().Swap(ctx, key, data, expect)
 }
 
-func (s *FakeStore) Delete(ctx context.Context, key string) error {
+func (s *fakeStore) Delete(ctx context.Context, key string) error {
 	s.record(&s.deletes, key)
 
 	return s.inner().Delete(ctx, key)

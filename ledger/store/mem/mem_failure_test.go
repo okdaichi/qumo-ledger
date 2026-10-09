@@ -10,54 +10,75 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The memory store never blocks, but it honors cancellation all the same so
-// that code tested against it meets the behavior of the backends that do.
-func TestStore_CanceledContext(t *testing.T) {
-	tests := map[string]struct {
-		op func(context.Context, *mem.Store) error
-	}{
-		"Get": {op: func(ctx context.Context, s *mem.Store) error {
-			_, _, err := s.Get(ctx, "kept")
-			return err
-		}},
-		"Create": {op: func(ctx context.Context, s *mem.Store) error {
-			_, err := s.Create(ctx, "new", []byte("x"))
-			return err
-		}},
-		"Swap": {op: func(ctx context.Context, s *mem.Store) error {
-			_, err := s.Swap(ctx, "new", []byte("x"), store.NoVersion)
-			return err
-		}},
-		"Delete": {op: func(ctx context.Context, s *mem.Store) error {
-			return s.Delete(ctx, "kept")
-		}},
-		"List": {op: func(ctx context.Context, s *mem.Store) error {
-			for _, err := range s.List(ctx, "") {
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		}},
+// canceledStore is a store holding one object, "kept", and a context that is
+// already canceled. The memory store never blocks, but it honors cancellation
+// all the same so that code tested against it meets the behavior of the
+// backends that do.
+func canceledStore(tb testing.TB) (context.Context, *mem.Store) {
+	tb.Helper()
+
+	objects := mem.New()
+	_, err := objects.Create(tb.Context(), "kept", []byte("payload"))
+	require.NoError(tb, err)
+
+	ctx, cancel := context.WithCancel(tb.Context())
+	cancel()
+
+	return ctx, objects
+}
+
+// assertUntouched checks the store is as canceledStore left it.
+func assertUntouched(tb testing.TB, objects *mem.Store) {
+	tb.Helper()
+
+	data, _, err := objects.Get(tb.Context(), "kept")
+	require.NoError(tb, err)
+	assert.Equal(tb, []byte("payload"), data)
+	assert.Equal(tb, 1, objects.Len(), "a canceled call neither adds nor removes an object")
+}
+
+func TestStore_Get_CanceledContext(t *testing.T) {
+	ctx, objects := canceledStore(t)
+
+	_, _, err := objects.Get(ctx, "kept")
+
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestStore_Create_CanceledContext(t *testing.T) {
+	ctx, objects := canceledStore(t)
+
+	_, err := objects.Create(ctx, "new", []byte("x"))
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assertUntouched(t, objects)
+}
+
+func TestStore_Swap_CanceledContext(t *testing.T) {
+	ctx, objects := canceledStore(t)
+
+	_, err := objects.Swap(ctx, "new", []byte("x"), store.NoVersion)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assertUntouched(t, objects)
+}
+
+func TestStore_Delete_CanceledContext(t *testing.T) {
+	ctx, objects := canceledStore(t)
+
+	assert.ErrorIs(t, objects.Delete(ctx, "kept"), context.Canceled)
+	assertUntouched(t, objects)
+}
+
+func TestStore_List_CanceledContext(t *testing.T) {
+	ctx, objects := canceledStore(t)
+
+	var listErr error
+	for _, err := range objects.List(ctx, "") {
+		listErr = err
 	}
 
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			objects := mem.New()
-			_, err := objects.Create(t.Context(), "kept", []byte("payload"))
-			require.NoError(t, err)
-
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-
-			assert.ErrorIs(t, tt.op(ctx, objects), context.Canceled)
-
-			data, _, err := objects.Get(t.Context(), "kept")
-			require.NoError(t, err)
-			assert.Equal(t, []byte("payload"), data)
-			assert.Equal(t, 1, objects.Len(), "a canceled call neither adds nor removes an object")
-		})
-	}
+	assert.ErrorIs(t, listErr, context.Canceled)
 }
 
 func TestStore_List_StopsWhenToldTo(t *testing.T) {

@@ -18,25 +18,25 @@ func TestWriter_Append_AfterAFailedWrite(t *testing.T) {
 	group0 := groupKey(testTrack, NewGroupID(1, 0))
 	delta0 := deltaKey(testTrack, 1, 0)
 	tests := map[string]struct {
-		fail      func(*FakeStore)
+		fail      func(*fakeStore)
 		committed []uint64
 	}{
 		"the group object fails": {
-			fail:      func(s *FakeStore) { s.CreateErrOnce = map[string]error{group0: errStoreDown} },
+			fail:      func(s *fakeStore) { s.createErrOnce = map[string]error{group0: errStoreDown} },
 			committed: []uint64{0},
 		},
 		"the commit fails, leaving the group object": {
-			fail:      func(s *FakeStore) { s.CreateErrOnce = map[string]error{delta0: errStoreDown} },
+			fail:      func(s *fakeStore) { s.createErrOnce = map[string]error{delta0: errStoreDown} },
 			committed: []uint64{1},
 		},
 		"the group object is taken but its answer is lost": {
-			fail:      func(s *FakeStore) { s.CreatedErrOnce = map[string]error{group0: errStoreDown} },
+			fail:      func(s *fakeStore) { s.createdErrOnce = map[string]error{group0: errStoreDown} },
 			committed: []uint64{1},
 		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			objects := &FakeStore{}
+			objects := &fakeStore{}
 			w := newWriter(t, objects, Config{})
 			tt.fail(objects)
 
@@ -52,9 +52,9 @@ func TestWriter_Append_AfterAFailedWrite(t *testing.T) {
 }
 
 func TestWriter_Append_CommitTakenButItsAnswerLost(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
-	objects.CreatedErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
+	objects.createdErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
 
 	first, err := w.Append(t.Context(), ticksPerGroup, []byte("first"))
 	require.NoError(t, err, "the commit is read back and found to be this one")
@@ -67,11 +67,11 @@ func TestWriter_Append_CommitTakenButItsAnswerLost(t *testing.T) {
 }
 
 func TestWriter_Append_CommitFailsAndCannotBeReadBack(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	delta0 := deltaKey(testTrack, 1, 0)
-	objects.CreatedErrOnce = map[string]error{delta0: errStoreDown}
-	objects.GetErrOnce = map[string]error{delta0: errStoreDown}
+	objects.createdErrOnce = map[string]error{delta0: errStoreDown}
+	objects.getErrOnce = map[string]error{delta0: errStoreDown}
 
 	_, err := w.Append(t.Context(), ticksPerGroup, []byte("first"))
 	require.ErrorIs(t, err, errStoreDown, "an unconfirmed commit is reported")
@@ -83,7 +83,7 @@ func TestWriter_Append_CommitFailsAndCannotBeReadBack(t *testing.T) {
 }
 
 func TestWriter_Append_FollowsAnotherWritersCommit(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	track, err := Open(t.Context(), objects, testTrack, Config{})
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestWriter_Append_FollowsAnotherWritersCommit(t *testing.T) {
 }
 
 func TestWriter_AppendGroup_DuplicateOfTheLastIsNotStepped(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("first"))
 	require.NoError(t, err)
@@ -112,9 +112,9 @@ func TestWriter_AppendGroup_DuplicateOfTheLastIsNotStepped(t *testing.T) {
 }
 
 func TestWriter_Append_AfterARestartPastAnUncommittedGroup(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
-	objects.CreateErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
+	objects.createErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
 	_, err := w.Append(t.Context(), ticksPerGroup, []byte("lost"))
 	require.ErrorIs(t, err, errStoreDown)
 
@@ -130,9 +130,9 @@ func TestWriter_Append_AfterARestartPastAnUncommittedGroup(t *testing.T) {
 }
 
 func TestWriter_AppendGroup_ExplicitSequenceStillCollides(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
-	objects.CreateErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
+	objects.createErrOnce = map[string]error{deltaKey(testTrack, 1, 0): errStoreDown}
 	_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("lost"))
 	require.ErrorIs(t, err, errStoreDown)
 
@@ -142,7 +142,7 @@ func TestWriter_AppendGroup_ExplicitSequenceStillCollides(t *testing.T) {
 }
 
 func TestWriter_Append_GivesUpAfterManyUncommittedGroups(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{})
 	for seq := range uint64(maxSkippedSequences + 1) {
 		_, err := objects.Create(t.Context(), groupKey(testTrack, NewGroupID(1, seq)), []byte("left behind"))
@@ -155,9 +155,9 @@ func TestWriter_Append_GivesUpAfterManyUncommittedGroups(t *testing.T) {
 }
 
 func TestWriter_Append_AfterAFailedSeal(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(t, objects, Config{SealThreshold: 1})
-	objects.SwapErrOnce = map[string]error{epochLogKey(testTrack, 1): errStoreDown}
+	objects.swapErrOnce = map[string]error{epochLogKey(testTrack, 1): errStoreDown}
 
 	first, err := w.Append(t.Context(), ticksPerGroup, []byte("first"))
 	require.ErrorIs(t, err, errStoreDown)
