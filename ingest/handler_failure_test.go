@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -116,6 +117,59 @@ func TestHandler_History_StoreFailures(t *testing.T) {
 			assert.Contains(t, logs.String(), tt.wantLogged)
 		})
 	}
+}
+
+// A redaction whose delete fails is answered 500 and leaves the payload in
+// place; a retry, once the store is back, finishes the delete without
+// committing a second redaction.
+func TestHandler_Redact_DeleteFails(t *testing.T) {
+	var logs bytes.Buffer
+	objects := &fakeStore{}
+	h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	require.NoError(t, err)
+	posted := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
+	require.Equal(t, http.StatusCreated, posted.Code)
+	var reply recordResponse
+	require.NoError(t, json.Unmarshal(posted.Body.Bytes(), &reply))
+	redact := "/tracks/room/123/chat?group=" + reply.Group
+
+	objects.deleteErr = map[string]error{"/groups/": errors.New("store is down")}
+	failed := serve(h, http.MethodDelete, redact, "")
+	objects.deleteErr = nil
+	kept := serve(h, http.MethodGet, "/tracks/room/123/chat", "")
+	retried := serve(h, http.MethodDelete, redact, "")
+
+	assert.Equal(t, http.StatusInternalServerError, failed.Code)
+	assert.Contains(t, logs.String(), "delete redacted group")
+	assert.Contains(t, kept.Body.String(), `"payload":"hello"`, "the payload stays until its delete succeeds")
+	assert.Equal(t, http.StatusNoContent, retried.Code, "the retry finishes the redaction already committed")
+	after := serve(h, http.MethodGet, "/tracks/room/123/chat", "").Body.String()
+	assert.NotContains(t, after, `"hello"`)
+	assert.Equal(t, 1, strings.Count(after, `"redacts"`), "one redaction, however many tries")
+}
+
+// A payload missing without a redaction is a lost object, not a redaction:
+// history answers 500 rather than calling it redacted.
+func TestHandler_History_LostRecordIsNotRedacted(t *testing.T) {
+	objects := mem.New()
+	h, err := NewHandler(objects, Options{})
+	require.NoError(t, err)
+	posted := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
+	require.Equal(t, http.StatusCreated, posted.Code)
+	var reply recordResponse
+	require.NoError(t, json.Unmarshal(posted.Body.Bytes(), &reply))
+	id, err := ledger.ParseGroupID(reply.Group)
+	require.NoError(t, err)
+	lt, err := ledger.Open(t.Context(), objects, "room/123/chat", ledger.Config{})
+	require.NoError(t, err)
+	reader, err := lt.Reader(t.Context())
+	require.NoError(t, err)
+	info, err := reader.Lookup(t.Context(), id)
+	require.NoError(t, err)
+	require.NoError(t, objects.Delete(t.Context(), info.ObjectKey))
+
+	assert.Equal(t, http.StatusInternalServerError, serve(h, http.MethodGet, "/tracks/room/123/chat", "").Code)
+	assert.Equal(t, http.StatusInternalServerError, serve(h, http.MethodDelete, "/tracks/room/123/chat?group="+reply.Group, "").Code)
 }
 
 func TestHandler_History_UndecodableRecord(t *testing.T) {

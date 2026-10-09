@@ -33,10 +33,14 @@
 //	<track>/e000001/delta/open/00000042.manifest
 //	<track>/e000001/delta/sealed-00000001.manifest
 //	<track>/e000001/groups/g00000042   payload
+//	<track>/e000001/redacted/g00000042 marks that payload redacted
 //
 // Every object above is immutable except head. Writes are therefore conditional
 // creates, which makes a duplicate append fail cleanly instead of corrupting,
-// and fences a writer that has been superseded after a failover.
+// and fences a writer that has been superseded after a failover. The one
+// exception is [Track.Redact]: it marks a group redacted and deletes its
+// payload, never a manifest, so the group keeps its row and [Reader.ReadGroup]
+// answers [ErrGroupRedacted].
 //
 // # Commit
 //

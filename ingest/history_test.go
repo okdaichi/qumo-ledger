@@ -21,6 +21,8 @@ type historyPage struct {
 		Wallclock int64           `json:"wallclock"`
 		Sender    string          `json:"sender"`
 		Payload   json.RawMessage `json:"payload"`
+		Redacted  bool            `json:"redacted"`
+		Redacts   string          `json:"redacts"`
 	} `json:"records"`
 	Before string `json:"before"`
 }

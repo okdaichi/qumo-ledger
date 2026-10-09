@@ -26,17 +26,19 @@ const manifestVersion = 1
 //	<track>/e000001/delta/open/00000042.manifest
 //	<track>/e000001/delta/sealed-00000001-00000003.manifest
 //	<track>/e000001/groups/g00000042       epoch 1's payload (sequence in the key)
+//	<track>/e000001/redacted/g00000042     marks that payload redacted (Track.Redact)
 //
 // They are unexported: a Go consumer reaches a track through [Track], and
 // tooling written against the raw store works from the layout documented in
 // docs/ARCHITECTURE.md rather than from this package.
 const (
-	rootObject   = "root.manifest"
-	logObject    = "log.manifest"
-	headObject   = "delta/head"
-	openPrefix   = "delta/open/"
-	sealedPrefix = "delta/sealed-"
-	groupPrefix  = "groups/"
+	rootObject     = "root.manifest"
+	logObject      = "log.manifest"
+	headObject     = "delta/head"
+	openPrefix     = "delta/open/"
+	sealedPrefix   = "delta/sealed-"
+	groupPrefix    = "groups/"
+	redactedPrefix = "redacted/"
 )
 
 // epochDir is the per-epoch path segment under which an epoch's log, head, and

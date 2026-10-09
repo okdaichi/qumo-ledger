@@ -42,6 +42,10 @@ var (
 	// group whose duration is known.
 	ErrGroupNotFound = errors.New("ledger: no group found")
 
+	// ErrGroupRedacted reports that a group's payload was taken out by
+	// [Track.Redact]. Its manifest row stays; only the payload is gone.
+	ErrGroupRedacted = errors.New("ledger: group redacted")
+
 	// ErrEpochNotFound reports that no log manifest exists for the requested
 	// epoch — it was never created, or its creation did not complete.
 	ErrEpochNotFound = errors.New("ledger: epoch not found")
