@@ -80,6 +80,27 @@ func TestHandler_Redact_Twice(t *testing.T) {
 	assert.Len(t, history(t, h, "").Records, 2, "a second redaction commits nothing")
 }
 
+func TestHandler_Redact_Concurrent(t *testing.T) {
+	h := newHandler(t, mem.New(), ingest.Options{})
+	hello := posted(t, h, `"hello"`)
+
+	const n = 8
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() { codes <- redact(h, hello) })
+	}
+	wg.Wait()
+	close(codes)
+
+	counts := map[int]int{}
+	for code := range codes {
+		counts[code]++
+	}
+	assert.Equal(t, map[int]int{http.StatusCreated: 1, http.StatusNoContent: n - 1}, counts)
+	assert.Len(t, history(t, h, "").Records, 2, "one redaction, however many at once")
+}
+
 func TestHandler_Redact_Refused(t *testing.T) {
 	h := newHandler(t, mem.New(), ingest.Options{})
 	hello := posted(t, h, `"hello"`)

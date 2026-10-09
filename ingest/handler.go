@@ -363,10 +363,15 @@ func (h *Handler) commit(ctx context.Context, tr *track, data []byte) (ledger.Gr
 
 // serveRedact takes the record of the group ?group= names out of the track. It
 // commits a redaction naming the group, which reaches OnRecord like any record,
-// then deletes the group's object, so history answers the group as redacted
-// and nothing serves its payload again. It answers 201 with the redaction's
-// group. A group already redacted is answered 204 and commits nothing, and a
-// redaction can't itself be redacted.
+// then has the ledger redact the group ([ledger.Track.Redact]), so history
+// answers the group as redacted and nothing serves its payload again. It
+// answers 201 with the redaction's group. A group already redacted is answered
+// 204 and commits nothing, and a redaction can't itself be redacted.
+//
+// A redaction is for a party trusted with the whole track: [Options.Authorize]
+// sees the track, not the record, so an app that lets a sender redact only
+// their own records checks that before it calls. Redactions are not counted
+// against the track's limits.
 func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 	t, sender, ok := h.resolve(w, r, Redact)
 	if !ok {
@@ -378,18 +383,8 @@ func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "group must be a group ID", http.StatusBadRequest)
 		return
 	}
-	lt, err := ledger.Open(r.Context(), h.store, t.Path(), h.opts.Config)
-	if errors.Is(err, ledger.ErrTrackNotFound) {
-		http.Error(w, "no such track", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		h.internalError(w, r, "open track", err)
-		return
-	}
-	reader, err := lt.Reader(r.Context())
-	if err != nil {
-		h.internalError(w, r, "read track", err)
+	lt, reader, ok := h.openReader(w, r, t)
+	if !ok {
 		return
 	}
 	info, err := reader.Lookup(r.Context(), target)
@@ -401,29 +396,6 @@ func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "look up group", err)
 		return
 	}
-	data, err := reader.ReadGroup(r.Context(), info.ObjectKey)
-	if errors.Is(err, store.ErrNotExist) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if err != nil {
-		h.internalError(w, r, "read record", err)
-		return
-	}
-	var rec Record
-	if err := json.Unmarshal(data, &rec); err != nil {
-		h.internalError(w, r, "decode record", err)
-		return
-	}
-	if rec.Redacts != "" {
-		http.Error(w, "a redaction can't be redacted", http.StatusBadRequest)
-		return
-	}
-	redaction, err := json.Marshal(Record{Sender: sender, Redacts: target.String()})
-	if err != nil {
-		h.internalError(w, r, "encode redaction", err)
-		return
-	}
 
 	tr, _, err := h.open(r.Context(), t)
 	if err != nil {
@@ -431,23 +403,90 @@ func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.release(tr)
-	// The redaction is committed before the record is deleted, so a failure
-	// between the two leaves the record in place, and a retry redacts it.
+	// Holding the track checks that the group is not redacted yet and commits
+	// the redaction with no other redaction of the track in between.
 	tr.mu.Lock()
-	group, err := h.commit(r.Context(), tr, redaction)
+	status, reply, err := h.redact(r.Context(), tr, lt, reader, info, sender)
 	tr.mu.Unlock()
+	switch status {
+	case http.StatusCreated:
+		writeJSON(w, status, reply)
+	case http.StatusInternalServerError:
+		h.internalError(w, r, "redact", err)
+	case http.StatusBadRequest:
+		http.Error(w, "a redaction can't be redacted", status)
+	default:
+		w.WriteHeader(status)
+	}
+}
+
+// redact takes info's record out of tr and answers how: 201 with the redaction
+// it committed, 204 when the record was redacted already, 400 when it is a
+// redaction itself, or 500 with the error. It commits the redaction first,
+// then has the ledger mark the group redacted and delete its payload. A failure
+// after the commit leaves the group unmarked, so a retry commits a second
+// redaction; one after the mark is finished by a retry with nothing committed.
+// tr.mu is held.
+func (h *Handler) redact(ctx context.Context, tr *track, lt *ledger.Track, reader *ledger.Reader, info ledger.GroupInfo, sender string) (int, recordResponse, error) {
+	// The store calls outlive a client that leaves mid-request, as an append
+	// does: a redaction cut short between its steps is left half done.
+	ctx = context.WithoutCancel(ctx)
+	redacted, err := lt.Redacted(ctx, info)
+	if err != nil {
+		return http.StatusInternalServerError, recordResponse{}, err
+	}
+	if redacted {
+		if err := lt.Redact(ctx, info); err != nil {
+			return http.StatusInternalServerError, recordResponse{}, err
+		}
+		return http.StatusNoContent, recordResponse{}, nil
+	}
+	data, err := reader.ReadGroup(ctx, info.ObjectKey)
+	if err != nil {
+		return http.StatusInternalServerError, recordResponse{}, fmt.Errorf("read record: %w", err)
+	}
+	var rec Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return http.StatusInternalServerError, recordResponse{}, fmt.Errorf("decode record: %w", err)
+	}
+	if rec.Redacts != "" {
+		return http.StatusBadRequest, recordResponse{}, nil
+	}
+	redaction, err := json.Marshal(Record{Sender: sender, Redacts: info.ID.String()})
+	if err != nil {
+		return http.StatusInternalServerError, recordResponse{}, fmt.Errorf("encode redaction: %w", err)
+	}
+	group, err := h.commit(ctx, tr, redaction)
 	switch {
 	case group.ObjectKey == "":
-		h.internalError(w, r, "append redaction", err)
-		return
+		return http.StatusInternalServerError, recordResponse{}, fmt.Errorf("append redaction: %w", err)
 	case err != nil:
-		h.logger.Warn("redaction committed with an error", "method", r.Method, "url", r.URL.Path, "error", err)
+		h.logger.Warn("redaction committed with an error", "track", tr.Path(), "error", err)
 	}
-	if err := h.store.Delete(context.WithoutCancel(r.Context()), info.ObjectKey); err != nil {
-		h.internalError(w, r, "delete redacted record", err)
-		return
+	if err := lt.Redact(ctx, info); err != nil {
+		return http.StatusInternalServerError, recordResponse{}, err
 	}
-	writeJSON(w, http.StatusCreated, recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock})
+	return http.StatusCreated, recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock}, nil
+}
+
+// openReader opens the track for reading, answering 404 when it does not
+// exist and 500 when it can't be read.
+func (h *Handler) openReader(w http.ResponseWriter, r *http.Request, t Track) (*ledger.Track, *ledger.Reader, bool) {
+	lt, err := ledger.Open(r.Context(), h.store, t.Path(), h.opts.Config)
+	if errors.Is(err, ledger.ErrTrackNotFound) {
+		http.Error(w, "no such track", http.StatusNotFound)
+		return nil, nil, false
+	}
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return nil, nil, false
+	}
+	reader, err := lt.Reader(r.Context())
+	if err != nil {
+		h.internalError(w, r, "read track", err)
+		return nil, nil, false
+	}
+	return lt, reader, true
 }
 
 // remember keeps the reply to a keyed record, forgetting the oldest key past
@@ -508,18 +547,8 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		before = id
 	}
 
-	lt, err := ledger.Open(r.Context(), h.store, t.Path(), h.opts.Config)
-	if errors.Is(err, ledger.ErrTrackNotFound) {
-		http.Error(w, "no such track", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		h.internalError(w, r, "open track", err)
-		return
-	}
-	reader, err := lt.Reader(r.Context())
-	if err != nil {
-		h.internalError(w, r, "read track", err)
+	_, reader, ok := h.openReader(w, r, t)
+	if !ok {
 		return
 	}
 	groups, err := reader.Before(r.Context(), before, limit)
@@ -531,7 +560,7 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	for _, g := range groups {
 		entry := historyEntry{Group: g.ID.String(), Wallclock: g.Wallclock}
 		data, err := reader.ReadGroup(r.Context(), g.ObjectKey)
-		if errors.Is(err, store.ErrNotExist) {
+		if errors.Is(err, ledger.ErrGroupRedacted) {
 			entry.Redacted = true
 			page.Records = append(page.Records, entry)
 			continue

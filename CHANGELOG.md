@@ -12,12 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ledger:** Redaction. `Track.Redact` takes a committed group's payload out of a track.
+  - It writes a marker, `<track>/eNNNNNN/redacted/gNNNNNNNN`, then deletes the payload object. No manifest changes, so the group keeps its row, its id and its place.
+  - `Reader.ReadGroup` then answers the new `ErrGroupRedacted`. A payload missing without the marker still answers the store's `ErrNotExist`, so a lost object isn't mistaken for a redaction.
+  - `Track.Redacted` reports the marker. Redacting again finishes a delete that failed, and is not an error.
 - **ingest:** Redaction. `DELETE /tracks/{broadcast path}/{track name}?group=<id>` takes one record out of a track.
-  - The handler commits a redaction, `{"sender": …, "redacts": "<id>"}` with no payload. It reaches `OnRecord` like any record, so live subscribers learn of it. Then the handler deletes the group's object from the store.
+  - The handler commits a redaction, `{"sender": …, "redacts": "<id>"}` with no payload. It reaches `OnRecord` like any record, so live subscribers learn of it. Then it calls `Track.Redact`.
   - History answers a redacted group with its `group`, its `wallclock` and `"redacted": true`, and no sender or payload, so pages and cursors hold.
-  - The redaction is committed first, so a failed delete leaves the record in place and a retry redacts it. A group already redacted is answered `204` and commits nothing, and a redaction can't be redacted (`400`). An unknown track or group is `404`.
-  - `Options.Authorize` decides it as the new `ingest.Redact` access.
-  - `Record` gains `Redacts`, and its `Payload` is omitted when empty.
+  - Redactions of one track run one at a time. A group already marked redacted answers `204` and commits nothing, including a retry after a failed delete, which finishes it.
+  - Errors: a redaction can't be redacted (`400`); an unknown track or group is `404`; a lost payload is `500`.
+  - `Options.Authorize` decides it as the new `ingest.Redact` access. It sees the track, not the record, so redaction is for a party trusted with the whole track. Redactions aren't counted against the limits.
+  - `Record` gains `Redacts`, and its `Payload` is omitted when empty. An `OnRecord` consumer tells a redaction by `redacts`.
 
 ## [0.2.2] - 2026-10-09
 

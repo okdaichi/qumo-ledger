@@ -42,8 +42,9 @@
 // A DELETE to the track, ?group= naming one of its records, takes that record
 // out of the track. The handler commits a redaction, a record naming the group
 // in redacts with no payload, which reaches [Options.OnRecord] like any
-// record, so live subscribers learn of it. Then it deletes the group's object
-// from the store. History answers the group from then on with its group and
+// record, so live subscribers learn of it. Then the ledger redacts the group
+// ([ledger.Track.Redact]): it marks the group redacted and deletes its
+// payload. History answers the group from then on with its group and
 // wallclock and "redacted": true, and no sender or payload:
 //
 //	DELETE /tracks/room/123/chat?group=e000001-g00000003
@@ -51,11 +52,18 @@
 //	201 Created
 //	{"group": "e000001-g00000007", "wallclock": 1791370000000000000}
 //
-// The redaction is committed before the object is deleted, so if the delete
-// fails, the record stays and a retry redacts it. A group already redacted is
-// answered 204 and commits nothing, and a redaction can't itself be redacted.
-// [Options.Authorize] decides a redaction as a [Redact], and the sender it
-// names is the redaction's.
+// Redactions of one track run one at a time. A group already marked redacted
+// is answered 204 and commits nothing; that includes a retry after a delete
+// failed, which finishes the delete. A redaction can't itself be redacted. A
+// payload missing without the mark is a lost object, answered 500, never
+// passed off as a redaction.
+//
+// A consumer of [Options.OnRecord] tells a redaction by its redacts, not by
+// a missing payload. [Options.Authorize] decides a redaction as a [Redact],
+// and the sender it names is the redaction's. It sees the track, not the
+// record, so redaction is for a party trusted with the whole track; an app
+// that lets senders redact their own records checks the record first.
+// Redactions are not counted against the track's limits.
 //
 // # Retries and limits
 //

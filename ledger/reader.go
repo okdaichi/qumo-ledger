@@ -238,8 +238,23 @@ func (r *Reader) sealed(ctx context.Context, epoch uint64, ref sealedRef) (seale
 // [Reader.Next], or a range iterator. Never construct the key: producer
 // sequences are gappy, so a derived key can name a group that was dropped, or
 // nothing at all.
+//
+// A group taken out by [Track.Redact] answers [ErrGroupRedacted]. A payload
+// missing for any other reason answers the store's [store.ErrNotExist], so a
+// lost object is never mistaken for a redaction.
 func (r *Reader) ReadGroup(ctx context.Context, objectKey string) ([]byte, error) {
 	data, _, err := r.objects.Get(ctx, objectKey)
+	if errors.Is(err, store.ErrNotExist) {
+		if marker, ok := redactedKey(objectKey); ok {
+			redacted, merr := markerExists(ctx, r.objects, marker)
+			if merr != nil {
+				return nil, merr
+			}
+			if redacted {
+				return nil, fmt.Errorf("%w: %s", ErrGroupRedacted, objectKey)
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("ledger: read group %s: %w", objectKey, err)
 	}
