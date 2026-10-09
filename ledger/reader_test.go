@@ -197,7 +197,7 @@ func TestReader_SeekWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 // run — otherwise a seek gets steadily more expensive for the whole life of a
 // recording, which is exactly what the summaries in the root exist to prevent.
 func TestReader_SeekMedia_FetchesOnesealedManifest(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 
 	w := newWriter(t, objects, Config{})
 
@@ -213,14 +213,14 @@ func TestReader_SeekMedia_FetchesOnesealedManifest(t *testing.T) {
 	r := openReader(t, objects)
 	require.Len(t, r.logRootCopy().Sealed, 6)
 
-	objects.ResetCalls()
+	objects.resetCalls()
 
 	// Target the very first group, the worst case for a newest-first walk.
 	group, err := r.SeekMedia(t.Context(), 1)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), group.ID.Sequence())
 
-	fetched := objects.GetCount(func(key string) bool {
+	fetched := objects.getCount(func(key string) bool {
 		return strings.Contains(key, "/delta/sealed-")
 	})
 	assert.Equal(t, 1, fetched, "a seek must fetch only the sealed run that can hold its answer")
@@ -317,7 +317,7 @@ func TestReader_RangeWallclock_SkipsGroupsWithoutAnchor(t *testing.T) {
 // A range must skip the sealed runs that cannot contribute, or a narrow query
 // over a long recording costs as much as reading the whole thing.
 func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 
 	w := newWriter(t, objects, Config{})
 
@@ -330,13 +330,13 @@ func TestReader_RangeMedia_SkipsIrrelevantsealedManifests(t *testing.T) {
 	r := openReader(t, objects)
 	require.Len(t, r.logRootCopy().Sealed, 6)
 
-	objects.ResetCalls()
+	objects.resetCalls()
 
 	// A window covering only group 1.
 	got := collect(t, r.RangeMedia(t.Context(), ticksPerGroup, 2*ticksPerGroup))
 	assert.Equal(t, []uint64{1}, got)
 
-	fetched := objects.GetCount(func(key string) bool {
+	fetched := objects.getCount(func(key string) bool {
 		return strings.Contains(key, "/delta/sealed-")
 	})
 	assert.Equal(t, 1, fetched, "only the run overlapping the window should be fetched")
@@ -466,7 +466,7 @@ func TestReader_SeekAfter(t *testing.T) {
 // must cost nothing. Locating "the group after nothing" the general way would
 // fetch a sealed manifest to find the first group.
 func TestReader_SeekAfter_ZeroIDCostsNoRequest(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 
 	w := newWriter(t, objects, Config{})
 	for sequence := range uint64(2) {
@@ -476,11 +476,11 @@ func TestReader_SeekAfter_ZeroIDCostsNoRequest(t *testing.T) {
 	require.NoError(t, w.Seal(t.Context()))
 
 	r := openReader(t, objects)
-	objects.ResetCalls()
+	objects.resetCalls()
 
 	require.NoError(t, r.SeekAfter(t.Context(), 0))
 
-	assert.Equal(t, 0, objects.GetCount(func(string) bool { return true }),
+	assert.Equal(t, 0, objects.getCount(func(string) bool { return true }),
 		"seeking after the zero id must rewind the cursor rather than fetch")
 	assert.Equal(t, []uint64{0, 1}, drain(t, r), "and it must still read from the start")
 }
@@ -646,7 +646,7 @@ func TestReader_Next_ReturnsEOFAtTip(t *testing.T) {
 // on the first stall and periodically after — not every tick.
 func TestReader_Next_IdlePollCost(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		objects := &FakeStore{}
+		objects := &fakeStore{}
 
 		w := newWriter(t, objects, Config{})
 		_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -659,7 +659,7 @@ func TestReader_Next_IdlePollCost(t *testing.T) {
 
 		// Settle, then start counting.
 		synctest.Wait()
-		objects.ResetCalls()
+		objects.resetCalls()
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -677,8 +677,8 @@ func TestReader_Next_IdlePollCost(t *testing.T) {
 		}
 		synctest.Wait()
 
-		probes := objects.GetCount(func(key string) bool { return strings.Contains(key, "/delta/open/") })
-		refreshes := objects.GetCount(func(key string) bool {
+		probes := objects.getCount(func(key string) bool { return strings.Contains(key, "/delta/open/") })
+		refreshes := objects.getCount(func(key string) bool {
 			return strings.HasSuffix(key, "/log.manifest") || strings.HasSuffix(key, "/root.manifest")
 		})
 

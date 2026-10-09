@@ -448,8 +448,8 @@ func TestWriter_Seal(t *testing.T) {
 // ErrExist, publish a root summary describing groups the object does not hold,
 // and then reclaim the deltas that were their only other copy.
 func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
-	objects := &FakeStore{
-		SwapErrOnce: map[string]error{epochLogKey(testTrack, 1): errors.New("transient failure")},
+	objects := &fakeStore{
+		swapErrOnce: map[string]error{epochLogKey(testTrack, 1): errors.New("transient failure")},
 	}
 
 	w := newWriter(t, objects, Config{})
@@ -582,7 +582,7 @@ func TestOpen_TrackNotFound(t *testing.T) {
 // group committed and the call successful.
 func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack, 1): headFailure}}
+	objects := &fakeStore{swapErr: map[string]error{headKey(testTrack, 1): headFailure}}
 
 	w := newWriter(t, objects, Config{})
 
@@ -601,7 +601,7 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 // test.
 func TestWriter_publishHead(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack, 1): headFailure}}
+	objects := &fakeStore{swapErr: map[string]error{headKey(testTrack, 1): headFailure}}
 
 	w := newWriter(t, objects, Config{})
 
@@ -617,14 +617,14 @@ func TestWriter_publishHead(t *testing.T) {
 // orphaned object that no reader can see — recoverable. The reverse order would
 // leave a manifest pointing at nothing.
 func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 
 	w := newWriter(t, objects, Config{})
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	_, creates, _, _ := objects.Calls()
+	_, creates, _, _ := objects.calls()
 	payloadIndex := indexOf(creates, meta.ObjectKey)
 	deltaIndex := indexOf(creates, deltaKey(testTrack, 1, 0))
 

@@ -16,7 +16,7 @@ import (
 // first three sealed and the rest in the open region; epoch 2 holds two more,
 // stamped later on the wall clock than anything in epoch 1.
 type failureFixture struct {
-	objects *FakeStore
+	objects *fakeStore
 
 	root   string // the track root
 	log1   string // epoch 1's log
@@ -36,7 +36,7 @@ func newFailureFixture(tb testing.TB) failureFixture {
 	tb.Helper()
 	ctx := tb.Context()
 
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 	w := newWriter(tb, objects, Config{})
 
 	var first GroupInfo
@@ -81,10 +81,10 @@ func newFailureFixture(tb testing.TB) failureFixture {
 
 // arm makes every Get of key fail from now on.
 func (f failureFixture) arm(key string) {
-	if f.objects.GetErr == nil {
-		f.objects.GetErr = map[string]error{}
+	if f.objects.getErr == nil {
+		f.objects.getErr = map[string]error{}
 	}
-	f.objects.GetErr[key] = errStoreDown
+	f.objects.getErr[key] = errStoreDown
 }
 
 // readAll drives Next until it stops, returning what stopped it: io.EOF when
@@ -109,232 +109,259 @@ func rangeAll(tb testing.TB, seq iter.Seq2[GroupInfo, error]) error {
 	return nil
 }
 
-// A Reader answers from several kinds of object — the track root, an epoch's
-// log and head, its sealed manifests, its open deltas, the payloads. Whichever
-// one cannot be fetched, the operation that needed it must fail with the
-// store's error. Reporting the object as absent instead would turn an outage
-// into "no such group", and a player or follower would act on that.
-func TestReader_StoreFailures(t *testing.T) {
+// assertStoreFailure checks that op reports an outage as an outage. A Reader
+// answers from several kinds of object — the track root, an epoch's log and
+// head, its sealed manifests, its open deltas, the payloads. Whichever one
+// cannot be fetched, the operation that needed it must fail with the store's
+// error. Reporting the object as absent instead would turn an outage into "no
+// such group", and a player or follower would act on that.
+//
+// op runs twice against a fresh Reader over the fixture: first with the store
+// answering, so that the failure which follows is the armed key and nothing
+// about the fixture, and then with key failing.
+func assertStoreFailure(
+	tb testing.TB,
+	key func(failureFixture) string,
+	op func(testing.TB, failureFixture, *Reader) error,
+) {
+	tb.Helper()
+
+	fix := newFailureFixture(tb)
+	if err := op(tb, fix, openReader(tb, fix.objects)); err != nil {
+		require.ErrorIs(tb, err, io.EOF, "only reaching the tip may stop the operation")
+	}
+
+	r := openReader(tb, fix.objects)
+	fix.arm(key(fix))
+
+	err := op(tb, fix, r)
+	require.Error(tb, err)
+	assert.ErrorIs(tb, err, errStoreDown)
+	assert.NotErrorIs(tb, err, ErrGroupNotFound, "an outage is not an absence")
+	assert.NotErrorIs(tb, err, ErrEpochNotFound, "an outage is not an absence")
+}
+
+func TestReader_Refresh_StoreFailure(t *testing.T) {
 	tests := map[string]struct {
 		key func(failureFixture) string
-		op  func(testing.TB, failureFixture, *Reader) error
 	}{
-		"Refresh, track root": {
-			key: func(f failureFixture) string { return f.root },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return r.Refresh(tb.Context()) },
-		},
-		"Refresh, epoch log": {
-			key: func(f failureFixture) string { return f.log1 },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return r.Refresh(tb.Context()) },
-		},
-		"Next, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return readAll(tb, r) },
-		},
-		"Next, open delta": {
-			key: func(f failureFixture) string { return f.open1 },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return readAll(tb, r) },
-		},
-		"Next, the following epoch's log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return readAll(tb, r) },
-		},
-		// On reaching the tip a Reader re-reads the root, to learn of an epoch
-		// begun since it opened. Failing that, it cannot say the track ended.
-		"Next at the tip, track root": {
-			key: func(f failureFixture) string { return f.root },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return readAll(tb, r) },
-		},
-		"Lookup, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Lookup(tb.Context(), NewGroupID(2, 0))
-				return err
-			},
-		},
-		"Lookup, open delta": {
-			key: func(f failureFixture) string { return f.open1 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Lookup(tb.Context(), NewGroupID(1, 3))
-				return err
-			},
-		},
-		"Lookup, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Lookup(tb.Context(), NewGroupID(1, 1))
-				return err
-			},
-		},
-		"SeekTip, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return r.SeekTip(tb.Context()) },
-		},
-		"SeekTip, head": {
-			key: func(f failureFixture) string { return f.head2 },
-			op:  func(tb testing.TB, _ failureFixture, r *Reader) error { return r.SeekTip(tb.Context()) },
-		},
-		"SeekAfter, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return r.SeekAfter(tb.Context(), NewGroupID(2, 0))
-			},
-		},
-		"SeekAfter, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return r.SeekAfter(tb.Context(), NewGroupID(1, 0))
-			},
-		},
-		"SeekAfter, open delta": {
-			key: func(f failureFixture) string { return f.open1 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return r.SeekAfter(tb.Context(), NewGroupID(1, 2))
-			},
-		},
-		"SeekMedia, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.SeekMedia(tb.Context(), 0)
-				return err
-			},
-		},
-		"SeekMedia, open delta": {
-			key: func(f failureFixture) string { return f.open2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.SeekMedia(tb.Context(), 0)
-				return err
-			},
-		},
-		// The target predates epoch 2 and every open group of epoch 1, so the
-		// seek has to reach into the sealed run to answer.
-		"SeekWallclock, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.SeekWallclock(tb.Context(), wallclockBase+nanosPerGroup)
-				return err
-			},
-		},
-		"RangeMedia, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
-			},
-		},
-		"RangeMedia, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
-			},
-		},
-		"RangeMedia, open delta": {
-			key: func(f failureFixture) string { return f.open1 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
-			},
-		},
-		"RangeWallclock, open delta": {
-			key: func(f failureFixture) string { return f.open2 },
-			op: func(tb testing.TB, f failureFixture, r *Reader) error {
-				return rangeAll(tb, r.RangeWallclock(tb.Context(), f.lateWallclock, math.MaxInt64))
-			},
-		},
-		"Before, epoch log": {
-			key: func(f failureFixture) string { return f.log2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Before(tb.Context(), 0, 3)
-				return err
-			},
-		},
-		"Before, head": {
-			key: func(f failureFixture) string { return f.head2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Before(tb.Context(), 0, 3)
-				return err
-			},
-		},
-		"Before, open delta": {
-			key: func(f failureFixture) string { return f.open2 },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Before(tb.Context(), 0, 3)
-				return err
-			},
-		},
-		// Asking for more than the open regions hold forces the sealed run.
-		"Before, sealed manifest": {
-			key: func(f failureFixture) string { return f.sealed },
-			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				_, err := r.Before(tb.Context(), 0, 8)
-				return err
-			},
-		},
-		"ReadGroup, payload": {
-			key: func(f failureFixture) string { return f.group },
-			op: func(tb testing.TB, f failureFixture, r *Reader) error {
-				_, err := r.ReadGroup(tb.Context(), f.group)
-				return err
-			},
-		},
+		"track root": {key: func(f failureFixture) string { return f.root }},
+		"epoch log":  {key: func(f failureFixture) string { return f.log1 }},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			fix := newFailureFixture(t)
-			r := openReader(t, fix.objects)
-
-			// The same operation succeeds while the store answers, so the
-			// failure below is the armed key and nothing about the fixture.
-			if err := tt.op(t, fix, r); err != nil {
-				require.ErrorIs(t, err, io.EOF, "only reaching the tip may stop the operation")
-			}
-
-			r = openReader(t, fix.objects)
-			fix.arm(tt.key(fix))
-
-			err := tt.op(t, fix, r)
-			require.Error(t, err)
-			assert.ErrorIs(t, err, errStoreDown)
-			assert.NotErrorIs(t, err, ErrGroupNotFound, "an outage is not an absence")
-			assert.NotErrorIs(t, err, ErrEpochNotFound, "an outage is not an absence")
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				return r.Refresh(tb.Context())
+			})
 		})
 	}
 }
 
-// Opening needs the root and then epoch 1's log; a Reader cannot be handed out
-// without either.
-func TestTrack_Reader_StoreFailures(t *testing.T) {
-	t.Run("track root", func(t *testing.T) {
-		fix := newFailureFixture(t)
-		fix.arm(fix.root)
+func TestReader_Next_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+	}{
+		"sealed manifest":           {key: func(f failureFixture) string { return f.sealed }},
+		"open delta":                {key: func(f failureFixture) string { return f.open1 }},
+		"the following epoch's log": {key: func(f failureFixture) string { return f.log2 }},
+		// On reaching the tip a Reader re-reads the root, to learn of an epoch
+		// begun since it opened. Failing that, it cannot say the track ended.
+		"track root at the tip": {key: func(f failureFixture) string { return f.root }},
+	}
 
-		_, err := Open(t.Context(), fix.objects, testTrack, Config{})
-		assert.ErrorIs(t, err, errStoreDown)
-		assert.NotErrorIs(t, err, ErrTrackNotFound, "an outage is not a missing track")
-	})
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				return readAll(tb, r)
+			})
+		})
+	}
+}
 
-	t.Run("epoch log", func(t *testing.T) {
-		fix := newFailureFixture(t)
-		track, err := Open(t.Context(), fix.objects, testTrack, Config{})
-		require.NoError(t, err)
-		fix.arm(fix.log1)
+func TestReader_Lookup_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+		id  GroupID
+	}{
+		"epoch log":       {key: func(f failureFixture) string { return f.log2 }, id: NewGroupID(2, 0)},
+		"open delta":      {key: func(f failureFixture) string { return f.open1 }, id: NewGroupID(1, 3)},
+		"sealed manifest": {key: func(f failureFixture) string { return f.sealed }, id: NewGroupID(1, 1)},
+	}
 
-		_, err = track.Reader(t.Context())
-		assert.ErrorIs(t, err, errStoreDown)
-	})
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				_, err := r.Lookup(tb.Context(), tt.id)
+				return err
+			})
+		})
+	}
+}
 
-	t.Run("reload", func(t *testing.T) {
-		fix := newFailureFixture(t)
-		track, err := Open(t.Context(), fix.objects, testTrack, Config{})
-		require.NoError(t, err)
-		fix.arm(fix.root)
+func TestReader_SeekTip_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+	}{
+		"epoch log": {key: func(f failureFixture) string { return f.log2 }},
+		"head":      {key: func(f failureFixture) string { return f.head2 }},
+	}
 
-		assert.ErrorIs(t, track.Reload(t.Context()), errStoreDown)
-		assert.Equal(t, uint64(2), track.LatestEpoch(), "a failed reload keeps what was loaded")
-	})
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				return r.SeekTip(tb.Context())
+			})
+		})
+	}
+}
+
+func TestReader_SeekAfter_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+		id  GroupID
+	}{
+		"epoch log":       {key: func(f failureFixture) string { return f.log2 }, id: NewGroupID(2, 0)},
+		"sealed manifest": {key: func(f failureFixture) string { return f.sealed }, id: NewGroupID(1, 0)},
+		"open delta":      {key: func(f failureFixture) string { return f.open1 }, id: NewGroupID(1, 2)},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				return r.SeekAfter(tb.Context(), tt.id)
+			})
+		})
+	}
+}
+
+func TestReader_SeekMedia_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+	}{
+		"epoch log":  {key: func(f failureFixture) string { return f.log2 }},
+		"open delta": {key: func(f failureFixture) string { return f.open2 }},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				_, err := r.SeekMedia(tb.Context(), 0)
+				return err
+			})
+		})
+	}
+}
+
+// The target predates epoch 2 and every open group of epoch 1, so the seek has
+// to reach into the sealed run to answer.
+func TestReader_SeekWallclock_StoreFailure(t *testing.T) {
+	assertStoreFailure(t,
+		func(f failureFixture) string { return f.sealed },
+		func(tb testing.TB, _ failureFixture, r *Reader) error {
+			_, err := r.SeekWallclock(tb.Context(), wallclockBase+nanosPerGroup)
+			return err
+		},
+	)
+}
+
+func TestReader_RangeMedia_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key func(failureFixture) string
+	}{
+		"epoch log":       {key: func(f failureFixture) string { return f.log2 }},
+		"sealed manifest": {key: func(f failureFixture) string { return f.sealed }},
+		"open delta":      {key: func(f failureFixture) string { return f.open1 }},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
+			})
+		})
+	}
+}
+
+func TestReader_RangeWallclock_StoreFailure(t *testing.T) {
+	assertStoreFailure(t,
+		func(f failureFixture) string { return f.open2 },
+		func(tb testing.TB, f failureFixture, r *Reader) error {
+			return rangeAll(tb, r.RangeWallclock(tb.Context(), f.lateWallclock, math.MaxInt64))
+		},
+	)
+}
+
+func TestReader_Before_StoreFailure(t *testing.T) {
+	tests := map[string]struct {
+		key   func(failureFixture) string
+		limit int
+	}{
+		"epoch log":  {key: func(f failureFixture) string { return f.log2 }, limit: 3},
+		"head":       {key: func(f failureFixture) string { return f.head2 }, limit: 3},
+		"open delta": {key: func(f failureFixture) string { return f.open2 }, limit: 3},
+		// Asking for more than the open regions hold forces the sealed run.
+		"sealed manifest": {key: func(f failureFixture) string { return f.sealed }, limit: 8},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			assertStoreFailure(t, tt.key, func(tb testing.TB, _ failureFixture, r *Reader) error {
+				_, err := r.Before(tb.Context(), 0, tt.limit)
+				return err
+			})
+		})
+	}
+}
+
+func TestReader_ReadGroup_StoreFailure(t *testing.T) {
+	assertStoreFailure(t,
+		func(f failureFixture) string { return f.group },
+		func(tb testing.TB, f failureFixture, r *Reader) error {
+			_, err := r.ReadGroup(tb.Context(), f.group)
+			return err
+		},
+	)
+}
+
+func TestOpen_StoreFailure(t *testing.T) {
+	fix := newFailureFixture(t)
+	fix.arm(fix.root)
+
+	_, err := Open(t.Context(), fix.objects, testTrack, Config{})
+
+	assert.ErrorIs(t, err, errStoreDown)
+	assert.NotErrorIs(t, err, ErrTrackNotFound, "an outage is not a missing track")
+}
+
+// A Reader starts at epoch 1, and cannot be handed out without that epoch's
+// log.
+func TestTrack_Reader_StoreFailure(t *testing.T) {
+	fix := newFailureFixture(t)
+	track, err := Open(t.Context(), fix.objects, testTrack, Config{})
+	require.NoError(t, err)
+	fix.arm(fix.log1)
+
+	_, err = track.Reader(t.Context())
+
+	assert.ErrorIs(t, err, errStoreDown)
+}
+
+func TestTrack_Reload_StoreFailure(t *testing.T) {
+	fix := newFailureFixture(t)
+	track, err := Open(t.Context(), fix.objects, testTrack, Config{})
+	require.NoError(t, err)
+	fix.arm(fix.root)
+
+	assert.ErrorIs(t, track.Reload(t.Context()), errStoreDown)
+	assert.Equal(t, uint64(2), track.LatestEpoch(), "a failed reload keeps what was loaded")
 }
 
 // overwrite replaces an object's bytes in place, standing in for a manifest
-// that was damaged or written by something else.
+// that was damaged or written by something else. A manifest that cannot be
+// trusted has to be refused where it is read: a truncated document would
+// otherwise be taken for an empty one, and a log belonging to another track or
+// epoch for this one's.
 func overwrite(tb testing.TB, objects store.Store, key string, data []byte) {
 	tb.Helper()
 
@@ -344,78 +371,53 @@ func overwrite(tb testing.TB, objects store.Store, key string, data []byte) {
 	require.NoError(tb, err)
 }
 
-// A manifest that cannot be trusted is refused where it is read. Each of these
-// would otherwise be interpreted: a truncated document as an empty one, a log
-// belonging to another track or epoch as this one's.
-func TestReader_DamagedManifests(t *testing.T) {
-	otherTrack, err := encodeManifest(epochLogRoot{Version: manifestVersion, Track: "live/cam2/video", Epoch: 1})
-	require.NoError(t, err)
-	otherEpoch, err := encodeManifest(epochLogRoot{Version: manifestVersion, Track: testTrack, Epoch: 7})
-	require.NoError(t, err)
-	newerLog, err := encodeManifest(epochLogRoot{Version: manifestVersion + 1, Track: testTrack, Epoch: 1})
-	require.NoError(t, err)
+func TestOpen_DamagedRoot(t *testing.T) {
+	fix := newFailureFixture(t)
+	overwrite(t, fix.objects, fix.root, []byte("{"))
+
+	_, err := Open(t.Context(), fix.objects, testTrack, Config{})
+
+	assert.Error(t, err)
+}
+
+func TestTrack_Reader_DamagedEpochLog(t *testing.T) {
+	encode := func(root epochLogRoot) []byte {
+		data, err := encodeManifest(root)
+		require.NoError(t, err)
+		return data
+	}
 
 	tests := map[string]struct {
-		key     func(failureFixture) string
 		data    []byte
-		op      func(testing.TB, failureFixture) error
 		wantErr error // nil when any error will do
 	}{
-		"track root is not JSON": {
-			key:  func(f failureFixture) string { return f.root },
+		"not JSON": {
 			data: []byte("{"),
-			op: func(tb testing.TB, f failureFixture) error {
-				_, err := Open(tb.Context(), f.objects, testTrack, Config{})
-				return err
-			},
 		},
-		"epoch log is not JSON": {
-			key:  func(f failureFixture) string { return f.log1 },
-			data: []byte("{"),
-			op:   openReaderErr,
-		},
-		"epoch log from a newer format": {
-			key:     func(f failureFixture) string { return f.log1 },
-			data:    newerLog,
-			op:      openReaderErr,
+		"from a newer format": {
+			data:    encode(epochLogRoot{Version: manifestVersion + 1, Track: testTrack, Epoch: 1}),
 			wantErr: ErrUnsupportedVersion,
 		},
-		"epoch log of another track": {
-			key:     func(f failureFixture) string { return f.log1 },
-			data:    otherTrack,
-			op:      openReaderErr,
+		"of another track": {
+			data:    encode(epochLogRoot{Version: manifestVersion, Track: "live/cam2/video", Epoch: 1}),
 			wantErr: ErrManifestMismatch,
 		},
-		"epoch log of another epoch": {
-			key:     func(f failureFixture) string { return f.log1 },
-			data:    otherEpoch,
-			op:      openReaderErr,
+		"of another epoch": {
+			data:    encode(epochLogRoot{Version: manifestVersion, Track: testTrack, Epoch: 7}),
 			wantErr: ErrManifestMismatch,
-		},
-		"sealed manifest is not JSON": {
-			key:  func(f failureFixture) string { return f.sealed },
-			data: []byte("{"),
-			op: func(tb testing.TB, f failureFixture) error {
-				return readAll(tb, openReader(tb, f.objects))
-			},
-		},
-		"head is not JSON": {
-			key:  func(f failureFixture) string { return f.head2 },
-			data: []byte("{"),
-			op: func(tb testing.TB, f failureFixture) error {
-				return openReader(tb, f.objects).SeekTip(tb.Context())
-			},
 		},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			fix := newFailureFixture(t)
-			overwrite(t, fix.objects, tt.key(fix), tt.data)
+			track, err := Open(t.Context(), fix.objects, testTrack, Config{})
+			require.NoError(t, err)
+			overwrite(t, fix.objects, fix.log1, tt.data)
 
-			err := tt.op(t, fix)
+			_, err = track.Reader(t.Context())
+
 			require.Error(t, err)
-			assert.NotErrorIs(t, err, io.EOF)
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)
 			}
@@ -423,17 +425,20 @@ func TestReader_DamagedManifests(t *testing.T) {
 	}
 }
 
-// openReaderErr opens the fixture's track and asks for a Reader, returning
-// whichever step failed.
-func openReaderErr(tb testing.TB, f failureFixture) error {
-	tb.Helper()
+func TestReader_Next_DamagedSealedManifest(t *testing.T) {
+	fix := newFailureFixture(t)
+	overwrite(t, fix.objects, fix.sealed, []byte("{"))
 
-	track, err := Open(tb.Context(), f.objects, testTrack, Config{})
-	if err != nil {
-		return err
-	}
-	_, err = track.Reader(tb.Context())
-	return err
+	err := readAll(t, openReader(t, fix.objects))
+
+	assert.NotErrorIs(t, err, io.EOF, "a damaged manifest is not the end of the track")
+}
+
+func TestReader_SeekTip_DamagedHead(t *testing.T) {
+	fix := newFailureFixture(t)
+	overwrite(t, fix.objects, fix.head2, []byte("{"))
+
+	assert.Error(t, openReader(t, fix.objects).SeekTip(t.Context()))
 }
 
 // A range is an iterator, and a caller may stop it wherever it likes. Stopping
@@ -480,14 +485,14 @@ func TestReader_RangeWallclock_EmptyInterval(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fix := newFailureFixture(t)
 			r := openReader(t, fix.objects)
-			fix.objects.ResetCalls()
+			fix.objects.resetCalls()
 
 			var yielded int
 			for range r.RangeWallclock(t.Context(), tt.from, tt.to) {
 				yielded++
 			}
 			assert.Zero(t, yielded, "an empty interval yields nothing")
-			gets, _, _, _ := fix.objects.Calls()
+			gets, _, _, _ := fix.objects.calls()
 			assert.Empty(t, gets, "an empty interval needs no read")
 		})
 	}

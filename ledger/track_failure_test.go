@@ -12,7 +12,7 @@ import (
 // Create writes the root and then epoch 1's log. A store that refuses the root
 // has created nothing, and that is not the same as the track already existing.
 func TestCreate_RootWriteFails(t *testing.T) {
-	objects := &FakeStore{CreateErr: map[string]error{rootKey(testTrack): errStoreDown}}
+	objects := &fakeStore{createErr: map[string]error{rootKey(testTrack): errStoreDown}}
 
 	_, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 
@@ -25,7 +25,7 @@ func TestCreate_RootWriteFails(t *testing.T) {
 // creation instead of the track being stuck half-made.
 func TestCreate_EpochLogWriteFails(t *testing.T) {
 	logKey := epochLogKey(testTrack, 1)
-	objects := &FakeStore{CreateErr: map[string]error{logKey: errStoreDown}}
+	objects := &fakeStore{createErr: map[string]error{logKey: errStoreDown}}
 
 	_, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
 	require.ErrorIs(t, err, errStoreDown)
@@ -38,7 +38,7 @@ func TestCreate_EpochLogWriteFails(t *testing.T) {
 	require.ErrorIs(t, err, errStoreDown)
 
 	// Once the store answers, the writer creates the log and is usable.
-	delete(objects.CreateErr, logKey)
+	delete(objects.createErr, logKey)
 	w, err := track.Writer(t.Context())
 	require.NoError(t, err)
 	group, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
@@ -135,11 +135,11 @@ func TestTrack_Writer_ReopenedAfterSeal(t *testing.T) {
 func TestWriter_NewEpoch_StoreFailures(t *testing.T) {
 	nextLog := epochLogKey(testTrack, 2)
 	tests := map[string]struct {
-		objects *FakeStore
+		objects *fakeStore
 	}{
-		"creating the log":   {objects: &FakeStore{CreateErr: map[string]error{nextLog: errStoreDown}}},
-		"advancing the root": {objects: &FakeStore{SwapErr: map[string]error{rootKey(testTrack): errStoreDown}}},
-		"reading the log":    {objects: &FakeStore{GetErr: map[string]error{nextLog: errStoreDown}}},
+		"creating the log":   {objects: &fakeStore{createErr: map[string]error{nextLog: errStoreDown}}},
+		"advancing the root": {objects: &fakeStore{swapErr: map[string]error{rootKey(testTrack): errStoreDown}}},
+		"reading the log":    {objects: &fakeStore{getErr: map[string]error{nextLog: errStoreDown}}},
 	}
 
 	for name, tt := range tests {
@@ -157,7 +157,7 @@ func TestWriter_NewEpoch_StoreFailures(t *testing.T) {
 // The root moved under the writer but has not reached the new epoch: the bump
 // is retried once against the root as it now stands.
 func TestWriter_NewEpoch_RootChangedUnderneath(t *testing.T) {
-	objects := &FakeStore{SwapErrOnce: map[string]error{rootKey(testTrack): store.ErrVersionMismatch}}
+	objects := &fakeStore{swapErrOnce: map[string]error{rootKey(testTrack): store.ErrVersionMismatch}}
 	w := newWriter(t, objects, Config{})
 
 	require.NoError(t, w.NewEpoch(t.Context()))
@@ -242,9 +242,9 @@ func TestWriter_reloadIfStale_StoreFailures(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			commit := deltaKey(testTrack, 1, 0)
-			objects := &FakeStore{
-				CreateErr: map[string]error{commit: errStoreDown},
-				GetErr:    map[string]error{},
+			objects := &fakeStore{
+				createErr: map[string]error{commit: errStoreDown},
+				getErr:    map[string]error{},
 			}
 			w := newWriter(t, objects, Config{})
 
@@ -253,15 +253,15 @@ func TestWriter_reloadIfStale_StoreFailures(t *testing.T) {
 			_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 			require.ErrorIs(t, err, errStoreDown)
 
-			delete(objects.CreateErr, commit)
-			objects.GetErr[tt.key] = errStoreDown
+			delete(objects.createErr, commit)
+			objects.getErr[tt.key] = errStoreDown
 
 			err = tt.op(t, w)
 			require.ErrorIs(t, err, errStoreDown)
 			assert.ErrorContains(t, err, "after a failed write")
 
 			// With the store answering again the same writer recovers.
-			delete(objects.GetErr, tt.key)
+			delete(objects.getErr, tt.key)
 			require.NoError(t, tt.op(t, w))
 		})
 	}
@@ -271,13 +271,13 @@ func TestWriter_reloadIfStale_StoreFailures(t *testing.T) {
 // write fails the root still points at the open deltas, so nothing is lost and
 // the groups stay readable.
 func TestWriter_Seal_ManifestWriteFails(t *testing.T) {
-	objects := &FakeStore{CreateErr: map[string]error{}}
+	objects := &fakeStore{createErr: map[string]error{}}
 	w := newWriter(t, objects, Config{})
 	for sequence := range uint64(3) {
 		_, err := w.AppendGroup(t.Context(), testGroup(t, sequence), []byte("payload"))
 		require.NoError(t, err)
 	}
-	objects.CreateErr[sealedKey(testTrack, 1, 0, 2)] = errStoreDown
+	objects.createErr[sealedKey(testTrack, 1, 0, 2)] = errStoreDown
 
 	err := w.Seal(t.Context())
 
@@ -300,7 +300,7 @@ func TestWriter_publishHead_Conflict(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			head := headKey(testTrack, 1)
-			objects := &FakeStore{SwapErrOnce: map[string]error{}}
+			objects := &fakeStore{swapErrOnce: map[string]error{}}
 			w := newWriter(t, objects, Config{})
 			_, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 			require.NoError(t, err)
@@ -308,7 +308,7 @@ func TestWriter_publishHead_Conflict(t *testing.T) {
 			if tt.remove {
 				require.NoError(t, objects.Delete(t.Context(), head))
 			}
-			objects.SwapErrOnce[head] = tt.conflict
+			objects.swapErrOnce[head] = tt.conflict
 
 			_, err = w.AppendGroup(t.Context(), testGroup(t, 1), []byte("payload"))
 			require.NoError(t, err)
