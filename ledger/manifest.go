@@ -32,11 +32,11 @@ const manifestVersion = 1
 // tooling written against the raw store works from the layout documented in
 // docs/ARCHITECTURE.md rather than from this package.
 const (
-	rootObject   = "root.manifest"
-	logObject    = "log.manifest"
-	headObject   = "delta/head"
-	openPrefix   = "delta/open/"
-	sealedPrefix = "delta/sealed-"
+	rootObject     = "root.manifest"
+	logObject      = "log.manifest"
+	headObject     = "delta/head"
+	openPrefix     = "delta/open/"
+	sealedPrefix   = "delta/sealed-"
 	groupPrefix    = "groups/"
 	redactedPrefix = "redacted/"
 )
