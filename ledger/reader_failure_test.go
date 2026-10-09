@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"io"
+	"iter"
 	"math"
 	"testing"
 
@@ -98,7 +99,8 @@ func readAll(tb testing.TB, r *Reader) error {
 }
 
 // rangeAll consumes a range, returning the first error it yields.
-func rangeAll(seq func(func(GroupInfo, error) bool)) error {
+func rangeAll(tb testing.TB, seq iter.Seq2[GroupInfo, error]) error {
+	tb.Helper()
 	for _, err := range seq {
 		if err != nil {
 			return err
@@ -216,25 +218,25 @@ func TestReader_StoreFailures(t *testing.T) {
 		"RangeMedia, epoch log": {
 			key: func(f failureFixture) string { return f.log2 },
 			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(r.RangeMedia(tb.Context(), 0, math.MaxInt64))
+				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
 			},
 		},
 		"RangeMedia, sealed manifest": {
 			key: func(f failureFixture) string { return f.sealed },
 			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(r.RangeMedia(tb.Context(), 0, math.MaxInt64))
+				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
 			},
 		},
 		"RangeMedia, open delta": {
 			key: func(f failureFixture) string { return f.open1 },
 			op: func(tb testing.TB, _ failureFixture, r *Reader) error {
-				return rangeAll(r.RangeMedia(tb.Context(), 0, math.MaxInt64))
+				return rangeAll(tb, r.RangeMedia(tb.Context(), 0, math.MaxInt64))
 			},
 		},
 		"RangeWallclock, open delta": {
 			key: func(f failureFixture) string { return f.open2 },
 			op: func(tb testing.TB, f failureFixture, r *Reader) error {
-				return rangeAll(r.RangeWallclock(tb.Context(), f.lateWallclock, math.MaxInt64))
+				return rangeAll(tb, r.RangeWallclock(tb.Context(), f.lateWallclock, math.MaxInt64))
 			},
 		},
 		"Before, epoch log": {
@@ -480,9 +482,11 @@ func TestReader_RangeWallclock_EmptyInterval(t *testing.T) {
 			r := openReader(t, fix.objects)
 			fix.objects.ResetCalls()
 
+			var yielded int
 			for range r.RangeWallclock(t.Context(), tt.from, tt.to) {
-				t.Fatal("an empty interval yielded a group")
+				yielded++
 			}
+			assert.Zero(t, yielded, "an empty interval yields nothing")
 			gets, _, _, _ := fix.objects.Calls()
 			assert.Empty(t, gets, "an empty interval needs no read")
 		})

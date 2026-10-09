@@ -151,15 +151,6 @@ func (r *Reader) loadEpoch(ctx context.Context, epoch uint64) error {
 // Track returns the path being read.
 func (r *Reader) Track() TrackPath { return r.path }
 
-// logRootCopy returns a defensive copy of the current epoch's log root. Tests
-// need it to assert on the sealed index after a seal; the projection
-// [Reader.Root] hides all of that.
-func (r *Reader) logRootCopy() epochLogRoot {
-	root := r.logRoot
-	root.Sealed = append([]sealedRef(nil), r.logRoot.Sealed...)
-	return root
-}
-
 // Root returns the track's read-side metadata. It is a projection of the
 // schema and the latest epoch as of when this Reader last refreshed, not the
 // log root itself: how the history is laid out on disk is not part of the
@@ -678,7 +669,7 @@ func (r *Reader) seekTime(
 			return GroupInfo{}, err
 		}
 
-		best, bestSeg, bestIdx, bestNext, found, err := r.seekWithinEpoch(ctx, epoch, logRoot, target, anchor, end, start)
+		best, bestSeg, bestIdx, bestNext, found, err := r.seekWithinEpoch(ctx, epoch, logRoot, target, anchor, start)
 		// A segment that cannot be read is not one that holds no match: answering
 		// "not found" for it would send the caller to an earlier epoch, or away.
 		if err != nil {
@@ -707,7 +698,6 @@ func (r *Reader) seekWithinEpoch(
 	root epochLogRoot,
 	target int64,
 	anchor func(GroupInfo) (int64, bool),
-	end func(GroupInfo, uint32) (int64, bool),
 	start func(sealedRef) (int64, bool),
 ) (best GroupInfo, bestSeg []GroupInfo, bestIdx int, bestNext uint64, found bool, err error) {
 	var bestAt int64

@@ -220,7 +220,7 @@ func TestWriter_AppendGroup_DeltaClaimedByAnotherWriter(t *testing.T) {
 // After a commit whose outcome is unknown the writer reloads the epoch before
 // its next append. If that reload cannot read the store, the append fails
 // rather than proceeding on what the writer believed before.
-func TestWriter_ReloadAfterFailedWrite_StoreFailures(t *testing.T) {
+func TestWriter_reloadIfStale_StoreFailures(t *testing.T) {
 	appendGroup := func(tb testing.TB, w *Writer) error {
 		_, err := w.AppendGroup(tb.Context(), testGroup(tb, 1), []byte("payload"))
 		return err
