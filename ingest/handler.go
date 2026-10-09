@@ -83,9 +83,13 @@ func trackFromPath(p string) (Track, error) {
 // Record is one group of an ingested track: the payload a sender posted, and
 // the sender as [Options.Authorize] named it. A record with no sender was
 // written by a party trusted with the whole track.
+//
+// A redaction is a record too: Redacts names the group it took out of the
+// track, and it carries no payload.
 type Record struct {
 	Sender  string          `json:"sender,omitempty"`
-	Payload json.RawMessage `json:"payload"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Redacts string          `json:"redacts,omitempty"`
 }
 
 // Access is what a request does to a track.
@@ -96,6 +100,8 @@ const (
 	Write Access = iota
 	// Read reads a track's history.
 	Read
+	// Redact takes a record out of a track.
+	Redact
 )
 
 // Limit bounds how fast records arrive: Rate per second on average, and up to
@@ -157,9 +163,10 @@ type Options struct {
 //
 //	mux.Handle("/ingest/", http.StripPrefix("/ingest", handler))
 //
-//	PUT  /tracks/{broadcast path}/{track name}  create the track when it does not exist
-//	POST /tracks/{broadcast path}/{track name}  append the body, one JSON value, as one record
-//	GET  /tracks/{broadcast path}/{track name}  read the newest records, or those ?before= a group
+//	PUT    /tracks/{broadcast path}/{track name}  create the track when it does not exist
+//	POST   /tracks/{broadcast path}/{track name}  append the body, one JSON value, as one record
+//	GET    /tracks/{broadcast path}/{track name}  read the newest records, or those ?before= a group
+//	DELETE /tracks/{broadcast path}/{track name}  redact the record of the group ?group= names
 //
 // A record creates its track too; PUT is for a track that should exist before
 // its first record. A record sent with an Idempotency-Key header is stored once
@@ -229,6 +236,7 @@ func NewHandler(s store.Store, opts Options) (*Handler, error) {
 	h.mux.HandleFunc("PUT /tracks/{track...}", h.serveCreate)
 	h.mux.HandleFunc("POST /tracks/{track...}", h.serveRecord)
 	h.mux.HandleFunc("GET /tracks/{track...}", h.serveHistory)
+	h.mux.HandleFunc("DELETE /tracks/{track...}", h.serveRedact)
 	return h, nil
 }
 
@@ -321,21 +329,11 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 		return
 	}
-	// The append outlives a client that leaves mid-request: cut short, it
-	// could not tell whether the store took the commit, and a record that was
-	// committed is still delivered to OnRecord.
-	group, err := tr.writer.Append(context.WithoutCancel(r.Context()), 0, data)
-	// An append that committed but could not seal returns the group with its
-	// error: the record is stored, so it is delivered and answered as such.
+	group, err := h.commit(r.Context(), tr, data)
 	committed := group.ObjectKey != ""
 	reply := recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock}
-	if committed {
-		if key != "" {
-			tr.remember(key, reply)
-		}
-		if h.opts.OnRecord != nil {
-			h.opts.OnRecord(r.Context(), tr.Track, group, data)
-		}
+	if committed && key != "" {
+		tr.remember(key, reply)
 	}
 	tr.mu.Unlock()
 	switch {
@@ -346,6 +344,110 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("record committed with an error", "method", r.Method, "url", r.URL.Path, "error", err)
 	}
 	writeJSON(w, http.StatusCreated, reply)
+}
+
+// commit appends data to tr as one group and delivers it to OnRecord once it
+// is committed. The group's ObjectKey is empty when nothing was committed. An
+// append that committed but could not seal returns the group with its error:
+// the record is stored, so it is delivered all the same. tr.mu is held.
+func (h *Handler) commit(ctx context.Context, tr *track, data []byte) (ledger.GroupInfo, error) {
+	// The append outlives a client that leaves mid-request: cut short, it
+	// could not tell whether the store took the commit, and a record that was
+	// committed is still delivered to OnRecord.
+	group, err := tr.writer.Append(context.WithoutCancel(ctx), 0, data)
+	if group.ObjectKey != "" && h.opts.OnRecord != nil {
+		h.opts.OnRecord(ctx, tr.Track, group, data)
+	}
+	return group, err
+}
+
+// serveRedact takes the record of the group ?group= names out of the track. It
+// commits a redaction naming the group, which reaches OnRecord like any record,
+// then deletes the group's object, so history answers the group as redacted
+// and nothing serves its payload again. It answers 201 with the redaction's
+// group. A group already redacted is answered 204 and commits nothing, and a
+// redaction can't itself be redacted.
+func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
+	t, sender, ok := h.resolve(w, r, Redact)
+	if !ok {
+		return
+	}
+	raw := r.URL.Query().Get("group")
+	target, err := ledger.ParseGroupID(raw)
+	if raw == "" || err != nil {
+		http.Error(w, "group must be a group ID", http.StatusBadRequest)
+		return
+	}
+	lt, err := ledger.Open(r.Context(), h.store, t.Path(), h.opts.Config)
+	if errors.Is(err, ledger.ErrTrackNotFound) {
+		http.Error(w, "no such track", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return
+	}
+	reader, err := lt.Reader(r.Context())
+	if err != nil {
+		h.internalError(w, r, "read track", err)
+		return
+	}
+	info, err := reader.Lookup(r.Context(), target)
+	if errors.Is(err, ledger.ErrGroupNotFound) {
+		http.Error(w, "no such group", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, "look up group", err)
+		return
+	}
+	data, err := reader.ReadGroup(r.Context(), info.ObjectKey)
+	if errors.Is(err, store.ErrNotExist) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, "read record", err)
+		return
+	}
+	var rec Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		h.internalError(w, r, "decode record", err)
+		return
+	}
+	if rec.Redacts != "" {
+		http.Error(w, "a redaction can't be redacted", http.StatusBadRequest)
+		return
+	}
+	redaction, err := json.Marshal(Record{Sender: sender, Redacts: target.String()})
+	if err != nil {
+		h.internalError(w, r, "encode redaction", err)
+		return
+	}
+
+	tr, _, err := h.open(r.Context(), t)
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return
+	}
+	defer h.release(tr)
+	// The redaction is committed before the record is deleted, so a failure
+	// between the two leaves the record in place, and a retry redacts it.
+	tr.mu.Lock()
+	group, err := h.commit(r.Context(), tr, redaction)
+	tr.mu.Unlock()
+	switch {
+	case group.ObjectKey == "":
+		h.internalError(w, r, "append redaction", err)
+		return
+	case err != nil:
+		h.logger.Warn("redaction committed with an error", "method", r.Method, "url", r.URL.Path, "error", err)
+	}
+	if err := h.store.Delete(context.WithoutCancel(r.Context()), info.ObjectKey); err != nil {
+		h.internalError(w, r, "delete redacted record", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, recordResponse{Group: group.ID.String(), Wallclock: group.Wallclock})
 }
 
 // remember keeps the reply to a keyed record, forgetting the oldest key past
@@ -362,10 +464,13 @@ func (tr *track) remember(key string, reply recordResponse) {
 	tr.keys = append(tr.keys, key)
 }
 
-// historyEntry is one record of a history page.
+// historyEntry is one record of a history page. A redacted record keeps its
+// group and wallclock, so pages and their cursors hold, and has no sender or
+// payload.
 type historyEntry struct {
 	Group     string `json:"group"`
 	Wallclock int64  `json:"wallclock"`
+	Redacted  bool   `json:"redacted,omitempty"`
 	Record
 }
 
@@ -424,12 +529,17 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	page := historyResponse{Records: make([]historyEntry, 0, len(groups))}
 	for _, g := range groups {
+		entry := historyEntry{Group: g.ID.String(), Wallclock: g.Wallclock}
 		data, err := reader.ReadGroup(r.Context(), g.ObjectKey)
+		if errors.Is(err, store.ErrNotExist) {
+			entry.Redacted = true
+			page.Records = append(page.Records, entry)
+			continue
+		}
 		if err != nil {
 			h.internalError(w, r, "read record", err)
 			return
 		}
-		entry := historyEntry{Group: g.ID.String(), Wallclock: g.Wallclock}
 		if err := json.Unmarshal(data, &entry.Record); err != nil {
 			h.internalError(w, r, "decode record", err)
 			return

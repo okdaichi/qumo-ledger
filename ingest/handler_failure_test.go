@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -116,6 +117,32 @@ func TestHandler_History_StoreFailures(t *testing.T) {
 			assert.Contains(t, logs.String(), tt.wantLogged)
 		})
 	}
+}
+
+// A redaction whose delete fails is answered 500 and leaves the record in
+// place; a retry, once the store is back, redacts it.
+func TestHandler_Redact_DeleteFails(t *testing.T) {
+	var logs bytes.Buffer
+	objects := &fakeStore{}
+	h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	require.NoError(t, err)
+	posted := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
+	require.Equal(t, http.StatusCreated, posted.Code)
+	var reply recordResponse
+	require.NoError(t, json.Unmarshal(posted.Body.Bytes(), &reply))
+	redact := "/tracks/room/123/chat?group=" + reply.Group
+
+	objects.deleteErr = map[string]error{"/groups/": errors.New("store is down")}
+	failed := serve(h, http.MethodDelete, redact, "")
+	objects.deleteErr = nil
+	kept := serve(h, http.MethodGet, "/tracks/room/123/chat", "")
+	retried := serve(h, http.MethodDelete, redact, "")
+
+	assert.Equal(t, http.StatusInternalServerError, failed.Code)
+	assert.Contains(t, logs.String(), "delete redacted record")
+	assert.Contains(t, kept.Body.String(), `"payload":"hello"`, "the record stays until its delete succeeds")
+	assert.Equal(t, http.StatusCreated, retried.Code)
+	assert.NotContains(t, serve(h, http.MethodGet, "/tracks/room/123/chat", "").Body.String(), `"hello"`)
 }
 
 func TestHandler_History_UndecodableRecord(t *testing.T) {

@@ -369,18 +369,19 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		header []string
 		want   int
 	}{
-		"unknown endpoint":         {method: http.MethodPost, path: "playlist.m3u8", body: `"x"`, want: http.StatusNotFound},
-		"not PUT, POST or GET":     {method: http.MethodDelete, path: chatURL, want: http.StatusMethodNotAllowed},
-		"no track":                 {method: http.MethodPost, path: "tracks/", body: `"x"`, want: http.StatusBadRequest},
-		"no broadcast path":        {method: http.MethodPost, path: "tracks/chat", body: `"x"`, want: http.StatusBadRequest},
-		"a trailing slash":         {method: http.MethodPost, path: "tracks/room/123/chat/", body: `"x"`, want: http.StatusBadRequest},
-		"no body":                  {method: http.MethodPost, path: chatURL, want: http.StatusBadRequest},
-		"body not JSON":            {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusBadRequest},
-		"body two values":          {method: http.MethodPost, path: chatURL, body: "1 2", want: http.StatusBadRequest},
-		"body not UTF-8":           {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
-		"body over the limit":      {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
-		"idempotency key too long": {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
-		"history of no track":      {method: http.MethodGet, path: chatURL, want: http.StatusNotFound},
+		"unknown endpoint":             {method: http.MethodPost, path: "playlist.m3u8", body: `"x"`, want: http.StatusNotFound},
+		"not PUT, POST, GET or DELETE": {method: http.MethodPatch, path: chatURL, want: http.StatusMethodNotAllowed},
+		"redacting in no track":        {method: http.MethodDelete, path: chatURL + "?group=e000001-g00000000", want: http.StatusNotFound},
+		"no track":                     {method: http.MethodPost, path: "tracks/", body: `"x"`, want: http.StatusBadRequest},
+		"no broadcast path":            {method: http.MethodPost, path: "tracks/chat", body: `"x"`, want: http.StatusBadRequest},
+		"a trailing slash":             {method: http.MethodPost, path: "tracks/room/123/chat/", body: `"x"`, want: http.StatusBadRequest},
+		"no body":                      {method: http.MethodPost, path: chatURL, want: http.StatusBadRequest},
+		"body not JSON":                {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusBadRequest},
+		"body two values":              {method: http.MethodPost, path: chatURL, body: "1 2", want: http.StatusBadRequest},
+		"body not UTF-8":               {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
+		"body over the limit":          {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
+		"idempotency key too long":     {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
+		"history of no track":          {method: http.MethodGet, path: chatURL, want: http.StatusNotFound},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

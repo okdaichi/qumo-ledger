@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ingest:** Redaction. `DELETE /tracks/{broadcast path}/{track name}?group=<id>` takes one record out of a track.
+  - The handler commits a redaction, `{"sender": …, "redacts": "<id>"}` with no payload. It reaches `OnRecord` like any record, so live subscribers learn of it. Then the handler deletes the group's object from the store.
+  - History answers a redacted group with its `group`, its `wallclock` and `"redacted": true`, and no sender or payload, so pages and cursors hold.
+  - The redaction is committed first, so a failed delete leaves the record in place and a retry redacts it. A group already redacted is answered `204` and commits nothing, and a redaction can't be redacted (`400`). An unknown track or group is `404`.
+  - `Options.Authorize` decides it as the new `ingest.Redact` access.
+  - `Record` gains `Redacts`, and its `Payload` is omitted when empty.
+
 ## [0.2.2] - 2026-10-09
 
 ### Fixed
