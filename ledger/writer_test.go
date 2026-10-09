@@ -319,6 +319,29 @@ func TestWriter_NewEpoch_OrderingResets(t *testing.T) {
 
 // NewEpoch persists a new epoch that survives a reopen, and a reused sequence
 // under it lands in a fresh keyspace.
+// A GroupID holds 24 bits of epoch. One more lifetime than that cannot be
+// stamped onto a group without wrapping to an earlier epoch, so it is refused
+// and the writer stays where it was.
+func TestWriter_NewEpoch_Exhausted(t *testing.T) {
+	objects := mem.New()
+	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
+	require.NoError(t, err)
+	w, err := track.Writer(t.Context())
+	require.NoError(t, err)
+
+	// Reaching the last epoch for real would take sixteen million restarts.
+	w.epoch = maxGroupEpoch
+
+	err = w.NewEpoch(t.Context())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "exceeds 24 bits")
+	assert.Equal(t, maxGroupEpoch, w.Epoch(), "a refused epoch must not advance the writer")
+
+	reopened, err := Open(t.Context(), objects, testTrack, Config{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), reopened.LatestEpoch(), "nothing of the refused epoch reaches the store")
+}
+
 func TestWriter_NewEpoch(t *testing.T) {
 	objects := mem.New()
 	track, err := Create(t.Context(), objects, testTrack, testSchema(t), Config{})
@@ -425,8 +448,8 @@ func TestWriter_Seal(t *testing.T) {
 // ErrExist, publish a root summary describing groups the object does not hold,
 // and then reclaim the deltas that were their only other copy.
 func TestWriter_Seal_RetryAfterFailedRootUpdate(t *testing.T) {
-	objects := &FakeStore{
-		SwapErrOnce: map[string]error{epochLogKey(testTrack, 1): errors.New("transient failure")},
+	objects := &fakeStore{
+		swapErrOnce: map[string]error{epochLogKey(testTrack, 1): errors.New("transient failure")},
 	}
 
 	w := newWriter(t, objects, Config{})
@@ -559,7 +582,7 @@ func TestOpen_TrackNotFound(t *testing.T) {
 // group committed and the call successful.
 func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack, 1): headFailure}}
+	objects := &fakeStore{swapErr: map[string]error{headKey(testTrack, 1): headFailure}}
 
 	w := newWriter(t, objects, Config{})
 
@@ -578,7 +601,7 @@ func TestWriter_AppendGroup_HeadFailureDoesNotFailCommit(t *testing.T) {
 // test.
 func TestWriter_publishHead(t *testing.T) {
 	headFailure := errors.New("head unavailable")
-	objects := &FakeStore{SwapErr: map[string]error{headKey(testTrack, 1): headFailure}}
+	objects := &fakeStore{swapErr: map[string]error{headKey(testTrack, 1): headFailure}}
 
 	w := newWriter(t, objects, Config{})
 
@@ -594,14 +617,14 @@ func TestWriter_publishHead(t *testing.T) {
 // orphaned object that no reader can see — recoverable. The reverse order would
 // leave a manifest pointing at nothing.
 func TestWriter_AppendGroup_CommitOrder(t *testing.T) {
-	objects := &FakeStore{}
+	objects := &fakeStore{}
 
 	w := newWriter(t, objects, Config{})
 
 	meta, err := w.AppendGroup(t.Context(), testGroup(t, 0), []byte("payload"))
 	require.NoError(t, err)
 
-	_, creates, _, _ := objects.Calls()
+	_, creates, _, _ := objects.calls()
 	payloadIndex := indexOf(creates, meta.ObjectKey)
 	deltaIndex := indexOf(creates, deltaKey(testTrack, 1, 0))
 

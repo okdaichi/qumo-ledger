@@ -30,6 +30,11 @@ const (
 	// is the epoch.
 	groupSeqBits = 40
 	groupSeqMask = (uint64(1) << groupSeqBits) - 1
+
+	// groupEpochBits is what the sequence leaves of the 64, and maxGroupEpoch
+	// the largest epoch that fits it.
+	groupEpochBits = 64 - groupSeqBits
+	maxGroupEpoch  = (uint64(1) << groupEpochBits) - 1
 )
 
 // NewGroupID composes an ID from its epoch and sequence. The common case does
@@ -37,8 +42,11 @@ const (
 // rows it yields. It is for the moments a caller does build one — most often as
 // input to [Writer.AppendGroup], where passing NewGroupID(0, sequence) supplies
 // the producer's own sequence and leaves the epoch for the writer to stamp.
+//
+// Each part keeps only the bits its field holds — 24 for the epoch, 40 for the
+// sequence — so a value too wide for one field never spills into the other.
 func NewGroupID(epoch, sequence uint64) GroupID {
-	return GroupID(epoch<<groupSeqBits | sequence)
+	return GroupID(epoch<<groupSeqBits | sequence&groupSeqMask)
 }
 
 // Epoch returns the producer lifetime the group belongs to.
@@ -87,6 +95,11 @@ func ParseGroupID(s string) (GroupID, error) {
 	sequence, err := strconv.ParseUint(seqText, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("ledger: malformed group id %q: %w", s, err)
+	}
+	// Checked rather than left to NewGroupID, which would drop the high bits and
+	// hand back the ID of a different, earlier group.
+	if epoch > maxGroupEpoch {
+		return 0, fmt.Errorf("ledger: malformed group id %q: epoch %d exceeds %d bits", s, epoch, groupEpochBits)
 	}
 	if sequence > groupSeqMask {
 		return 0, fmt.Errorf("ledger: malformed group id %q: sequence %d exceeds %d bits", s, sequence, groupSeqBits)

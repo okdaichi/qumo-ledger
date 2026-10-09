@@ -161,19 +161,6 @@ func (w *Writer) Track() TrackPath { return w.path }
 // advances when [Writer.NewEpoch] begins a new lifetime.
 func (w *Writer) Epoch() uint64 { return w.epoch }
 
-// logRootCopy returns a defensive copy of the current epoch log root. Internal
-// callers and tests need the full root — its sealed index and open region —
-// which the projection [Writer.Root] hides.
-func (w *Writer) logRootCopy() epochLogRoot {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	root := w.logRoot
-	root.Sealed = append([]sealedRef(nil), w.logRoot.Sealed...)
-
-	return root
-}
-
 // Root returns the track's read-side metadata. For a writer it is a projection
 // of the schema and the epoch being written; how the history is laid out on
 // disk is not part of the public API. See [TrackInfo].
@@ -385,6 +372,11 @@ func (w *Writer) NewEpoch(ctx context.Context) error {
 	defer w.mu.Unlock()
 
 	next := w.epoch + 1
+	// A GroupID has no room for a larger epoch: stamped onto a group it would
+	// wrap to an earlier one and break the track's ordering.
+	if next > maxGroupEpoch {
+		return fmt.Errorf("ledger: begin epoch %d of %s: epoch exceeds %d bits", next, w.path, groupEpochBits)
+	}
 	if err := w.track.createEpochLog(ctx, next); err != nil {
 		return fmt.Errorf("ledger: begin epoch %d of %s: %w", next, w.path, err)
 	}
