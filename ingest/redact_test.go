@@ -37,7 +37,7 @@ func TestHandler_Redact(t *testing.T) {
 		delivered []string
 		accesses  []ingest.Access
 	)
-	h := newHandler(t, mem.New(), ingest.Options{
+	h := chatHandler(t, mem.New(), ingest.Options{
 		Authorize: func(r *http.Request, _ ingest.Track, access ingest.Access) (string, error) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -72,7 +72,7 @@ func TestHandler_Redact(t *testing.T) {
 
 func TestHandler_Redact_Twice(t *testing.T) {
 	s := mem.New()
-	h := newHandler(t, s, ingest.Options{})
+	h := chatHandler(t, s, ingest.Options{})
 	hello := posted(t, h, `"hello"`)
 	require.Equal(t, http.StatusCreated, redact(h, hello))
 
@@ -81,7 +81,7 @@ func TestHandler_Redact_Twice(t *testing.T) {
 }
 
 func TestHandler_Redact_Concurrent(t *testing.T) {
-	h := newHandler(t, mem.New(), ingest.Options{})
+	h := chatHandler(t, mem.New(), ingest.Options{})
 	hello := posted(t, h, `"hello"`)
 
 	const n = 8
@@ -102,7 +102,7 @@ func TestHandler_Redact_Concurrent(t *testing.T) {
 }
 
 func TestHandler_Redact_Refused(t *testing.T) {
-	h := newHandler(t, mem.New(), ingest.Options{})
+	h := chatHandler(t, mem.New(), ingest.Options{})
 	hello := posted(t, h, `"hello"`)
 	redaction := func() string {
 		rr := send(h, http.MethodDelete, chatURL+"?group="+hello, "")
@@ -134,7 +134,7 @@ func TestHandler_Redact_Refused(t *testing.T) {
 
 func TestHandler_Redact_Unauthorized(t *testing.T) {
 	errNotYours := errors.New("not yours")
-	h := newHandler(t, mem.New(), ingest.Options{
+	h := chatHandler(t, mem.New(), ingest.Options{
 		Authorize: func(_ *http.Request, _ ingest.Track, access ingest.Access) (string, error) {
 			if access == ingest.Redact {
 				return "", errNotYours

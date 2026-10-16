@@ -20,11 +20,12 @@
 //
 // Each group stores a [Record]: the payload as it was sent, and the sender
 // [Options.Authorize] named for the request, so who sent a record comes from
-// its credential rather than from what it says. A record creates its track when
-// the track does not exist; PUT to the track creates it ahead of its first
-// record. Requests are routed by the URL, so a request is resolved and
-// authorized before its body is read. Any number of senders record into one
-// track, and the track's commit order is their order.
+// its credential rather than from what it says. PUT to the track creates it:
+// a record into a track that does not exist is answered 404 Not Found, so
+// whoever may send records can't make tracks. Requests are routed by the URL,
+// so a request is resolved and authorized before its body is read. Any number
+// of senders record into one track, and the track's commit order is their
+// order.
 //
 // # History
 //
@@ -80,7 +81,7 @@
 // # Hooks
 //
 // The handler authorizes nothing and delivers nothing by itself.
-// [Options.Authorize] decides every request, for a [Write], a [Read] or a [Redact], and
+// [Options.Authorize] decides every request, for a [Create], a [Write], a [Read] or a [Redact], and
 // names a write's sender. [Options.OnOpen] observes a track the handler starts
 // writing to, and [Options.OnRecord] what was committed, which is where a
 // caller forwards a record to live subscribers.

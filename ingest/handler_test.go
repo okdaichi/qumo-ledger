@@ -34,6 +34,25 @@ func newHandler(tb testing.TB, s store.Store, opts ingest.Options) http.Handler 
 	return http.StripPrefix("/ingest", h)
 }
 
+// chatHandler is newHandler over s with the chat track created.
+func chatHandler(tb testing.TB, s store.Store, opts ingest.Options) http.Handler {
+	tb.Helper()
+	create(tb, s, chatURL)
+	return newHandler(tb, s, opts)
+}
+
+// create creates the tracks at paths in s, as an app does ahead of their
+// records.
+func create(tb testing.TB, s store.Store, paths ...string) {
+	tb.Helper()
+	h, err := ingest.NewHandler(s, ingest.Options{})
+	require.NoError(tb, err)
+	for _, path := range paths {
+		rr := send(http.StripPrefix("/ingest", h), http.MethodPut, path, "")
+		require.Contains(tb, []int{http.StatusCreated, http.StatusNoContent}, rr.Code, rr.Body.String())
+	}
+}
+
 // send sends body to the handler at path, below its mount point, with the
 // given headers as name-value pairs.
 func send(h http.Handler, method, path, body string, header ...string) *httptest.ResponseRecorder {
@@ -140,7 +159,7 @@ func TestHandler_Create_ExistingTrackInAnotherHandler(t *testing.T) {
 func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 	s := mem.New()
 	var opened []ingest.Track
-	h := newHandler(t, s, ingest.Options{
+	h := chatHandler(t, s, ingest.Options{
 		OnOpen: func(_ context.Context, tr ingest.Track) { opened = append(opened, tr) },
 	})
 
@@ -169,7 +188,7 @@ func TestHandler_Record_StoresThePayloadInCommitOrder(t *testing.T) {
 func TestHandler_Record_CarriesTheSenderAuthorizeNames(t *testing.T) {
 	s := mem.New()
 	var delivered []string
-	h := newHandler(t, s, ingest.Options{
+	h := chatHandler(t, s, ingest.Options{
 		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
 			return r.Header.Get("X-Sender"), nil
 		},
@@ -193,7 +212,8 @@ func TestHandler_Record_CarriesTheSenderAuthorizeNames(t *testing.T) {
 
 func TestHandler_Record_TracksAreSeparate(t *testing.T) {
 	s := mem.New()
-	h := newHandler(t, s, ingest.Options{})
+	create(t, s, "tracks/room/123/reactions", "tracks/room/9/chat")
+	h := chatHandler(t, s, ingest.Options{})
 
 	require.Equal(t, http.StatusCreated, record(h, `"chat"`).Code)
 	require.Equal(t, http.StatusCreated, send(h, http.MethodPost, "tracks/room/123/reactions", `"like"`).Code)
@@ -205,7 +225,8 @@ func TestHandler_Record_TracksAreSeparate(t *testing.T) {
 func TestHandler_Record_IdempotencyKey(t *testing.T) {
 	s := mem.New()
 	var delivered int
-	h := newHandler(t, s, ingest.Options{
+	create(t, s, "tracks/room/9/chat")
+	h := chatHandler(t, s, ingest.Options{
 		OnRecord: func(context.Context, ingest.Track, ledger.GroupInfo, []byte) { delivered++ },
 	})
 
@@ -227,7 +248,7 @@ func TestHandler_Record_IdempotencyKey(t *testing.T) {
 
 func TestHandler_Record_IdempotencyKeyIsTheSenders(t *testing.T) {
 	s := mem.New()
-	h := newHandler(t, s, ingest.Options{
+	h := chatHandler(t, s, ingest.Options{
 		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
 			return r.Header.Get("X-Sender"), nil
 		},
@@ -249,7 +270,7 @@ func TestHandler_Record_IdempotencyKeyIsTheSenders(t *testing.T) {
 
 func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
 	s := mem.New()
-	h := newHandler(t, s, ingest.Options{})
+	h := chatHandler(t, s, ingest.Options{})
 	const remembered = 1024
 
 	for i := range remembered + 1 {
@@ -265,7 +286,7 @@ func TestHandler_Record_IdempotencyKeysAreBounded(t *testing.T) {
 
 func TestHandler_Record_ConcurrentSendersAllCommit(t *testing.T) {
 	s := mem.New()
-	h := newHandler(t, s, ingest.Options{})
+	h := chatHandler(t, s, ingest.Options{})
 	const senders, each = 8, 10
 
 	var wg sync.WaitGroup
@@ -298,7 +319,7 @@ func TestHandler_OnRecord_SeesCommittedRecordsInOrder(t *testing.T) {
 		record string
 	}
 	var seen []delivery
-	h := newHandler(t, mem.New(), ingest.Options{
+	h := chatHandler(t, mem.New(), ingest.Options{
 		OnRecord: func(_ context.Context, tr ingest.Track, g ledger.GroupInfo, rec []byte) {
 			seen = append(seen, delivery{track: tr, group: g, record: string(rec)})
 		},
@@ -323,7 +344,7 @@ func TestHandler_Authorize(t *testing.T) {
 	}
 	var asked []ask
 	allowed := true
-	h := newHandler(t, s, ingest.Options{
+	h := chatHandler(t, s, ingest.Options{
 		Authorize: func(r *http.Request, tr ingest.Track, access ingest.Access) (string, error) {
 			asked = append(asked, ask{track: tr, access: access})
 			switch {
@@ -355,10 +376,25 @@ func TestHandler_Authorize(t *testing.T) {
 
 	assert.Equal(t, []string{`"signed"`}, payloads(stored(t, s)), "a refused request creates and stores nothing")
 	assert.Equal(t, []ask{
-		{chat, ingest.Write}, {chat, ingest.Write}, {chat, ingest.Read},
-		{chat, ingest.Write}, {chat, ingest.Write}, {chat, ingest.Read},
+		{chat, ingest.Write}, {chat, ingest.Create}, {chat, ingest.Read},
+		{chat, ingest.Write}, {chat, ingest.Create}, {chat, ingest.Read},
 		{chat, ingest.Write}, {chat, ingest.Read},
-	}, asked, "records and creates are writes, history is a read")
+	}, asked, "a record is a write, PUT a create, history a read")
+}
+
+func TestHandler_Record_IntoNoTrack(t *testing.T) {
+	s := mem.New()
+	var opened int
+	h := newHandler(t, s, ingest.Options{
+		OnOpen: func(context.Context, ingest.Track) { opened++ },
+	})
+
+	rr := record(h, `"hello"`)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	_, err := ledger.Open(t.Context(), s, chatTrack, ledger.Config{})
+	assert.ErrorIs(t, err, ledger.ErrTrackNotFound, "a record makes no track")
+	assert.Zero(t, opened)
 }
 
 func TestHandler_RejectsUnusableRequests(t *testing.T) {
@@ -367,6 +403,8 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		path   string
 		body   string
 		header []string
+		// exists creates the chat track first, so the body is what is wrong.
+		exists bool
 		want   int
 	}{
 		"unknown endpoint":             {method: http.MethodPost, path: "playlist.m3u8", body: `"x"`, want: http.StatusNotFound},
@@ -375,25 +413,31 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		"no track":                     {method: http.MethodPost, path: "tracks/", body: `"x"`, want: http.StatusBadRequest},
 		"no broadcast path":            {method: http.MethodPost, path: "tracks/chat", body: `"x"`, want: http.StatusBadRequest},
 		"a trailing slash":             {method: http.MethodPost, path: "tracks/room/123/chat/", body: `"x"`, want: http.StatusBadRequest},
-		"no body":                      {method: http.MethodPost, path: chatURL, want: http.StatusBadRequest},
-		"body not JSON":                {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusBadRequest},
-		"body two values":              {method: http.MethodPost, path: chatURL, body: "1 2", want: http.StatusBadRequest},
-		"body not UTF-8":               {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
-		"body over the limit":          {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
-		"idempotency key too long":     {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
+		"no body":                      {method: http.MethodPost, path: chatURL, exists: true, want: http.StatusBadRequest},
+		"body not JSON":                {method: http.MethodPost, path: chatURL, body: "hello", exists: true, want: http.StatusBadRequest},
+		"body two values":              {method: http.MethodPost, path: chatURL, body: "1 2", exists: true, want: http.StatusBadRequest},
+		"body not UTF-8":               {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", exists: true, want: http.StatusBadRequest},
+		"body over the limit":          {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, exists: true, want: http.StatusRequestEntityTooLarge},
+		"idempotency key too long":     {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, exists: true, want: http.StatusBadRequest},
 		"history of no track":          {method: http.MethodGet, path: chatURL, want: http.StatusNotFound},
+		"a bad body into no track":     {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusNotFound},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := mem.New()
+			if tt.exists {
+				create(t, s, chatURL)
+			}
 			h := newHandler(t, s, ingest.Options{MaxBodyBytes: 128})
 
 			rr := send(h, tt.method, tt.path, tt.body, tt.header...)
 
 			assert.Equal(t, tt.want, rr.Code)
 			assert.Empty(t, stored(t, s))
-			_, err := ledger.Open(context.Background(), s, chatTrack, ledger.Config{})
-			assert.ErrorIs(t, err, ledger.ErrTrackNotFound, "an unusable request creates no track")
+			if !tt.exists {
+				_, err := ledger.Open(context.Background(), s, chatTrack, ledger.Config{})
+				assert.ErrorIs(t, err, ledger.ErrTrackNotFound, "an unusable request creates no track")
+			}
 		})
 	}
 }
