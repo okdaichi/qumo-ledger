@@ -46,11 +46,14 @@ func TestHandler_IdleTracksAreClosedAndReopened(t *testing.T) {
 func TestHandler_CloseIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const idle = time.Minute
-		h, err := NewHandler(mem.New(), Options{TrackIdleTimeout: idle})
+		objects := mem.New()
+		createTrack(t, objects, "/tracks/room/1/chat")
+		createTrack(t, objects, "/tracks/room/2/chat")
+		h, err := NewHandler(objects, Options{TrackIdleTimeout: idle})
 		require.NoError(t, err)
-		held, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/1", TrackName: "chat"}, true)
+		held, err := h.open(t.Context(), Track{BroadcastPath: "/room/1", TrackName: "chat"})
 		require.NoError(t, err)
-		quiet, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/2", TrackName: "chat"}, true)
+		quiet, err := h.open(t.Context(), Track{BroadcastPath: "/room/2", TrackName: "chat"})
 		require.NoError(t, err)
 		h.release(quiet)
 
@@ -77,12 +80,14 @@ func TestHandler_CloseIdle(t *testing.T) {
 func TestHandler_CloseIdle_AtMostEveryHalfTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const idle = time.Minute
-		h, err := NewHandler(mem.New(), Options{TrackIdleTimeout: idle})
+		objects := mem.New()
+		createTrack(t, objects, "/tracks/room/1/chat")
+		h, err := NewHandler(objects, Options{TrackIdleTimeout: idle})
 		require.NoError(t, err)
 		h.mu.Lock()
 		h.closeIdle(time.Now())
 		h.mu.Unlock()
-		tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/1", TrackName: "chat"}, true)
+		tr, err := h.open(t.Context(), Track{BroadcastPath: "/room/1", TrackName: "chat"})
 		require.NoError(t, err)
 		h.release(tr)
 

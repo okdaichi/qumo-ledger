@@ -403,6 +403,8 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		path   string
 		body   string
 		header []string
+		// exists creates the chat track first, so the body is what is wrong.
+		exists bool
 		want   int
 	}{
 		"unknown endpoint":             {method: http.MethodPost, path: "playlist.m3u8", body: `"x"`, want: http.StatusNotFound},
@@ -411,25 +413,31 @@ func TestHandler_RejectsUnusableRequests(t *testing.T) {
 		"no track":                     {method: http.MethodPost, path: "tracks/", body: `"x"`, want: http.StatusBadRequest},
 		"no broadcast path":            {method: http.MethodPost, path: "tracks/chat", body: `"x"`, want: http.StatusBadRequest},
 		"a trailing slash":             {method: http.MethodPost, path: "tracks/room/123/chat/", body: `"x"`, want: http.StatusBadRequest},
-		"no body":                      {method: http.MethodPost, path: chatURL, want: http.StatusBadRequest},
-		"body not JSON":                {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusBadRequest},
-		"body two values":              {method: http.MethodPost, path: chatURL, body: "1 2", want: http.StatusBadRequest},
-		"body not UTF-8":               {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", want: http.StatusBadRequest},
-		"body over the limit":          {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, want: http.StatusRequestEntityTooLarge},
-		"idempotency key too long":     {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, want: http.StatusBadRequest},
+		"no body":                      {method: http.MethodPost, path: chatURL, exists: true, want: http.StatusBadRequest},
+		"body not JSON":                {method: http.MethodPost, path: chatURL, body: "hello", exists: true, want: http.StatusBadRequest},
+		"body two values":              {method: http.MethodPost, path: chatURL, body: "1 2", exists: true, want: http.StatusBadRequest},
+		"body not UTF-8":               {method: http.MethodPost, path: chatURL, body: "\"\x82\xb1\x82\xf1\"", exists: true, want: http.StatusBadRequest},
+		"body over the limit":          {method: http.MethodPost, path: chatURL, body: `"` + strings.Repeat("a", 200) + `"`, exists: true, want: http.StatusRequestEntityTooLarge},
+		"idempotency key too long":     {method: http.MethodPost, path: chatURL, body: `"x"`, header: []string{"Idempotency-Key", strings.Repeat("k", 256)}, exists: true, want: http.StatusBadRequest},
 		"history of no track":          {method: http.MethodGet, path: chatURL, want: http.StatusNotFound},
+		"a bad body into no track":     {method: http.MethodPost, path: chatURL, body: "hello", want: http.StatusNotFound},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := mem.New()
+			if tt.exists {
+				create(t, s, chatURL)
+			}
 			h := newHandler(t, s, ingest.Options{MaxBodyBytes: 128})
 
 			rr := send(h, tt.method, tt.path, tt.body, tt.header...)
 
 			assert.Equal(t, tt.want, rr.Code)
 			assert.Empty(t, stored(t, s))
-			_, err := ledger.Open(context.Background(), s, chatTrack, ledger.Config{})
-			assert.ErrorIs(t, err, ledger.ErrTrackNotFound, "an unusable request creates no track")
+			if !tt.exists {
+				_, err := ledger.Open(context.Background(), s, chatTrack, ledger.Config{})
+				assert.ErrorIs(t, err, ledger.ErrTrackNotFound, "an unusable request creates no track")
+			}
 		})
 	}
 }

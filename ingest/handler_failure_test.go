@@ -47,7 +47,7 @@ func TestHandler_StoreFailures(t *testing.T) {
 			createErr:  map[string]error{"root.manifest": errDown},
 			wantCreate: http.StatusInternalServerError,
 			wantRecord: http.StatusNotFound,
-			wantLogged: "open track",
+			wantLogged: "create track",
 		},
 		"record cannot store its group": {
 			createErr:  map[string]error{"/groups/": errDown},
@@ -100,6 +100,22 @@ func TestHandler_StoreFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A record whose track can't be read for a store failure is answered 500, not
+// as a track that does not exist.
+func TestHandler_Record_OpenFails(t *testing.T) {
+	var logs bytes.Buffer
+	objects := &fakeStore{}
+	createTrack(t, objects, "/tracks/room/123/chat")
+	h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	require.NoError(t, err)
+	objects.getErr = map[string]error{"root.manifest": errors.New("store is down")}
+
+	rr := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
+
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Contains(t, logs.String(), "open track")
 }
 
 func TestHandler_History_StoreFailures(t *testing.T) {
@@ -188,9 +204,10 @@ func TestHandler_History_LostRecordIsNotRedacted(t *testing.T) {
 
 func TestHandler_History_UndecodableRecord(t *testing.T) {
 	objects := mem.New()
+	createTrack(t, objects, "/tracks/room/123/chat")
 	h, err := NewHandler(objects, Options{})
 	require.NoError(t, err)
-	tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"}, true)
+	tr, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"})
 	require.NoError(t, err)
 	_, err = tr.writer.Append(t.Context(), 0, []byte(`not a record`))
 	require.NoError(t, err)

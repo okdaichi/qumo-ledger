@@ -22,9 +22,10 @@
 // [Options.Authorize] named for the request, so who sent a record comes from
 // its credential rather than from what it says. PUT to the track creates it:
 // a record into a track that does not exist is answered 404 Not Found, so
-// whoever may send records can't make tracks. Requests are routed by the URL, so a request is resolved and
-// authorized before its body is read. Any number of senders record into one
-// track, and the track's commit order is their order.
+// whoever may send records can't make tracks. Requests are routed by the URL,
+// so a request is resolved and authorized before its body is read. Any number
+// of senders record into one track, and the track's commit order is their
+// order.
 //
 // # History
 //

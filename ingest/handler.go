@@ -115,8 +115,10 @@ type Limit struct {
 
 // Options configures a [Handler]. The zero value accepts every request.
 type Options struct {
-	// Authorize decides whether a request may have access to a track, and for
-	// a write names its sender, which every record it makes carries. A
+	// Authorize decides whether a request may have access to a track: to
+	// [Create] it, [Write] records into it, [Read] its history or [Redact] a
+	// record of it. For a write or a redaction it names the sender, which
+	// every record it makes carries; for the others the sender is unused. A
 	// non-nil error refuses the request with 403 Forbidden, or 401
 	// Unauthorized when it is [ErrUnauthenticated]. Nil allows every request,
 	// with no sender.
@@ -254,7 +256,19 @@ func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tr, created, err := h.open(r.Context(), t, true)
+	_, err := ledger.Create(r.Context(), h.store, t.Path(), ledger.TrackSchema{
+		Timescale:  timescale,
+		TimeSource: ledger.TimeSourceIngest,
+		MIME:       MIME,
+		Encoding:   Encoding,
+	}, h.opts.Config)
+	created := err == nil
+	if err != nil && !errors.Is(err, ledger.ErrTrackExists) {
+		h.internalError(w, r, "create track", err)
+		return
+	}
+	// Opening the track announces it to OnOpen ahead of its first record.
+	tr, err := h.open(r.Context(), t)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
@@ -276,8 +290,8 @@ type recordResponse struct {
 }
 
 // serveRecord appends the body to the request's track as one group and answers
-// once it is committed. The track is resolved and authorized before the body
-// is read.
+// once it is committed. The track is resolved, authorized and opened before
+// the body is read.
 func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 	t, sender, ok := h.resolve(w, r, Write)
 	if !ok {
@@ -288,6 +302,16 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Idempotency-Key is too long", http.StatusBadRequest)
 		return
 	}
+	tr, err := h.open(r.Context(), t)
+	if errors.Is(err, ledger.ErrTrackNotFound) {
+		http.Error(w, "no such track", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, "open track", err)
+		return
+	}
+	defer h.release(tr)
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBody))
 	if err != nil {
 		badBody(w, err)
@@ -304,17 +328,6 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "encode record", err)
 		return
 	}
-	tr, _, err := h.open(r.Context(), t, false)
-	if errors.Is(err, ledger.ErrTrackNotFound) {
-		http.Error(w, "no such track", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		h.internalError(w, r, "open track", err)
-		return
-	}
-	defer h.release(tr)
-
 	// A key is its sender's: two senders that happen to choose the same key
 	// do not answer each other's records.
 	if key != "" {
@@ -403,7 +416,7 @@ func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tr, _, err := h.open(r.Context(), t, false)
+	tr, err := h.open(r.Context(), t)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
@@ -617,12 +630,11 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request, access Access)
 	return Track{}, "", false
 }
 
-// open returns the track's writer. With create it creates the track when it
-// does not exist and reports whether it did; without, a track that does not
-// exist is [ledger.ErrTrackNotFound]. The caller holds the track until it calls
+// open returns the track's writer; a track that does not exist is
+// [ledger.ErrTrackNotFound]. The caller holds the track until it calls
 // release. Opening reads the store, so it runs without h.mu; when two requests
 // open the same track at once, the first to finish is kept.
-func (h *Handler) open(ctx context.Context, t Track, create bool) (*track, bool, error) {
+func (h *Handler) open(ctx context.Context, t Track) (*track, error) {
 	key := t.Path()
 	h.mu.Lock()
 	h.closeIdle(time.Now())
@@ -632,38 +644,23 @@ func (h *Handler) open(ctx context.Context, t Track, create bool) (*track, bool,
 	}
 	h.mu.Unlock()
 	if ok {
-		return tr, false, nil
+		return tr, nil
 	}
 
-	created := false
-	if create {
-		_, err := ledger.Create(ctx, h.store, key, ledger.TrackSchema{
-			Timescale:  timescale,
-			TimeSource: ledger.TimeSourceIngest,
-			MIME:       MIME,
-			Encoding:   Encoding,
-		}, h.opts.Config)
-		switch {
-		case err == nil:
-			created = true
-		case !errors.Is(err, ledger.ErrTrackExists):
-			return nil, false, err
-		}
-	}
 	lt, err := ledger.Open(ctx, h.store, key, h.opts.Config)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	writer, err := lt.Writer(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("ingest: open writer of %s: %w", key, err)
+		return nil, fmt.Errorf("ingest: open writer of %s: %w", key, err)
 	}
 
 	h.mu.Lock()
 	if tr, ok := h.tracks[key]; ok {
 		tr.users++
 		h.mu.Unlock()
-		return tr, false, nil
+		return tr, nil
 	}
 	tr = &track{Track: t, writer: writer, users: 1}
 	// Holding the new track until OnOpen returns keeps the requests that find
@@ -675,7 +672,7 @@ func (h *Handler) open(ctx context.Context, t Track, create bool) (*track, bool,
 	if h.opts.OnOpen != nil {
 		h.opts.OnOpen(ctx, t)
 	}
-	return tr, created, nil
+	return tr, nil
 }
 
 // release lets go of a track open returned.
