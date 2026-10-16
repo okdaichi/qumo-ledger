@@ -45,7 +45,7 @@ func (p historyPage) payloads() []string {
 }
 
 func TestHandler_History_PagesBackwards(t *testing.T) {
-	h := newHandler(t, mem.New(), ingest.Options{})
+	h := chatHandler(t, mem.New(), ingest.Options{})
 	for i := range 5 {
 		require.Equal(t, http.StatusCreated, record(h, fmt.Sprintf("%d", i)).Code)
 	}
@@ -65,7 +65,7 @@ func TestHandler_History_PagesBackwards(t *testing.T) {
 }
 
 func TestHandler_History_DefaultPageAndSenders(t *testing.T) {
-	h := newHandler(t, mem.New(), ingest.Options{
+	h := chatHandler(t, mem.New(), ingest.Options{
 		Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
 			return r.Header.Get("X-Sender"), nil
 		},
@@ -95,7 +95,7 @@ func TestHandler_History_EmptyTrack(t *testing.T) {
 }
 
 func TestHandler_History_RejectsUnusableQueries(t *testing.T) {
-	h := newHandler(t, mem.New(), ingest.Options{})
+	h := chatHandler(t, mem.New(), ingest.Options{})
 	require.Equal(t, http.StatusCreated, record(h, `"x"`).Code)
 
 	for name, query := range map[string]string{
@@ -113,7 +113,7 @@ func TestHandler_History_RejectsUnusableQueries(t *testing.T) {
 func TestHandler_Limits(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := mem.New()
-		h := newHandler(t, s, ingest.Options{
+		h := chatHandler(t, s, ingest.Options{
 			Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
 				return r.Header.Get("X-Sender"), nil
 			},
@@ -148,7 +148,7 @@ func TestHandler_Limits(t *testing.T) {
 
 func TestHandler_Limits_SystemRecordsCountOnlyTowardTheTrack(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newHandler(t, mem.New(), ingest.Options{
+		h := chatHandler(t, mem.New(), ingest.Options{
 			SenderLimit: ingest.Limit{Rate: 1, Burst: 1},
 			TrackLimit:  ingest.Limit{Rate: 1, Burst: 3},
 		})
@@ -162,7 +162,7 @@ func TestHandler_Limits_SystemRecordsCountOnlyTowardTheTrack(t *testing.T) {
 
 func TestHandler_Limits_RetryDoesNotSpend(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newHandler(t, mem.New(), ingest.Options{TrackLimit: ingest.Limit{Rate: 1, Burst: 1}})
+		h := chatHandler(t, mem.New(), ingest.Options{TrackLimit: ingest.Limit{Rate: 1, Burst: 1}})
 
 		assert.Equal(t, http.StatusCreated, record(h, `"x"`, "Idempotency-Key", "k").Code)
 		assert.Equal(t, http.StatusCreated, record(h, `"x"`, "Idempotency-Key", "k").Code,
@@ -173,7 +173,7 @@ func TestHandler_Limits_RetryDoesNotSpend(t *testing.T) {
 
 func TestHandler_Limits_ForgetRefilledSenders(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newHandler(t, mem.New(), ingest.Options{
+		h := chatHandler(t, mem.New(), ingest.Options{
 			Authorize: func(r *http.Request, _ ingest.Track, _ ingest.Access) (string, error) {
 				return r.Header.Get("X-Sender"), nil
 			},

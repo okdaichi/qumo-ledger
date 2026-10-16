@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **ingest:** Only `PUT` creates a track. A record into a track that does not exist is answered `404`, so whoever may send records can't make tracks.
+  - `PUT` is authorized as the new `Create` access; `Write` now means recording into a track that exists.
+
 ## [0.3.0] - 2026-10-10
 
 ### Added

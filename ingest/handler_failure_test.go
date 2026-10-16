@@ -12,10 +12,21 @@ import (
 	"testing"
 
 	"github.com/okdaichi/qumo-ledger/ledger"
+	"github.com/okdaichi/qumo-ledger/ledger/store"
 	"github.com/okdaichi/qumo-ledger/ledger/store/mem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// createTrack creates the track at target in s, as an app does ahead of its
+// records.
+func createTrack(tb testing.TB, s store.Store, target string) {
+	tb.Helper()
+	h, err := NewHandler(s, Options{})
+	require.NoError(tb, err)
+	rr := serve(h, http.MethodPut, target, "")
+	require.Contains(tb, []int{http.StatusCreated, http.StatusNoContent}, rr.Code, rr.Body.String())
+}
 
 // serve sends one request to h and returns the response.
 func serve(h http.Handler, method, target, body string) *httptest.ResponseRecorder {
@@ -35,7 +46,7 @@ func TestHandler_StoreFailures(t *testing.T) {
 		"the track cannot be created": {
 			createErr:  map[string]error{"root.manifest": errDown},
 			wantCreate: http.StatusInternalServerError,
-			wantRecord: http.StatusInternalServerError,
+			wantRecord: http.StatusNotFound,
 			wantLogged: "open track",
 		},
 		"record cannot store its group": {
@@ -106,6 +117,7 @@ func TestHandler_History_StoreFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var logs bytes.Buffer
 			objects := &fakeStore{}
+			createTrack(t, objects, "/tracks/room/123/chat")
 			h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 			require.NoError(t, err)
 			require.Equal(t, http.StatusCreated, serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`).Code)
@@ -125,6 +137,7 @@ func TestHandler_History_StoreFailures(t *testing.T) {
 func TestHandler_Redact_DeleteFails(t *testing.T) {
 	var logs bytes.Buffer
 	objects := &fakeStore{}
+	createTrack(t, objects, "/tracks/room/123/chat")
 	h, err := NewHandler(objects, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	require.NoError(t, err)
 	posted := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
@@ -152,6 +165,7 @@ func TestHandler_Redact_DeleteFails(t *testing.T) {
 // history answers 500 rather than calling it redacted.
 func TestHandler_History_LostRecordIsNotRedacted(t *testing.T) {
 	objects := mem.New()
+	createTrack(t, objects, "/tracks/room/123/chat")
 	h, err := NewHandler(objects, Options{})
 	require.NoError(t, err)
 	posted := serve(h, http.MethodPost, "/tracks/room/123/chat", `"hello"`)
@@ -176,7 +190,7 @@ func TestHandler_History_UndecodableRecord(t *testing.T) {
 	objects := mem.New()
 	h, err := NewHandler(objects, Options{})
 	require.NoError(t, err)
-	tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"})
+	tr, _, err := h.open(t.Context(), Track{BroadcastPath: "/room/123", TrackName: "chat"}, true)
 	require.NoError(t, err)
 	_, err = tr.writer.Append(t.Context(), 0, []byte(`not a record`))
 	require.NoError(t, err)

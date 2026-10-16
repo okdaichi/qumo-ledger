@@ -96,12 +96,14 @@ type Record struct {
 type Access int
 
 const (
-	// Write creates a track or records into it.
+	// Write records into a track that exists.
 	Write Access = iota
 	// Read reads a track's history.
 	Read
 	// Redact takes a record out of a track.
 	Redact
+	// Create creates a track.
+	Create
 )
 
 // Limit bounds how fast records arrive: Rate per second on average, and up to
@@ -168,8 +170,8 @@ type Options struct {
 //	GET    /tracks/{broadcast path}/{track name}  read the newest records, or those ?before= a group
 //	DELETE /tracks/{broadcast path}/{track name}  redact the record of the group ?group= names
 //
-// A record creates its track too; PUT is for a track that should exist before
-// its first record. A record sent with an Idempotency-Key header is stored once
+// A track is created by PUT, and a record into a track that does not exist is
+// answered 404. A record sent with an Idempotency-Key header is stored once
 // per sender and track: a retry with the same key is answered as the first was.
 type Handler struct {
 	store store.Store
@@ -248,11 +250,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveCreate creates the request's track when it does not exist: 201 when it
 // did not, 204 when it did.
 func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
-	t, _, ok := h.resolve(w, r, Write)
+	t, _, ok := h.resolve(w, r, Create)
 	if !ok {
 		return
 	}
-	tr, created, err := h.open(r.Context(), t)
+	tr, created, err := h.open(r.Context(), t, true)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
@@ -302,7 +304,11 @@ func (h *Handler) serveRecord(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, "encode record", err)
 		return
 	}
-	tr, _, err := h.open(r.Context(), t)
+	tr, _, err := h.open(r.Context(), t, false)
+	if errors.Is(err, ledger.ErrTrackNotFound) {
+		http.Error(w, "no such track", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
@@ -397,7 +403,7 @@ func (h *Handler) serveRedact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tr, _, err := h.open(r.Context(), t)
+	tr, _, err := h.open(r.Context(), t, false)
 	if err != nil {
 		h.internalError(w, r, "open track", err)
 		return
@@ -611,11 +617,12 @@ func (h *Handler) resolve(w http.ResponseWriter, r *http.Request, access Access)
 	return Track{}, "", false
 }
 
-// open returns the track's writer, creating the track when it does not exist
-// and reporting whether it did. The caller holds the track until it calls
+// open returns the track's writer. With create it creates the track when it
+// does not exist and reports whether it did; without, a track that does not
+// exist is [ledger.ErrTrackNotFound]. The caller holds the track until it calls
 // release. Opening reads the store, so it runs without h.mu; when two requests
 // open the same track at once, the first to finish is kept.
-func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
+func (h *Handler) open(ctx context.Context, t Track, create bool) (*track, bool, error) {
 	key := t.Path()
 	h.mu.Lock()
 	h.closeIdle(time.Now())
@@ -628,18 +635,20 @@ func (h *Handler) open(ctx context.Context, t Track) (*track, bool, error) {
 		return tr, false, nil
 	}
 
-	created := true
-	_, err := ledger.Create(ctx, h.store, key, ledger.TrackSchema{
-		Timescale:  timescale,
-		TimeSource: ledger.TimeSourceIngest,
-		MIME:       MIME,
-		Encoding:   Encoding,
-	}, h.opts.Config)
-	switch {
-	case errors.Is(err, ledger.ErrTrackExists):
-		created = false
-	case err != nil:
-		return nil, false, err
+	created := false
+	if create {
+		_, err := ledger.Create(ctx, h.store, key, ledger.TrackSchema{
+			Timescale:  timescale,
+			TimeSource: ledger.TimeSourceIngest,
+			MIME:       MIME,
+			Encoding:   Encoding,
+		}, h.opts.Config)
+		switch {
+		case err == nil:
+			created = true
+		case !errors.Is(err, ledger.ErrTrackExists):
+			return nil, false, err
+		}
 	}
 	lt, err := ledger.Open(ctx, h.store, key, h.opts.Config)
 	if err != nil {
