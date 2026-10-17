@@ -346,5 +346,4 @@ Named so they are choices rather than oversights.
 | **Frame index footers** | Sealed-only writes make a per-group frame index *possible*, unlike live systems. Skipped so payloads stay byte-identical to the MoQT group stream, which keeps egress a zero-transform read. |
 | **MSF view** | The manifest carries what a Media Source Framework presentation needs, as it does for HLS and DASH (decision 14); like them, it would be rendered outside this module. |
 | **MoQT adapter** | Belongs in a `moqtstore` package; the only place that parses frames. |
-| **S3 backend** | The interface is deliberately shaped around what S3 offers: conditional create and conditional overwrite. |
 | **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. A `version` field is what lets this be revisited. |
