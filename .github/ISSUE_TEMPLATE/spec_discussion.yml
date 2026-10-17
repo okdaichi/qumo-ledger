@@ -70,7 +70,6 @@ body:
       options:
         - label: "Storage Format"
         - label: "Readers / Writers"
-        - label: "HLS / DASH Rendering"
         - label: "Store Backends"
         - label: "Concurrency / Recovery"
         - label: "Time (media / wallclock)"

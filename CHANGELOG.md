@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.
 - **ledger/store:** Built-in store backends (`mem`, `fs`, `bucket`, `db`) implement `fmt.Stringer` for clean startup logging.
 
+### Removed
+
+- **stream, fmp4:** The HLS/DASH renderer, the fragmented-MP4 helpers and `examples/stream-server`; they live on in qumo (`internal/hls/stream`, `internal/fmp4`), their only user.
+
 ## [0.4.0] - 2026-10-16
 
 ### Changed
