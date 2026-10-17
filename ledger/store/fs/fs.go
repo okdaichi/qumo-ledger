@@ -46,6 +46,7 @@ type Store struct {
 var (
 	_ store.Store  = (*Store)(nil)
 	_ store.Lister = (*Store)(nil)
+	_ fmt.Stringer = (*Store)(nil)
 )
 
 // New returns a Store rooted at dir, creating dir if it does not exist.
@@ -59,6 +60,9 @@ func New(dir string) (*Store, error) {
 
 // String implements [fmt.Stringer], describing the store for logs.
 func (s *Store) String() string {
+	if s == nil {
+		return "<nil>"
+	}
 	slashed := filepath.ToSlash(s.root)
 	if filepath.IsAbs(s.root) {
 		if !strings.HasPrefix(slashed, "/") {

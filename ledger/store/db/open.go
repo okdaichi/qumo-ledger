@@ -25,12 +25,7 @@ const (
 func init() {
 	for _, scheme := range []string{Scheme, SchemeAlias} {
 		store.Register(scheme, func(ctx context.Context, u *url.URL) (store.Store, error) {
-			s, err := Open(ctx, u.String())
-			if err != nil {
-				return nil, err
-			}
-			s.uri = u.Redacted()
-			return s, nil
+			return Open(ctx, u.String())
 		})
 	}
 }
@@ -50,6 +45,9 @@ func Open(ctx context.Context, uri string) (*Store, error) {
 	if err != nil {
 		_ = db.Close() // not actionable: the error from New is the one to report
 		return nil, err
+	}
+	if u, err := url.Parse(uri); err == nil {
+		s.uri = u.Redacted()
 	}
 	return s, nil
 }

@@ -71,6 +71,7 @@ type Store struct {
 var (
 	_ store.Store  = (*Store)(nil)
 	_ store.Lister = (*Store)(nil)
+	_ fmt.Stringer = (*Store)(nil)
 )
 
 // New returns a Store over the bucket cfg names. It sends no request.
@@ -124,6 +125,9 @@ func New(cfg Config) (*Store, error) {
 
 // String implements [fmt.Stringer], describing the store for logs.
 func (s *Store) String() string {
+	if s == nil {
+		return "<nil>"
+	}
 	if s.uri != "" {
 		return s.uri
 	}
