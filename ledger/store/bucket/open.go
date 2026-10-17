@@ -28,7 +28,12 @@ func init() {
 		if err != nil {
 			return nil, fmt.Errorf("bucket: %q: %w", u.Redacted(), err)
 		}
-		return New(cfg)
+		s, err := New(cfg)
+		if err != nil {
+			return nil, err
+		}
+		s.uri = u.Redacted()
+		return s, nil
 	})
 }
 

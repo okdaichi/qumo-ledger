@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.
+- **ledger/store:** Built-in store backends (`mem`, `fs`, `bucket`, `db`) implement `fmt.Stringer` for clean startup logging.
+
 ## [0.4.0] - 2026-10-16
 
 ### Changed

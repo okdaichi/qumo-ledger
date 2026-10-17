@@ -46,6 +46,9 @@ func Open(ctx context.Context, uri string) (*Store, error) {
 		_ = db.Close() // not actionable: the error from New is the one to report
 		return nil, err
 	}
+	if u, err := url.Parse(uri); err == nil {
+		s.uri = u.Redacted()
+	}
 	return s, nil
 }
 

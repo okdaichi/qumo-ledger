@@ -36,11 +36,20 @@ type object struct {
 var (
 	_ store.Store  = (*Store)(nil)
 	_ store.Lister = (*Store)(nil)
+	_ fmt.Stringer = (*Store)(nil)
 )
 
 // New returns an empty Store.
 func New() *Store {
 	return &Store{objects: make(map[string]object)}
+}
+
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	if s == nil {
+		return "<nil>"
+	}
+	return "memory (lost on exit)"
 }
 
 // Get implements [store.Store].

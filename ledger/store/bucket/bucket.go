@@ -65,11 +65,13 @@ type Store struct {
 	bucket *url.URL
 	prefix string
 	signer signer
+	uri    string
 }
 
 var (
 	_ store.Store  = (*Store)(nil)
 	_ store.Lister = (*Store)(nil)
+	_ fmt.Stringer = (*Store)(nil)
 )
 
 // New returns a Store over the bucket cfg names. It sends no request.
@@ -98,7 +100,9 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	prefix := strings.Trim(cfg.Prefix, "/")
+	uriPrefix := ""
 	if prefix != "" {
+		uriPrefix = "/" + prefix
 		prefix += "/"
 	}
 	client := cfg.HTTPClient
@@ -109,6 +113,7 @@ func New(cfg Config) (*Store, error) {
 		client: client,
 		bucket: bucket,
 		prefix: prefix,
+		uri:    "s3://" + cfg.Bucket + uriPrefix,
 		signer: signer{
 			region:          cfg.Region,
 			accessKeyID:     cfg.AccessKeyID,
@@ -116,6 +121,17 @@ func New(cfg Config) (*Store, error) {
 			sessionToken:    cfg.SessionToken,
 		},
 	}, nil
+}
+
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	if s == nil {
+		return "<nil>"
+	}
+	if s.uri != "" {
+		return s.uri
+	}
+	return "s3"
 }
 
 // Get implements [store.Store].

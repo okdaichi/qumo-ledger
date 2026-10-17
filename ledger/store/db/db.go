@@ -39,12 +39,28 @@ var tableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type Store struct {
 	db    *sql.DB
 	table string
+	uri   string
 }
 
 var (
 	_ store.Store  = (*Store)(nil)
 	_ store.Lister = (*Store)(nil)
+	_ fmt.Stringer = (*Store)(nil)
 )
+
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	if s == nil {
+		return "<nil>"
+	}
+	if s.uri != "" {
+		return s.uri
+	}
+	if s.table != "" {
+		return "postgres:" + s.table
+	}
+	return "postgres:" + DefaultTable
+}
 
 // New returns a Store over table in db, creating the table if it does not
 // exist. An empty table means [DefaultTable]. The caller keeps ownership of db.
