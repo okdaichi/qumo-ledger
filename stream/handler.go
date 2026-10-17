@@ -40,6 +40,7 @@ type Handler struct {
 	window   int
 
 	epochWindow int
+	queryParam  string
 	logger      *slog.Logger
 }
 
@@ -106,6 +107,22 @@ type Options struct {
 	// the manifest.
 	EpochWindow int
 
+	// QueryParam, when set, names a query parameter of the manifest's URL,
+	// such as an access token ("jwt"), that clients carry onto every URL the
+	// manifest names, so a CDN or the origin can check each request while
+	// the manifest stays the same for every viewer, and so cacheable. The
+	// HLS playlist declares it with EXT-X-DEFINE:QUERYPARAM (protocol
+	// version 11) and appends name={$name} to each URI it serves; the DASH
+	// MPD carries UrlQueryInfo (ISO/IEC 23009-1 Annex I), which makes the
+	// client repeat the MPD URL's query on segment requests. An init segment
+	// at an external URL (InitSegment.URL) is left as given, since a signed
+	// URL would not survive another parameter.
+	//
+	// An HLS client refuses a playlist declaring a QUERYPARAM its URL
+	// lacks, so set it only where every manifest URL carries the parameter.
+	// It must be an HLS variable name: letters, digits, '-' and '_'.
+	QueryParam string
+
 	// Logger receives internal errors before they are answered with a generic
 	// 500. Those errors carry object keys and store paths, which do not belong
 	// in a response body — the log is where the detail survives. Nil means no
@@ -144,6 +161,9 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 	if requiresInit(info.TrackSchema) && opts.InitSegment.Bytes == nil && opts.InitSegment.URL == "" {
 		return nil, fmt.Errorf("%w: encoding %q", ErrInitRequired, info.TrackSchema.Encoding)
 	}
+	if opts.QueryParam != "" && !isVariableName(opts.QueryParam) {
+		return nil, fmt.Errorf("stream: query param %q is not an HLS variable name (letters, digits, '-', '_')", opts.QueryParam)
+	}
 
 	segExt := opts.SegmentExt
 	if segExt == "" {
@@ -174,8 +194,25 @@ func NewHandler(track *ledger.Track, opts Options) (*Handler, error) {
 		window:   opts.Window,
 
 		epochWindow: opts.EpochWindow,
+		queryParam:  opts.QueryParam,
 		logger:      logger,
 	}, nil
+}
+
+// isVariableName reports whether s is an HLS variable name: one or more
+// letters, digits, '-' or '_'.
+func isVariableName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ServeHTTP routes a request to the playlist, manifest, segment, or init handler.
@@ -465,6 +502,8 @@ func (h *Handler) renderOpts(window manifestWindow) renderOpts {
 	return renderOpts{
 		segExt:                h.segExt,
 		initURI:               h.initURI(),
+		initServed:            len(h.init.Bytes) > 0,
+		queryParam:            h.queryParam,
 		sliding:               h.window > 0,
 		mediaSequence:         window.dropped,
 		discontinuitySequence: window.discontinuities,

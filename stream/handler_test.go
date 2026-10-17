@@ -1109,3 +1109,53 @@ func TestHandler_ServeHTTP_CanceledRequestNotLogged(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 	assert.Empty(t, buf.String(), "routine client churn writes no record")
 }
+
+func TestNewHandler_QueryParam(t *testing.T) {
+	tests := map[string]struct {
+		param   string
+		wantErr bool
+	}{
+		"none":                 {},
+		"a variable name":      {param: "cdn-token_2"},
+		"a character it bars":  {param: "jwt=", wantErr: true},
+		"a space":              {param: "my token", wantErr: true},
+		"a substitution brace": {param: "{$jwt}", wantErr: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			fix := newTrackFixtureEncoding(t, "ts")
+
+			handler, err := NewHandler(fix.track, Options{QueryParam: tt.param})
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, handler)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, handler)
+		})
+	}
+}
+
+// The handler's playlist carries its query parameter onto the init segment
+// it serves and onto every segment.
+func TestHandler_ServeHTTP_QueryParam(t *testing.T) {
+	fix := newTrackFixture(t)
+	handler, err := NewHandler(fix.track, Options{InitSegment: testInit, QueryParam: "jwt"})
+	require.NoError(t, err)
+	segment := fix.metas[0].ID.String() + ".m4s"
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/track/playlist.m3u8?jwt=t", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `#EXT-X-DEFINE:QUERYPARAM="jwt"`)
+	assert.Contains(t, rec.Body.String(), `#EXT-X-MAP:URI="init.m4s?jwt={$jwt}"`)
+	assert.Contains(t, rec.Body.String(), segment+"?jwt={$jwt}")
+
+	served := httptest.NewRecorder()
+	handler.ServeHTTP(served, httptest.NewRequest(http.MethodGet, "/track/"+segment+"?jwt=t", nil))
+	assert.Equal(t, http.StatusOK, served.Code, "a segment URL with the query still resolves")
+	assert.Equal(t, fix.payload[0], served.Body.Bytes())
+}

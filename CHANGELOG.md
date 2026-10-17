@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.
 - **ledger/store:** Built-in store backends (`mem`, `fs`, `bucket`, `db`) implement `fmt.Stringer` for clean startup logging.
+- **stream:** `Options.QueryParam` carries a manifest URL's query parameter (an access token) onto every request: HLS playlists declare it with `EXT-X-DEFINE:QUERYPARAM` (version 11) and append it to the URIs the handler serves, DASH MPDs carry `UrlQueryInfo`, so manifests stay the same for every viewer.
 
 ## [0.4.0] - 2026-10-16
 

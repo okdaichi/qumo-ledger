@@ -29,8 +29,11 @@ func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts rende
 
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	b.WriteString(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" ` +
-		`type="dynamic" ` +
+	b.WriteString(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" `)
+	if opts.queryParam != "" {
+		b.WriteString(`xmlns:up="urn:mpeg:dash:schema:urlparam:2014" `)
+	}
+	b.WriteString(`type="dynamic" ` +
 		`profiles="urn:mpeg:dash:profile:isoff-live:2011"`)
 	if ast := dashAvailabilityStartTime(schema, groups); ast != "" {
 		fmt.Fprintf(&b, ` availabilityStartTime="%s"`, ast)
@@ -49,6 +52,14 @@ func renderDASH(schema ledger.TrackSchema, groups []ledger.GroupInfo, opts rende
 	b.WriteString(`  <Period id="0" start="PT0S">` + "\n")
 	fmt.Fprintf(&b, `    <AdaptationSet id="0" mimeType="%s" contentType="%s" segmentAlignment="true">`+"\n",
 		schema.MIME, dashContentType(schema.MIME))
+	if opts.queryParam != "" {
+		// Annex I URL parameters: the client repeats the MPD URL's query on
+		// its segment requests. Essential, so a client that can't honor it
+		// skips the set rather than fetching segments without the parameter.
+		b.WriteString(`      <EssentialProperty schemeIdUri="urn:mpeg:dash:urlparam:2014">` + "\n")
+		b.WriteString(`        <up:UrlQueryInfo queryTemplate="$querypart$" useMPDUrlQuery="true"/>` + "\n")
+		b.WriteString("      </EssentialProperty>\n")
+	}
 	b.WriteString(`      <Representation id="0">` + "\n")
 	fmt.Fprintf(&b, `        <SegmentList timescale="%d">`+"\n", schema.Timescale)
 	if opts.initURI != "" {

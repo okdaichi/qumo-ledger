@@ -230,3 +230,72 @@ func TestRenderDASH_ContentType(t *testing.T) {
 		})
 	}
 }
+
+// A query parameter is declared once and carried onto every URI the handler
+// serves, so the playlist is the same for every viewer.
+func TestRenderHLS_QueryParam(t *testing.T) {
+	groups := []ledger.GroupInfo{grp(ledger.NewGroupID(1, 0), 0, 180000, 0)}
+	tests := map[string]struct {
+		opts renderOpts
+		want string
+	}{
+		"a served init segment": {
+			opts: renderOpts{segExt: ".m4s", initURI: "init.m4s", initServed: true, queryParam: "jwt"},
+			want: `#EXTM3U
+#EXT-X-VERSION:11
+#EXT-X-DEFINE:QUERYPARAM="jwt"
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:EVENT
+#EXT-X-MAP:URI="init.m4s?jwt={$jwt}"
+#EXTINF:2.000,
+e000001-g00000000.m4s?jwt={$jwt}
+`,
+		},
+		// A signed URL would not survive another parameter.
+		"an external init segment": {
+			opts: renderOpts{segExt: ".m4s", initURI: "https://objects.example/init.m4s?sig=x", queryParam: "jwt"},
+			want: `#EXTM3U
+#EXT-X-VERSION:11
+#EXT-X-DEFINE:QUERYPARAM="jwt"
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:EVENT
+#EXT-X-MAP:URI="https://objects.example/init.m4s?sig=x"
+#EXTINF:2.000,
+e000001-g00000000.m4s?jwt={$jwt}
+`,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			body, err := renderHLS(testSchema, groups, tt.opts)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(body))
+		})
+	}
+}
+
+func TestRenderDASH_QueryParam(t *testing.T) {
+	groups := []ledger.GroupInfo{grp(ledger.NewGroupID(1, 0), 0, 180000, 0)}
+
+	body, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s", queryParam: "jwt"})
+
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `xmlns:up="urn:mpeg:dash:schema:urlparam:2014"`)
+	assert.Contains(t, string(body), `<EssentialProperty schemeIdUri="urn:mpeg:dash:urlparam:2014">`)
+	assert.Contains(t, string(body), `<up:UrlQueryInfo queryTemplate="$querypart$" useMPDUrlQuery="true"/>`)
+	assert.Contains(t, string(body), `<SegmentURL media="e000001-g00000000.m4s"/>`, "the client adds the query; the MPD lists plain URLs")
+	assert.NoError(t, xml.Unmarshal(body, new(struct{})), "still well-formed XML, the prefix declared")
+}
+
+// Without a query parameter neither manifest changes.
+func TestRenderDASH_NoQueryParam(t *testing.T) {
+	groups := []ledger.GroupInfo{grp(ledger.NewGroupID(1, 0), 0, 180000, 0)}
+
+	body, err := renderDASH(testSchema, groups, renderOpts{segExt: ".m4s"})
+
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "urlparam")
+}
