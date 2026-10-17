@@ -43,6 +43,11 @@ func New() *Store {
 	return &Store{objects: make(map[string]object)}
 }
 
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	return "memory (lost on exit)"
+}
+
 // Get implements [store.Store].
 func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	if err := ctx.Err(); err != nil {

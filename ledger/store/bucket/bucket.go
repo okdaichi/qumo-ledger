@@ -65,6 +65,7 @@ type Store struct {
 	bucket *url.URL
 	prefix string
 	signer signer
+	uri    string
 }
 
 var (
@@ -98,7 +99,9 @@ func New(cfg Config) (*Store, error) {
 	}
 
 	prefix := strings.Trim(cfg.Prefix, "/")
+	uriPrefix := ""
 	if prefix != "" {
+		uriPrefix = "/" + prefix
 		prefix += "/"
 	}
 	client := cfg.HTTPClient
@@ -109,6 +112,7 @@ func New(cfg Config) (*Store, error) {
 		client: client,
 		bucket: bucket,
 		prefix: prefix,
+		uri:    "s3://" + cfg.Bucket + uriPrefix,
 		signer: signer{
 			region:          cfg.Region,
 			accessKeyID:     cfg.AccessKeyID,
@@ -116,6 +120,14 @@ func New(cfg Config) (*Store, error) {
 			sessionToken:    cfg.SessionToken,
 		},
 	}, nil
+}
+
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	if s.uri != "" {
+		return s.uri
+	}
+	return "s3"
 }
 
 // Get implements [store.Store].

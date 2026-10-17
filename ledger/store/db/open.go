@@ -25,7 +25,12 @@ const (
 func init() {
 	for _, scheme := range []string{Scheme, SchemeAlias} {
 		store.Register(scheme, func(ctx context.Context, u *url.URL) (store.Store, error) {
-			return Open(ctx, u.String())
+			s, err := Open(ctx, u.String())
+			if err != nil {
+				return nil, err
+			}
+			s.uri = u.Redacted()
+			return s, nil
 		})
 	}
 }

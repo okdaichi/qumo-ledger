@@ -57,6 +57,18 @@ func New(dir string) (*Store, error) {
 	return &Store{root: dir}, nil
 }
 
+// String implements [fmt.Stringer], describing the store for logs.
+func (s *Store) String() string {
+	slashed := filepath.ToSlash(s.root)
+	if filepath.IsAbs(s.root) {
+		if !strings.HasPrefix(slashed, "/") {
+			slashed = "/" + slashed
+		}
+		return "file://" + slashed
+	}
+	return "file:" + slashed
+}
+
 // Get implements [store.Store].
 func (s *Store) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
 	if err := ctx.Err(); err != nil {
