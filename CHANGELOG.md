@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **ledger:** `OpenStore(ctx, uri)` opens a store by URI with every built-in backend registered (`mem`, `file`, `s3`, `postgres`).
+- **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.
 - **ledger/store:** Built-in store backends (`mem`, `fs`, `bucket`, `db`) implement `fmt.Stringer` for clean startup logging.
 
 ## [0.4.0] - 2026-10-16

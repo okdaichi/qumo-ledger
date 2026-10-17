@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/okdaichi/qumo-ledger/ledger"
+	_ "github.com/okdaichi/qumo-ledger/ledger"
 	"github.com/okdaichi/qumo-ledger/ledger/store"
 	"github.com/okdaichi/qumo-ledger/ledger/store/bucket"
 	"github.com/okdaichi/qumo-ledger/ledger/store/db"
@@ -16,9 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenStore(t *testing.T) {
+func TestStore_Open(t *testing.T) {
 	t.Run("MemoryEmpty", func(t *testing.T) {
-		s, err := ledger.OpenStore(t.Context(), "")
+		s, err := store.Open(t.Context(), "")
 		require.NoError(t, err)
 		assert.IsType(t, &mem.Store{}, s)
 		assert.Equal(t, "memory (lost on exit)", fmt.Sprint(s))
@@ -28,7 +28,7 @@ func TestOpenStore(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "ledger")
 		uri := (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(dir)}).String()
 
-		s, err := ledger.OpenStore(t.Context(), uri)
+		s, err := store.Open(t.Context(), uri)
 		require.NoError(t, err)
 		assert.IsType(t, &fs.Store{}, s)
 		assert.Contains(t, fmt.Sprint(s), "file://")
@@ -38,7 +38,7 @@ func TestOpenStore(t *testing.T) {
 		tempDir := t.TempDir()
 		t.Chdir(tempDir)
 
-		s, err := ledger.OpenStore(t.Context(), "file:ledger")
+		s, err := store.Open(t.Context(), "file:ledger")
 		require.NoError(t, err)
 		assert.IsType(t, &fs.Store{}, s)
 		assert.Equal(t, "file:ledger", fmt.Sprint(s))
@@ -74,19 +74,17 @@ func TestOpenStore(t *testing.T) {
 	})
 
 	t.Run("RegistersEveryBackend", func(t *testing.T) {
-		_, err := ledger.OpenStore(t.Context(), "")
-		require.NoError(t, err)
 		assert.Subset(t, store.Schemes(), []string{"file", "mem", "postgres", "postgresql", "s3"})
 	})
 
 	t.Run("UnknownScheme", func(t *testing.T) {
-		_, err := ledger.OpenStore(t.Context(), "unknown://host/dir")
+		_, err := store.Open(t.Context(), "unknown://host/dir")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, store.ErrUnknownScheme)
 	})
 
 	t.Run("InvalidURI", func(t *testing.T) {
-		_, err := ledger.OpenStore(t.Context(), "://invalid")
+		_, err := store.Open(t.Context(), "://invalid")
 		require.Error(t, err)
 	})
 }
