@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **stream, fmp4:** The HLS/DASH renderer and the fragmented-MP4 helpers moved to qumo (`internal/hls/stream`, `internal/fmp4`), their only user; the ledger is a store of tracks and groups. `examples/stream-server` is gone with them.
+
 ### Added
 
 - **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.

@@ -137,12 +137,11 @@ probes forward and catches up.
 
 ## Examples
 
-This repository is a library and ships no binaries. Two runnable examples live
-under `examples/` — reference code, not supported tools:
+This repository is a library and ships no binaries. A runnable example lives
+under `examples/` — reference code, not a supported tool:
 
 ```bash
 go run ./examples/inspect-follow inspect -root /var/lib/qumo-ledger -track live/cam1/video -groups
-go run ./examples/stream-server    -root /var/lib/qumo-ledger -track live/cam1/video   # HLS (.m3u8) + DASH (.mpd)
 ```
 
 A supported client CLI for accessing a ledger lives in a separate repository.
@@ -158,9 +157,11 @@ A supported client CLI for accessing a ledger lives in a separate repository.
 | `ledger/store/db` | PostgreSQL / CockroachDB backend: one table, one row per object. |
 | `ledger/store/bucket` | Amazon S3 / S3-compatible backend over conditional PUTs. |
 | `ledger/store/storetest` | Conformance suite every backend must pass. |
-| `stream` | HLS and DASH renderers over a ledger track — derived views, served over HTTP. |
 | `ingest` | Record over HTTP: senders POST JSON records to a track's URL, `/tracks/room/123/chat`, read them back with GET, and redact one with DELETE. Authorization and live delivery are hooks. |
-| `examples/` | Runnable examples (a reference reader; a dev HLS/DASH server). Not supported entrypoints. |
+| `examples/` | A runnable example (a reference reader). Not a supported entrypoint. |
+
+HLS and DASH are views over a track that live with whoever serves them: qumo's
+HLS egress renders them from the ledger's public reader API.
 
 ## Development
 

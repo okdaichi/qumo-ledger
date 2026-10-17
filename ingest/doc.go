@@ -1,9 +1,7 @@
 // Package ingest accepts records over HTTP, appends them to [ledger] tracks,
 // and reads them back.
 //
-// It is the inbound counterpart of the stream package: stream renders a track
-// over HTTP, ingest fills one. A [Handler] is an [http.Handler] over a
-// [store.Store].
+// A [Handler] is an [http.Handler] over a [store.Store].
 //
 // # Tracks and records
 //

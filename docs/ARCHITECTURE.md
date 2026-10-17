@@ -309,8 +309,10 @@ package hides its format.
 
 ## 14. HLS and DASH are derived views, served from the manifest
 
-The `stream` package renders a track as HLS and DASH without the core knowing
-either format — decision 3 made them derived views, and this is that view. A
+A renderer outside this module turns a track into HLS and DASH without the
+core knowing either format — decision 3 made them derived views. qumo's HLS
+egress is that renderer (it began here as the `stream` package and moved out,
+so this module stays a store). A
 Group is one segment; `Duration` is HLS `EXTINF` and DASH `@d`; a new producer
 epoch is an HLS `#EXT-X-DISCONTINUITY` and a DASH timeline reset; a wallclock
 anchor is `#EXT-X-PROGRAM-DATE-TIME` and the MPD `availabilityStartTime`. Both
@@ -324,8 +326,8 @@ and it belongs on the core because every renderer and every external serving too
 needs the same honest resolution.
 
 **Why delivery stays out of the core.** Proxying is the dev default; redirecting
-to signed object URLs is the production path (decision 10). Both are a
-`stream`-layer concern — a `SegmentResolver` — so the store stays free of a
+to signed object URLs is the production path (decision 10). Both are the
+renderer's concern, so the store stays free of a
 presigning method it could not implement uniformly, and the core never sees a
 delivery strategy.
 
