@@ -340,10 +340,10 @@ so this module stays a store and its public reader API is the whole contract.
 A track with `Encoding: "moq-lite-05"` stores each group as its frames, the
 FRAME messages of draft-lcurley-moq-lite-05 (section 7.18) concatenated as they
 follow the GROUP header on a group stream: a zigzag timestamp delta (the first
-frame from 0), a length, the payload. The writer encodes them with its MoQ
-implementation's own FRAME codec — the one already on its wire — and the core
-still never parses a payload (decision 1): the encoding is a name and a
-convention, not code here.
+frame from 0), a length, the payload. The writer encodes them from the frames
+it received — each frame's timestamp and payload — and the core still never
+parses a payload (decision 1): the encoding is a name and a convention, not
+code here.
 
 **Why the wire form.** It is what the ledger was meant to hold all along —
 byte-identical to the MoQ group, so a MoQ replay is a zero-transform read — and
