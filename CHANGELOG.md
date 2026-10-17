@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **ledger:** Importing ledger registers every built-in backend (`mem`, `file`, `s3`, `postgres`) for `store.Open`.
 - **ledger/store:** Built-in store backends (`mem`, `fs`, `bucket`, `db`) implement `fmt.Stringer` for clean startup logging.
+- **docs:** The `moq-lite-05` encoding (ARCHITECTURE decision 15): a group payload is the group's draft-lcurley-moq-lite-05 FRAME messages, a MoQ track is stored at its broadcast path plus track name, and the writer states the last frame's duration.
 
 ### Removed
 

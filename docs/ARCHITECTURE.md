@@ -335,6 +335,44 @@ so this module stays a store and its public reader API is the whole contract.
 
 ---
 
+## 15. A MoQ group is stored as its moq-lite FRAME messages
+
+A track with `Encoding: "moq-lite-05"` stores each group as its frames, the
+FRAME messages of draft-lcurley-moq-lite-05 (section 7.18) concatenated as they
+follow the GROUP header on a group stream: a zigzag timestamp delta (the first
+frame from 0), a length, the payload. The writer encodes them with its MoQ
+implementation's own FRAME codec — the one already on its wire — and the core
+still never parses a payload (decision 1): the encoding is a name and a
+convention, not code here.
+
+**Why the wire form.** It is what the ledger was meant to hold all along —
+byte-identical to the MoQ group, so a MoQ replay is a zero-transform read — and
+what decision 9's provenance note already counts on: media time from the first
+frame's timestamp, duration from the deltas. HLS, DASH, MSF are views derived on
+read by whoever serves them (decision 14). Storing a format shaped for one of
+them, as the HLS egress once stored CMAF fragments, would make every other view
+transcode out of it.
+
+**Why named after the draft.** No open spec defines a store for MoQ media: the
+one file format proposed, draft-jennings-moq-file, targets MOQT objects and keeps
+a metadata record per object, which decision 9 rejects. The frame layout is
+specified, though, so the encoding names the spec it follows. A later draft that
+changes the layout is a new encoding, never a redefinition of this one.
+
+**Why the writer states the last frame's duration.** A group's frames say when
+its last frame starts, not when it ends. Guessing — say, from the mean of the
+others — would put an estimate where decision 9 wants a measurement, and the
+next group cannot be waited for. So the writer supplies it when it fills in
+`GroupInfo`: a frame interval for video, an audio frame's samples, zero for
+records. `Duration` then runs from the earliest timestamp to the end of the
+frame presented last, which with reordered pictures (B-frames) is not the frame
+decoded last.
+
+**Consequence.** A MoQ broadcast is a set of tracks under one path: each track
+of the broadcast is the ledger track at the broadcast path plus its MoQ track
+name, so the MSF catalog lands at `<broadcast>/catalog` with no rule of its
+own, one group per catalog update.
+
 ## Deferred
 
 Named so they are choices rather than oversights.
@@ -343,7 +381,6 @@ Named so they are choices rather than oversights.
 |---|---|
 | **Garbage collection** | Orphaned group objects are identifiable via `Lister`; no policy engine yet. |
 | **Retention** | No time- or size-based expiry. |
-| **Frame index footers** | Sealed-only writes make a per-group frame index *possible*, unlike live systems. Skipped so payloads stay byte-identical to the MoQT group stream, which keeps egress a zero-transform read. |
+| **Frame index footers** | Sealed-only writes make a per-group frame index *possible*, unlike live systems. Skipped so payloads stay byte-identical to the MoQ group stream (decision 15), which keeps egress a zero-transform read; every view reads whole groups. |
 | **MSF view** | The manifest carries what a Media Source Framework presentation needs, as it does for HLS and DASH (decision 14); like them, it would be rendered outside this module. |
-| **MoQT adapter** | Belongs in a `moqtstore` package; the only place that parses frames. |
 | **Manifest encoding** | JSON, because manifests are small, read far less often than payloads, and being able to inspect a broken track in a text editor is worth more than the bytes. A `version` field is what lets this be revisited. |
